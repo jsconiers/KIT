@@ -16,6 +16,8 @@ It's named for KITT from Knight Rider: loyal, a little dry, and willing to warn 
   preferences.
 - `bin/todo`: a command-line to-do list that shares `QUEUE.md` with Kit.
 - `doctor.py`: a health check for the install, the schedules, the notes, and secrets.
+- `dashboard.py`: a one-page dashboard of the to-do list, briefs, health, and runs.
+- `reminders_sync.py`: keeps the to-do list in Apple Reminders, so it's on your phone.
 - `protect_folder.py`: keeps Kit out of your personal notes inside work folders.
 - `morning/`: scheduled runs (a morning brief, a post-open market read, and a weekly review)
   that text you through Messages.
@@ -34,12 +36,13 @@ yourself."
 
 ## Extras
 
-To-do command and health check:
+To-do command, health check, dashboard, and Reminders sync:
 
 ```bash
 mkdir -p ~/Claude/Agents/kit/.install/bin
-cp bin/todo doctor.py protect_folder.py ~/Claude/Agents/kit/.install/
-ln -s ~/Claude/Agents/kit/.install/todo ~/.local/bin/todo
+cp bin/todo ~/Claude/Agents/kit/.install/bin/
+cp doctor.py protect_folder.py dashboard.py reminders_sync.py ~/Claude/Agents/kit/.install/
+ln -s ~/Claude/Agents/kit/.install/bin/todo ~/.local/bin/todo
 python3 ~/Claude/Agents/kit/.install/doctor.py
 ```
 
@@ -49,7 +52,7 @@ Scheduled runs (macOS launchd):
 mkdir -p ~/Claude/Agents/kit/.install/morning
 cp morning/run.sh morning/prompt*.md ~/Claude/Agents/kit/.install/morning/
 cp morning/config.example ~/Claude/Agents/kit/.install/morning/config   # then edit it
-for job in morning open weekly; do
+for job in morning open weekly sync; do
   sed -e "s|{{HOME}}|$HOME|g" -e "s|{{USER}}|$USER|g" morning/com.USER.kit.$job.plist.template \
     > ~/Library/LaunchAgents/com.$USER.kit.$job.plist
   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.$USER.kit.$job.plist

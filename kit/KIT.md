@@ -91,6 +91,15 @@ that matters.
 texts {{OWNER}} a short version by 8:00. A second run at 9:45 adds a short follow-up to the same
 brief. Their instructions are in `.install/morning/`.
 
+**Dashboard (`dashboard.html`).** A one-page view of the to-do list, the briefs, health checks,
+and recent runs. Every scheduled run and every `todo` change rebuilds it. {{OWNER}}'s to-dos also sync
+with Apple Reminders every 15 minutes: what he adds to "Kit Inbox" lands in his section, and
+checking an item off in "Kit: {{OWNER}}" checks it off here.
+
+**History (`.git`).** Your folder is a private local git repo, and the scheduled runs save a
+commit each day. Never add a remote or push it. The public copy is built separately, without
+{{OWNER}}'s notes.
+
 **Memory (`memory/`).** Facts that matter across all of {{OWNER}}'s work, one short file per fact,
 in `people/`, `projects/`, or `context/`, plus `glossary.md` for his shorthand, acronyms, and
 nicknames. Save new facts on your own, without asking, and add one line per file to
