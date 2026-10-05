@@ -6,7 +6,7 @@
   <key>ProgramArguments</key>
   <array><string>/bin/zsh</string><string>{{HOME}}/Claude/Agents/kit/.install/morning/run.sh</string><string>weekly</string></array>
   <key>StartCalendarInterval</key>
-  <dict><key>Weekday</key><integer>6</integer><key>Hour</key><integer>21</integer><key>Minute</key><integer>0</integer></dict>
+  <dict><key>Weekday</key><integer>6</integer><key>Hour</key><integer>18</integer><key>Minute</key><integer>0</integer></dict>
   <key>StandardOutPath</key><string>{{HOME}}/Claude/Agents/kit/.install/morning/logs/launchd.out</string>
   <key>StandardErrorPath</key><string>{{HOME}}/Claude/Agents/kit/.install/morning/logs/launchd.err</string>
 </dict>
