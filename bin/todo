@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+"""todo: your and Kit's running to-do list (~/Claude/Agents/kit/QUEUE.md).
+
+  todo                          show your items, Kit's items, and what's waiting
+  todo Call the dentist fri           add an item for you, due Friday (the due date is optional)
+  todo kit Draft the agenda     add an item for Kit
+  todo done 3                   check off your item 3
+  todo kit done 2               check off Kit's item 2
+
+Due dates: today, tomorrow, mon through sun, 12-Oct, 12-Oct-2026, or 2026-10-12.
+"""
+import datetime as dt
+import os
+import pathlib
+import re
+import subprocess
+import sys
+
+KIT = pathlib.Path.home() / "Claude/Agents/kit"
+QUEUE = KIT / "QUEUE.md"
+CONFIG = KIT / ".install/morning/config"
+DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+FULL = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+TODAY = dt.date.today()
+
+
+def owner():
+    if CONFIG.exists():
+        m = re.search(r'^OWNER_NAME="?([^"\n]+)"?', CONFIG.read_text(), re.M)
+        if m:
+            return m.group(1).strip()
+    return "Owner"
+
+
+def fmt(d):
+    return d.strftime("%d-%b-%Y")
+
+
+def parse_due(tok):
+    t = tok.lower().rstrip(".,")
+    if t == "today":
+        return TODAY
+    if t == "tomorrow":
+        return TODAY + dt.timedelta(days=1)
+    if t in DAYS or t in FULL:
+        return TODAY + dt.timedelta(days=(DAYS.index(t[:3]) - TODAY.weekday()) % 7)
+    for pattern in ("%d-%b-%Y", "%Y-%m-%d"):
+        try:
+            return dt.datetime.strptime(tok, pattern).date()
+        except ValueError:
+            pass
+    try:
+        d = dt.datetime.strptime(f"{tok}-{TODAY.year}", "%d-%b-%Y").date()
+        return d if d >= TODAY - dt.timedelta(days=30) else d.replace(year=d.year + 1)
+    except ValueError:
+        return None
+
+
+def heads(lines):
+    return {ln[3:].strip(): i for i, ln in enumerate(lines) if ln.startswith("## ")}
+
+
+def items(lines, name):
+    """Open items in a section, as (start, end) line ranges that include sub-bullets."""
+    h = heads(lines)
+    if name not in h:
+        return []
+    end = min([i for i in h.values() if i > h[name]] + [len(lines)])
+    found, i = [], h[name] + 1
+    while i < end:
+        if lines[i].startswith("- [ ]"):
+            j = i + 1
+            while j < end and lines[j].startswith("  "):
+                j += 1
+            found.append((i, j))
+            i = j
+        else:
+            i += 1
+    return found
+
+
+def save(lines):
+    tmp = QUEUE.with_suffix(".tmp")
+    tmp.write_text("\n".join(lines).rstrip("\n") + "\n")
+    os.replace(tmp, QUEUE)
+    for helper in ("dashboard.py",):
+        script = KIT / ".install" / helper
+        if script.exists():
+            subprocess.run([sys.executable, str(script)], capture_output=True)
+
+
+def show():
+    lines = QUEUE.read_text().splitlines()
+    for name, label in ((owner(), owner()), ("Kit", "Kit"), ("Waiting on others", "Waiting on others")):
+        found = items(lines, name)
+        print(f"\n{label} ({len(found)})")
+        for n, (i, _) in enumerate(found, 1):
+            text = lines[i][6:]
+            due = re.search(r"due (\d{2}-\w{3}-\d{4})", text)
+            flag = ""
+            if due:
+                d = dt.datetime.strptime(due.group(1), "%d-%b-%Y").date()
+                flag = "  << OVERDUE" if d < TODAY else ("  << today" if d == TODAY else "")
+            print(f"  {n}. {text.replace('**', '')}{flag}")
+    print()
+
+
+def add(section, words):
+    due = parse_due(words[-1]) if len(words) > 1 else None
+    title = " ".join(words[:-1] if due else words).strip()
+    if not title:
+        sys.exit("Nothing to add.")
+    lines = QUEUE.read_text().splitlines()
+    h = heads(lines)
+    if section not in h:
+        sys.exit(f"QUEUE.md has no '## {section}' section.")
+    found = items(lines, section)
+    at = found[-1][1] if found else h[section] + 1
+    entry = f"- [ ] **{title}**" + (f": due {fmt(due)}" if due else "") + f" (added {fmt(TODAY)})"
+    lines.insert(at, entry)
+    save(lines)
+    print(f"Added for {section}: {title}" + (f", due {fmt(due)}" if due else ""))
+
+
+def done(section, number):
+    lines = QUEUE.read_text().splitlines()
+    found = items(lines, section)
+    if not 1 <= number <= len(found):
+        sys.exit(f"No item {number}. Run `todo` to see the numbers.")
+    i, j = found[number - 1]
+    block = lines[i:j]
+    m = re.match(r"- \[ \] \*\*(.+?)\*\*(.*)", block[0])
+    title, rest = (m.group(1), m.group(2)) if m else (block[0][6:], "")
+    added = re.search(r"added (\d{2}-\w{3}-\d{4})", rest)
+    first = (f"- [x] **{title}**: {section}, done {fmt(TODAY)}"
+             + (f" (added {added.group(1)})" if added else ""))
+    del lines[i:j]
+    h = heads(lines)
+    if "Done" not in h:
+        lines += ["", "## Done"]
+        h = heads(lines)
+    at = h["Done"] + 1
+    lines[at:at] = [first] + block[1:]
+    save(lines)
+    print(f"Done: {title}")
+
+
+def main(argv):
+    if not QUEUE.exists():
+        sys.exit(f"Can't find {QUEUE}")
+    section = owner()
+    if argv and argv[0].lower() == "kit":
+        section, argv = "Kit", argv[1:]
+    if not argv:
+        return show()
+    if argv[0] in ("-h", "--help", "help"):
+        return print(__doc__)
+    if argv[0].lower() == "done":
+        if len(argv) != 2 or not argv[1].isdigit():
+            sys.exit("Usage: todo done <number>")
+        return done(section, int(argv[1]))
+    return add(section, argv)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

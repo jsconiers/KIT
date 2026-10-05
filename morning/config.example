@@ -1,0 +1,9 @@
+# Kit's run settings. Copy to ~/Claude/Agents/kit/.install/morning/config and edit.
+OWNER_NAME="Alex"
+# Where Kit texts the briefs (iMessage). It tries these in order.
+IMESSAGE_TO="+15555550123"
+IMESSAGE_TO_ALT="you@example.com"
+# Days with no morning or open run (date +%u: 1 = Monday ... 7 = Sunday), space-separated.
+SKIP_DAYS=""
+# Tools the unattended runs may never call, space-separated.
+BLOCK_TOOLS=""
