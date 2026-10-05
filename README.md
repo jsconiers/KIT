@@ -18,6 +18,9 @@ It's named for KITT from Knight Rider: loyal, a little dry, and willing to warn 
 - `doctor.py`: a health check for the install, the schedules, the notes, and secrets.
 - `dashboard.py`: a one-page dashboard of the to-do list, briefs, health, and runs.
 - `reminders_sync.py`: keeps the to-do list in Apple Reminders, so it's on your phone.
+- `calendar/`: kitcal, a calendar tool on EventKit that never touches excluded calendars and
+  never changes events with attendees. Copy it to `~/Claude/Agents/kit/.install/calendar/`,
+  add a `config.json`, and run `zsh build.sh` there.
 - `protect_folder.py`: keeps Kit out of your personal notes inside work folders.
 - `morning/`: scheduled runs (a morning brief, a post-open market read, and a weekly review)
   that text you through Messages.

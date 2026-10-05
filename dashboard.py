@@ -8,6 +8,7 @@ The scheduled runs and the todo command rebuild it; the page reloads itself ever
 """
 import datetime as dt
 import html
+import json
 import pathlib
 import re
 import subprocess
@@ -139,6 +140,28 @@ def brief_text():
     return "".join(parts) + link or '<p class="empty">No brief yet today. The next one runs at 7:45 on weekdays.</p>'
 
 
+def schedule():
+    try:
+        r = subprocess.run([str(HOME / ".local/bin/kitcal"), "events", "--from", "today", "--to", "today"],
+                           capture_output=True, text=True, timeout=60)
+        evs = json.loads(r.stdout or "[]")
+    except Exception:  # noqa: BLE001
+        return '<p class="empty">Calendar unavailable. Run kitcal calendars to check access.</p>'
+    if not evs:
+        return '<p class="empty">Nothing on the calendar today.</p>'
+    rows = []
+    for ev in evs:
+        if ev.get("all_day"):
+            when = "All day"
+        else:
+            a = dt.datetime.strptime(ev["start"], "%Y-%m-%d %H:%M")
+            b = dt.datetime.strptime(ev["end"], "%Y-%m-%d %H:%M")
+            when = f"{a:%-I:%M}–{b:%-I:%M %p}"
+        cal = ev.get("calendar", "").split("|")[0]
+        rows.append(f'<li><time>{e(when)}</time> {e(ev.get("title", ""))} <span class="cal">{e(cal)}</span></li>')
+    return '<ul class="sched">' + "".join(rows) + "</ul>"
+
+
 def staff():
     rows = []
     for f in sorted((KIT / "agents").glob("*.md")):
@@ -245,6 +268,10 @@ thead th {{ color: var(--muted); line-height: 1.1; }}
 .cell.texted {{ background: var(--ok); border-color: var(--ok); }}
 .cell.failed {{ border-color: var(--kit); background: transparent; }}
 .cell.ran, .cell.closed {{ background: var(--line); }}
+.stack {{ display: grid; gap: 1.25rem; align-content: start; }}
+.sched {{ list-style: none; margin: 0; padding: 0; display: grid; gap: .45rem; }}
+.sched time {{ font: 600 1rem var(--cond); display: inline-block; min-width: 7.5rem; }}
+.sched .cal {{ color: var(--muted); font-size: .88rem; }}
 .staff {{ list-style: none; padding: 0; margin: 0; display: grid; gap: .35rem; }}
 .agent {{ font: 600 1.05rem var(--cond); text-transform: capitalize; margin-right: .35rem; }}
 code {{ font-size: .9em; }}
@@ -262,7 +289,8 @@ code {{ font-size: .9em; }}
 {lane("Waiting on others", "wait", lanes.get("Waiting on others", []), "Nobody owes you anything.")}
 </div>
 <div class="panels">
-<section class="panel" aria-labelledby="p-brief"><h2 id="p-brief">Briefs</h2>{brief_text()}</section>
+<div class="stack"><section class="panel" aria-labelledby="p-today"><h2 id="p-today">Today</h2>{schedule()}</section>
+<section class="panel" aria-labelledby="p-brief"><h2 id="p-brief">Briefs</h2>{brief_text()}</section></div>
 <section class="panel" aria-labelledby="p-health"><h2 id="p-health">Health</h2>
 <ul class="checks">{health_html}</ul>
 <table aria-label="Scheduled runs, last seven days"><thead><tr><th></th>{head}</tr></thead><tbody>{rows}</tbody></table>

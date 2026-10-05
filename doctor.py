@@ -206,6 +206,19 @@ def check_git():
               f"last saved {age} days ago", "warn")
 
 
+def check_calendar():
+    tool = HOME / ".local/bin/kitcal"
+    if not tool.exists():
+        return
+    code, out = run([str(tool), "calendars"], timeout=60)
+    try:
+        ok = code == 0 and len(json.loads(out)) > 0
+    except Exception:  # noqa: BLE001
+        ok = False
+    check(ok, "Calendar access", "kitcal can read your calendars",
+          "kitcal can't read your calendars: " + out.strip()[:120], "warn")
+
+
 def check_servers():
     code, out = run([str(HOME / ".local/bin/claude"), "mcp", "list"], timeout=180)
     bad = [ln.split(":")[0] for ln in out.splitlines() if "✗" in ln or "Failed" in ln]
@@ -218,7 +231,7 @@ def main(argv):
         fix_agents()
         return 0
     for fn in (check_import, check_settings, check_index, check_jobs, check_runs, check_tokens,
-               check_secrets, check_permissions, check_agents, check_git):
+               check_secrets, check_permissions, check_agents, check_git, check_calendar):
         try:
             fn()
         except Exception as e:  # noqa: BLE001

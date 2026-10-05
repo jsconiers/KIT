@@ -12,7 +12,9 @@ Anything that needs {{OWNER}} goes in the review.
 5. Facts: list any note whose status or "as of" date is more than 60 days old, and ask
    {{OWNER}} to confirm it. Don't change those facts yourself.
 6. Lessons: if a mistake this week is worth a lesson, propose it; {{OWNER}} approves lessons.
-7. Next week: deadlines in the next seven days, and the three things that matter most.
+7. Next week: deadlines in the next seven days, and the three things that matter most. Run
+   `kitcal events --from tomorrow --to` the date a week out, and flag conflicts, double
+   bookings, and anything scheduled during your rest day that isn't church.
 8. Trading, if the traders-edge tools respond: call weekly_review and discipline_backtest.
    Report fee-inclusive P&L against the weekly target, round trips, and any rule breaks,
    plainly. Structure and risk only; never call a tool that places, changes, or cancels an order.

@@ -10,6 +10,8 @@ questions. Anything that needs {{OWNER}} goes in the brief.
    - From your section, say what you'll take on in today's sessions and what you need from {{OWNER}}.
    - From Waiting on others, list who owes what, and suggest a nudge for anything waiting five
      days or more.
+   - Run `kitcal events --from today --to tomorrow`. List today's and tomorrow's events, and
+     flag overlaps, double bookings, and anything that needs travel time.
    - For items untouched for seven days or more, propose a verdict (keep, drop, merge, or
      rewrite), but don't apply it.
    - Refresh STATUS.md: today's date, in progress, blocked and on whom, and next. In STATUS.md,
@@ -25,6 +27,6 @@ questions. Anything that needs {{OWNER}} goes in the brief.
 4. Write the full brief to briefs/YYYY-MM-DD.md, using today's date in that form.
 5. Write a text-message version to briefs/latest-text.txt: plain text, no markdown, under 600
    characters. First line: "Kit · " plus the weekday and date, like "Kit · Mon 05-Oct". Then
-   {{OWNER}}'s to-dos (overdue and due today first), what's waiting on whom, and a one-line trading
-   read. Last line: "Full brief: briefs/YYYY-MM-DD.md".
+   {{OWNER}}'s to-dos (overdue and due today first), today's first events, what's waiting on whom,
+   and a one-line trading read. Last line: "Full brief: briefs/YYYY-MM-DD.md".
 6. Finish with one line: "done", or what went wrong.

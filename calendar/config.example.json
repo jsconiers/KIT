@@ -1,0 +1,4 @@
+{
+  "default": "Personal|iCloud",
+  "exclude": ["Work"]
+}
