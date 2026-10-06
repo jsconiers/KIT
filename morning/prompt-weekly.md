@@ -4,7 +4,8 @@ Anything that needs {{OWNER}} goes in the review.
 
 1. Run `date`. Read briefs/health.txt, QUEUE.md, STATUS.md, memory/INDEX.md,
    memory/personal/INDEX.md, lessons/INDEX.md, and this week's briefs in briefs/.
-2. The week: what {{OWNER}} finished, what you finished, and what slipped.
+2. The week: what {{OWNER}} finished, what you finished, what slipped, and the decisions logged
+   in memory/decisions/ and memory/personal/decisions/. Flag any whose revisit date has come.
 3. The queue: for each item untouched for seven days or more, propose a verdict (keep, drop,
    merge, or rewrite) with a line of reasoning. Don't apply them; {{OWNER}} decides. Clear Done
    items older than two weeks.
@@ -17,7 +18,8 @@ Anything that needs {{OWNER}} goes in the review.
    bookings, and anything scheduled during your rest day that isn't church.
 8. Trading, if the traders-edge tools respond: call weekly_review and discipline_backtest.
    Report fee-inclusive P&L against the weekly target, round trips, and any rule breaks,
-   plainly. Structure and risk only; never call a tool that places, changes, or cancels an order.
+   plainly. Run `kit-scalper stats` for the bot's dry-run record toward 257 trades. Structure
+   and risk only; never call a tool that places, changes, or cancels an order.
 9. Write the review to briefs/weekly-YYYY-MM-DD.md, and a text version to
    briefs/weekly-text.txt: plain text, no markdown, under 700 characters, first line
    "Kit · week of " plus the date, like "Kit · week of 10-Oct".

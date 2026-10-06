@@ -21,6 +21,9 @@ It's named for KITT from Knight Rider: loyal, a little dry, and willing to warn 
 - `calendar/`: kitcal, a calendar tool on EventKit that never touches excluded calendars and
   never changes events with attendees. Copy it to `~/Claude/Agents/kit/.install/calendar/`,
   add a `config.json`, and run `zsh build.sh` there.
+- `mail/`: kitmail, a Mac Mail tool (Gmail accounts included) with no send command; drafts
+  open in Mail for you.
+- `research/`: kit-research, which runs TradingAgents on a ticker in the background.
 - `protect_folder.py`: keeps Kit out of your personal notes inside work folders.
 - `morning/`: scheduled runs (a morning brief, a post-open market read, and a weekly review)
   that text you through Messages.

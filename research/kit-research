@@ -1,0 +1,35 @@
+#!/bin/zsh
+# kit-research: run TradingAgents on one ticker, in the background. Research only; it can't trade.
+#   kit-research run NVDA [YYYY-MM-DD]   start a run (several minutes; costs Anthropic API money)
+#   kit-research status                  show running, finished, and failed runs
+# Reports land in ~/Claude/Agents/kit/research/, and a notification says when one is done.
+TA="$HOME/Claude/Agents/TradingAgents"
+OUT="$HOME/Claude/Agents/kit/research"
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+mkdir -p "$OUT/logs"
+
+case "${1:-}" in
+  run) ;;
+  status)
+    found=0
+    for f in "$OUT"/logs/*.log(N); do
+      found=1
+      name=${f:t:r}
+      if [ -f "$OUT/$name.md" ]; then echo "done     $name   $OUT/$name.md"
+      elif pgrep -f "run_ta.py ${name%%-*} " >/dev/null; then echo "running  $name"
+      else echo "failed   $name   (log: $f)"; fi
+    done
+    [ $found = 0 ] && echo "No runs yet."
+    exit 0 ;;
+  *) sed -n '2,5p' "$0"; exit 0 ;;
+esac
+
+[ -z "${2:-}" ] && { echo "Usage: kit-research run TICKER [YYYY-MM-DD]" >&2; exit 1; }
+TICKER=${2:u}
+DAY=${3:-$(/bin/date +%Y-%m-%d)}
+NAME="$TICKER-$DAY"
+cd "$TA" || { echo "Can't find TradingAgents at $TA" >&2; exit 1; }
+nohup uv run --frozen python "$HOME/Claude/Agents/kit/.install/research/run_ta.py" \
+  "$TICKER" "$DAY" "$OUT/$NAME.md" > "$OUT/logs/$NAME.log" 2>&1 &
+echo "Started TradingAgents on $TICKER for $DAY. It takes several minutes."
+echo "Report: $OUT/$NAME.md (a notification will say when it's done)."

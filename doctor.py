@@ -19,7 +19,7 @@ HOME = pathlib.Path.home()
 KIT = HOME / "Claude/Agents/kit"
 MEM = KIT / "memory"
 LOGS = KIT / ".install/morning/logs"
-LABELS = ["morning", "open", "weekly", "sync"]
+LABELS = ["morning", "open", "weekly", "sync", "scalper"]
 ORDER_TOOLS = [
     "mcp__robinhood-local__rh_place_order", "mcp__tastytrade__place_order",
     "mcp__tastytrade__place_complex_order", "mcp__tastytrade__replace_order",
@@ -206,6 +206,18 @@ def check_git():
               f"last saved {age} days ago", "warn")
 
 
+def check_mail():
+    tool = HOME / ".local/bin/kitmail"
+    if not tool.exists() or run(["pgrep", "-x", "Mail"])[0] != 0:
+        return  # don't open Mail just to check it
+    code, out = run([str(tool), "accounts"], timeout=60)
+    try:
+        ok = code == 0 and len(json.loads(out)) > 0
+    except Exception:  # noqa: BLE001
+        ok = False
+    check(ok, "Mail access", "kitmail can read Mail", "kitmail can't read Mail: " + out.strip()[:120], "warn")
+
+
 def check_calendar():
     tool = HOME / ".local/bin/kitcal"
     if not tool.exists():
@@ -231,7 +243,7 @@ def main(argv):
         fix_agents()
         return 0
     for fn in (check_import, check_settings, check_index, check_jobs, check_runs, check_tokens,
-               check_secrets, check_permissions, check_agents, check_git, check_calendar):
+               check_secrets, check_permissions, check_agents, check_git, check_calendar, check_mail):
         try:
             fn()
         except Exception as e:  # noqa: BLE001

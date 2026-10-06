@@ -12,6 +12,10 @@ questions. Anything that needs {{OWNER}} goes in the brief.
      days or more.
    - Run `kitcal events --from today --to tomorrow`. List today's and tomorrow's events, and
      flag overlaps, double bookings, and anything that needs travel time.
+   - Run `kitmail inbox --hours 24`. Pick up to five messages that need {{OWNER}} (a reply, a
+     decision, a deadline), skipping newsletters, receipts, and notifications. List each with
+     the sender, the subject, and why it matters. Use `kitmail read --id ID` only when the
+     subject isn't enough to judge.
    - For items untouched for seven days or more, propose a verdict (keep, drop, merge, or
      rewrite), but don't apply it.
    - Refresh STATUS.md: today's date, in progress, blocked and on whom, and next. In STATUS.md,
@@ -27,6 +31,6 @@ questions. Anything that needs {{OWNER}} goes in the brief.
 4. Write the full brief to briefs/YYYY-MM-DD.md, using today's date in that form.
 5. Write a text-message version to briefs/latest-text.txt: plain text, no markdown, under 600
    characters. First line: "Kit · " plus the weekday and date, like "Kit · Mon 05-Oct". Then
-   {{OWNER}}'s to-dos (overdue and due today first), today's first events, what's waiting on whom,
-   and a one-line trading read. Last line: "Full brief: briefs/YYYY-MM-DD.md".
+   {{OWNER}}'s to-dos (overdue and due today first), today's first events, how many emails need him,
+   what's waiting on whom, and a one-line trading read. Last line: "Full brief: briefs/YYYY-MM-DD.md".
 6. Finish with one line: "done", or what went wrong.
