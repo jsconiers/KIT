@@ -19,7 +19,7 @@ HOME = pathlib.Path.home()
 KIT = HOME / "Claude/Agents/kit"
 MEM = KIT / "memory"
 LOGS = KIT / ".install/morning/logs"
-LABELS = ["morning", "open", "weekly", "sync", "scalper"]
+LABELS = ["morning", "open", "weekly", "sync", "scalper", "guard", "journal"]
 ORDER_TOOLS = [
     "mcp__robinhood-local__rh_place_order", "mcp__tastytrade__place_order",
     "mcp__tastytrade__place_complex_order", "mcp__tastytrade__replace_order",
@@ -238,12 +238,39 @@ def check_servers():
           "warn")
 
 
+def check_guard():
+    import json as _json
+    import plistlib as _plistlib
+    cfgp = HOME / "Claude/MCP/scalper-bot/guard.json"
+    if not cfgp.exists():
+        return
+    cfg = _json.loads(cfgp.read_text())
+    armed = False
+    try:
+        with open(HOME / f"Library/LaunchAgents/{label('guard')}.plist", "rb") as f:
+            armed = (_plistlib.load(f).get("EnvironmentVariables") or {}).get("TRAIL_GUARD_ALLOW_LIVE") == "1"
+    except Exception:  # noqa: BLE001
+        pass
+    accts = cfg.get("live_accounts") or []
+    live = cfg.get("mode") == "live" and armed and accts
+    add("ok", "Trail guard", ("LIVE for " + ", ".join("..." + a[-4:] for a in accts)) if live
+        else "shadow mode, no orders")
+    logs = sorted((HOME / "Claude/MCP/scalper-bot/logs").glob("guard-2*.log"))
+    if logs:
+        last = logs[-1]
+        fails = sum(1 for line in last.read_text(errors="ignore").splitlines()
+                    if "check failed" in line or ": error " in line)
+        if fails >= 3:
+            add("warn", "Trail guard errors", f"{fails} in {last.name}; run: trail-guard log {last.stem[6:]}")
+
+
 def main(argv):
     if "--fix-agents" in argv:
         fix_agents()
         return 0
     for fn in (check_import, check_settings, check_index, check_jobs, check_runs, check_tokens,
-               check_secrets, check_permissions, check_agents, check_git, check_calendar, check_mail):
+               check_secrets, check_permissions, check_agents, check_git, check_calendar, check_mail,
+               check_guard):
         try:
             fn()
         except Exception as e:  # noqa: BLE001

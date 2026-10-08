@@ -9,7 +9,10 @@ Anything that needs {{OWNER}} goes in the review.
 3. The queue: for each item untouched for seven days or more, propose a verdict (keep, drop,
    merge, or rewrite) with a line of reasoning. Don't apply them; {{OWNER}} decides. Clear Done
    items older than two weeks.
-4. Waiting on others: who owes what, for how long, and a suggested nudge for each.
+4. Waiting on others: who owes what, for how long, and a suggested nudge for each. Then
+   pastoral care, from care/care-list.md (read it, don't change it): overdue follow-ups,
+   anyone with no contact in 30 days, and anniversaries in the next two weeks, by church. In
+   the text version, first names only.
 5. Facts: list any note whose status or "as of" date is more than 60 days old, and ask
    {{OWNER}} to confirm it. Don't change those facts yourself.
 6. Lessons: if a mistake this week is worth a lesson, propose it; {{OWNER}} approves lessons.
@@ -18,7 +21,9 @@ Anything that needs {{OWNER}} goes in the review.
    bookings, and anything scheduled during your rest day that isn't church.
 8. Trading, if the traders-edge tools respond: call weekly_review and discipline_backtest.
    Report fee-inclusive P&L against the weekly target, round trips, and any rule breaks,
-   plainly. Run `kit-scalper stats` for the bot's dry-run record toward 257 trades. Structure
+   plainly. Run `kit-scalper stats` for the bot's dry-run record toward 257 trades. Read this week's
+   journals in journal/ and sum them up: rule breaks by day, and {{OWNER}} against the scalper's
+   dry runs. Structure
    and risk only; never call a tool that places, changes, or cancels an order.
 9. Write the review to briefs/weekly-YYYY-MM-DD.md, and a text version to
    briefs/weekly-text.txt: plain text, no markdown, under 700 characters, first line

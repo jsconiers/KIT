@@ -16,12 +16,15 @@ questions. Anything that needs {{OWNER}} goes in the brief.
      decision, a deadline), skipping newsletters, receipts, and notifications. List each with
      the sender, the subject, and why it matters. Use `kitmail read --id ID` only when the
      subject isn't enough to judge.
+   - Read care/care-list.md, but don't change it. List pastoral follow-ups that are overdue or
+     due today: first name, church, and the action only, with no diagnoses.
    - For items untouched for seven days or more, propose a verdict (keep, drop, merge, or
      rewrite), but don't apply it.
    - Refresh STATUS.md: today's date, in progress, blocked and on whom, and next. In STATUS.md,
-     list anything personal (family, health, money, trading) only as "personal item," with no
+     list anything personal (family, health, money, trading, pastoral care) only as "personal item," with no
      topic; the detail belongs in the brief and the queue.
-3. Trading read, on market days only. Call these traders-edge tools in order: feed_health,
+3. Trading read, on market days only. Start with the Headline line of the newest file in
+   journal/, if it's from the last market day. Then call these traders-edge tools in order: feed_health,
    zero_dte_exposure, should_i_trade, vix_term_structure, daily_game_plan, next_event. If
    feed_health reports degraded sources, name them and keep the read short. Report the regime,
    call wall, put wall, gamma flip, the should_i_trade verdict, and today's event risk. Give
@@ -31,6 +34,7 @@ questions. Anything that needs {{OWNER}} goes in the brief.
 4. Write the full brief to briefs/YYYY-MM-DD.md, using today's date in that form.
 5. Write a text-message version to briefs/latest-text.txt: plain text, no markdown, under 600
    characters. First line: "Kit · " plus the weekday and date, like "Kit · Mon 05-Oct". Then
-   {{OWNER}}'s to-dos (overdue and due today first), today's first events, how many emails need him,
-   what's waiting on whom, and a one-line trading read. Last line: "Full brief: briefs/YYYY-MM-DD.md".
+   {{OWNER}}'s to-dos (overdue and due today first), today's first events, pastoral follow-ups due
+   (first names only), how many emails need him, what's waiting on whom, and a one-line
+   trading read. Last line: "Full brief: briefs/YYYY-MM-DD.md".
 6. Finish with one line: "done", or what went wrong.

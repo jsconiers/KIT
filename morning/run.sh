@@ -3,6 +3,7 @@
 #   run.sh          morning brief (weekdays 7:45, texted by 8:00)
 #   run.sh open     post-open read (weekdays 9:45)
 #   run.sh weekly   weekly review
+#   run.sh journal  trade journal after the close (weekdays 16:20; no text unless it fails)
 # To test a run without using up that day's run:
 #   touch ~/Claude/Agents/kit/.install/morning/test-run
 #   launchctl kickstart gui/$(id -u)/com.$USER.kit.morning      (or .open, .weekly)
@@ -14,16 +15,22 @@ LOGDIR="$DIR/logs"
 TODAY=$(date +%Y-%m-%d)
 LOG="$LOGDIR/$TODAY.log"
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-mkdir -p "$LOGDIR" "$KIT/briefs"
+mkdir -p "$LOGDIR" "$KIT/briefs" "$KIT/journal"
 [ -f "$DIR/config" ] && source "$DIR/config"
 
 case "$MODE" in
   open)   PROMPT="$DIR/prompt-open.md";   TEXT="briefs/open-text.txt" ;;
   weekly) PROMPT="$DIR/prompt-weekly.md"; TEXT="briefs/weekly-text.txt" ;;
+  journal) PROMPT="$DIR/prompt-journal.md"; TEXT="briefs/journal-text.txt" ;;
   *)      MODE=morning; PROMPT="$DIR/prompt.md"; TEXT="briefs/latest-text.txt" ;;
 esac
 DONE="$LOGDIR/$TODAY.$MODE.done"
 [ "$MODE" = "morning" ] && DONE="$LOGDIR/$TODAY.done"
+# The journal scores a finished session, so it never runs before the close, not even as a test.
+if [ "$MODE" = "journal" ] && [ $(date +%k) -lt 16 ]; then
+  echo "== $(date) journal run skipped: before the close" >> "$LOG"
+  exit 0
+fi
 
 TEST=""
 if [ -f "$DIR/test-run" ]; then
@@ -70,12 +77,13 @@ send_text() {  # keep trying for about 20 minutes, then leave a notification on 
 
 cd "$KIT" || exit 1
 rm -f "$TEXT"
-if [ "$MODE" != "open" ]; then
+if [ "$MODE" = "morning" ] || [ "$MODE" = "weekly" ]; then
   python3 "$KIT/.install/doctor.py" --brief > briefs/health.txt 2>&1
 fi
 PROMPT_TEXT=$(sed "s/{{OWNER}}/${OWNER_NAME:-the owner}/g" "$PROMPT")
 args=(-p "$PROMPT_TEXT" --output-format text
-      --allowedTools "Bash(date:*)" "Edit(~/Claude/Agents/kit/briefs/**)")
+      --allowedTools "Bash(date:*)" "Edit(~/Claude/Agents/kit/briefs/**)"
+      "Edit(~/Claude/Agents/kit/journal/**)")
 [ -n "${BLOCK_TOOLS:-}" ] && args+=(--disallowedTools ${=BLOCK_TOOLS})
 
 echo "== $(date) start $MODE ${TEST}" >> "$LOG"
@@ -83,8 +91,9 @@ perl -e 'alarm shift; exec @ARGV' 1200 claude "${args[@]}" >> "$LOG" 2>&1
 rc=$?
 echo "== $(date) end $MODE rc=$rc" >> "$LOG"
 
-if [ "$(cat "$TEXT" 2>/dev/null)" = "MARKET CLOSED" ]; then
-  echo "== market closed, no text" >> "$LOG"
+QUIET=$(cat "$TEXT" 2>/dev/null)
+if [ "$QUIET" = "MARKET CLOSED" ] || [ "$QUIET" = "NO TEXT" ]; then
+  echo "== $QUIET: no text" >> "$LOG"
   [ -z "$TEST" ] && touch "$DONE"
 elif [ -s "$TEXT" ]; then
   if send_text "${TEST}$(cat "$TEXT")" >> "$LOG" 2>&1; then
