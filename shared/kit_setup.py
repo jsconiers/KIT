@@ -25,7 +25,8 @@ MANIFEST = INSTALL_DIR / "manifest.json"
 CLAUDE_DIR = HOME / ".claude"
 CLAUDE_MD = CLAUDE_DIR / "CLAUDE.md"
 SETTINGS = CLAUDE_DIR / "settings.json"
-PACKAGE = Path(__file__).resolve().parent
+PACKAGE = Path(__file__).resolve().parent   # this file lives in shared/
+REPO = PACKAGE.parent                        # repo root: holds kit/, shared/, platform/, README.md
 
 IMPORT_LINE = "@~/Claude/Agents/kit/KIT.md"
 COMMENT_START = "<!-- Kit, installed "
@@ -55,15 +56,19 @@ class Fail(Exception):
 
 
 def _owner_name():
-    """First name for {{OWNER}} in templates: KIT_OWNER, else this Mac's account name."""
-    import os, pwd
+    """First name for {{OWNER}} in templates: KIT_OWNER, else this machine's account name."""
     name = os.environ.get("KIT_OWNER", "").strip()
     if not name:
         try:
+            import pwd  # POSIX only
             parts = pwd.getpwuid(os.getuid()).pw_gecos.split(",")[0].split()
             name = next((p for p in parts if not p.endswith(".")), "")
         except Exception:
-            name = ""
+            try:
+                import getpass
+                name = getpass.getuser()
+            except Exception:
+                name = ""
     return name or "your owner"
 
 
@@ -92,7 +97,8 @@ def write_text_atomic(path, text, new_mode=0o600):
         fh.write(text)
         fh.flush()
         os.fsync(fh.fileno())
-    os.chmod(tmp, mode)
+    if os.name != "nt":            # POSIX permission bits are meaningless on Windows
+        os.chmod(tmp, mode)
     os.replace(tmp, path)
 
 
@@ -169,11 +175,12 @@ def cmd_check(args):
 
 
 def cmd_scaffold(args):
-    src = PACKAGE / "kit"
+    src = REPO / "kit"
     if not src.is_dir():
         raise Fail(f"can't find the starter files in {src}; run this from the unzipped package")
     KIT.mkdir(parents=True, exist_ok=True)
-    os.chmod(KIT, 0o700)
+    if os.name != "nt":
+        os.chmod(KIT, 0o700)
     for folder in ("memory/people", "memory/projects", "memory/context", "lessons", "preferences",
                    ".install/backups"):
         (KIT / folder).mkdir(parents=True, exist_ok=True)
@@ -192,17 +199,23 @@ def cmd_scaffold(args):
                 newer.append(str(rel))
             else:
                 kept.append(str(rel))   # Kit's notes and your edits always win over the starter files
-    # Keep a complete copy of the installer, so nothing has to stay in ~/Downloads.
-    if PACKAGE.resolve() != INSTALL_DIR.resolve():
-        for name in ("install.sh", "uninstall.sh", "kit_setup.py", "README.md"):
-            if (PACKAGE / name).exists():
-                shutil.copy2(str(PACKAGE / name), str(INSTALL_DIR / name))
-        if (INSTALL_DIR / "kit").exists():
-            shutil.rmtree(str(INSTALL_DIR / "kit"))
-        shutil.copytree(str(src), str(INSTALL_DIR / "kit"))
-    for name in ("install.sh", "uninstall.sh", "kit_setup.py"):
-        if (INSTALL_DIR / name).exists():
-            os.chmod(INSTALL_DIR / name, 0o700)
+    # Keep a complete copy of the whole package under .install, so nothing has to stay in
+    # ~/Downloads and the scheduled runners/plists always find tools at a stable nested path.
+    if REPO.resolve() != INSTALL_DIR.resolve():
+        if (REPO / "README.md").exists():
+            shutil.copy2(str(REPO / "README.md"), str(INSTALL_DIR / "README.md"))
+        for sub in ("kit", "shared", "platform"):
+            s = REPO / sub
+            if s.is_dir():
+                d = INSTALL_DIR / sub
+                if d.exists():
+                    shutil.rmtree(str(d))
+                shutil.copytree(str(s), str(d))
+    if os.name != "nt":
+        for rel in ("shared/kit_setup.py", "platform/mac/install.sh", "platform/mac/uninstall.sh"):
+            p = INSTALL_DIR / rel
+            if p.exists():
+                os.chmod(p, 0o700)
     print(f"Kit's files: {len(created)} created, {len(kept)} kept as they were.")
     if newer:
         print("Kept your KIT.md; the packaged version is KIT.md.new, so compare and merge if you like.")
@@ -251,7 +264,7 @@ def cmd_activate(args):
         added_newline = bool(text) and not text.endswith("\n")
         block = ("\n" if text else "") + (
             f"{COMMENT_START}{today()}. To take Kit out, run "
-            f"bash ~/Claude/Agents/kit/.install/uninstall.sh -->\n{IMPORT_LINE}\n")
+            f"bash ~/Claude/Agents/kit/.install/platform/mac/uninstall.sh -->\n{IMPORT_LINE}\n")
         write_text_atomic(CLAUDE_MD, text + ("\n" if added_newline else "") + block)
         c.update({"created_file": claude_md_text is None, "added_text": block, "added_newline": added_newline})
 
@@ -319,7 +332,8 @@ def cmd_deactivate(args):
 
 
 def main(argv=None):
-    os.umask(0o077)
+    if os.name != "nt":
+        os.umask(0o077)
     parser = argparse.ArgumentParser(prog="kit_setup", description="Install or remove Kit.")
     sub = parser.add_subparsers(dest="cmd")
     sub.required = True

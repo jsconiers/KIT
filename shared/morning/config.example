@@ -1,4 +1,4 @@
-# Kit's run settings. Copy to ~/Claude/Agents/kit/.install/morning/config and edit.
+# Kit's run settings. Copy to ~/Claude/Agents/kit/.install/shared/morning/config and edit.
 OWNER_NAME="Alex"
 # Where Kit texts the briefs (iMessage). It tries these in order.
 IMESSAGE_TO="+15555550123"

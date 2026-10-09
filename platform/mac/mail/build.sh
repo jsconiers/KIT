@@ -28,7 +28,7 @@ codesign --force --sign - --identifier local.kit.kitmail KitMail.app
 cat > kitmail <<'WRAP'
 #!/bin/zsh
 # kitmail: runs KitMail.app, so Mail access belongs to "KitMail" whoever calls it.
-APP="$HOME/Claude/Agents/kit/.install/mail/KitMail.app"
+APP="$HOME/Claude/Agents/kit/.install/platform/mac/mail/KitMail.app"
 out=$(/usr/bin/mktemp -t kitmail) err=$(/usr/bin/mktemp -t kitmail) oerr=$(/usr/bin/mktemp -t kitmail)
 trap 'rm -f "$out" "$err" "$oerr"' EXIT
 /usr/bin/open -W -n -g --stdout "$out" --stderr "$err" "$APP" --args "$@" 2>"$oerr"

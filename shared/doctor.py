@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Kit's health check.
 
-  python3 ~/Claude/Agents/kit/.install/doctor.py             full report
-  python3 ~/Claude/Agents/kit/.install/doctor.py --brief     problems only, one per line
-  python3 ~/Claude/Agents/kit/.install/doctor.py --servers   also start each MCP server (slow)
+  python3 ~/Claude/Agents/kit/.install/shared/doctor.py             full report
+  python3 ~/Claude/Agents/kit/.install/shared/doctor.py --brief     problems only, one per line
+  python3 ~/Claude/Agents/kit/.install/shared/doctor.py --servers   also start each MCP server (slow)
 
 Exits 1 when anything fails. Warnings don't fail the check.
 """
@@ -18,7 +18,7 @@ import sys
 HOME = pathlib.Path.home()
 KIT = HOME / "Claude/Agents/kit"
 MEM = KIT / "memory"
-LOGS = KIT / ".install/morning/logs"
+LOGS = KIT / ".install/logs"
 LABELS = ["morning", "open", "weekly", "sync", "scalper", "guard", "journal"]
 ORDER_TOOLS = [
     "mcp__robinhood-local__rh_place_order", "mcp__tastytrade__place_order",
@@ -184,7 +184,7 @@ def check_agents():
             drift.append(f.stem)
     check(not drift, "Kit's staff installed", "all subagents current",
           "out of date in ~/.claude/agents: " + ", ".join(drift)
-          + " (run: python3 ~/Claude/Agents/kit/.install/doctor.py --fix-agents)", "warn")
+          + " (run: python3 ~/Claude/Agents/kit/.install/shared/doctor.py --fix-agents)", "warn")
 
 
 def fix_agents():
