@@ -262,9 +262,14 @@ def cmd_activate(args):
     text = claude_md_text or ""
     if IMPORT_LINE not in (line.strip() for line in text.splitlines()):
         added_newline = bool(text) and not text.endswith("\n")
+        if os.name == "nt":
+            uninstall_hint = ("powershell -ExecutionPolicy Bypass -File "
+                              "~/Claude/Agents/kit/.install/platform/windows/uninstall.ps1")
+        else:
+            uninstall_hint = "bash ~/Claude/Agents/kit/.install/platform/mac/uninstall.sh"
         block = ("\n" if text else "") + (
             f"{COMMENT_START}{today()}. To take Kit out, run "
-            f"bash ~/Claude/Agents/kit/.install/platform/mac/uninstall.sh -->\n{IMPORT_LINE}\n")
+            f"{uninstall_hint} -->\n{IMPORT_LINE}\n")
         write_text_atomic(CLAUDE_MD, text + ("\n" if added_newline else "") + block)
         c.update({"created_file": claude_md_text is None, "added_text": block, "added_newline": added_newline})
 

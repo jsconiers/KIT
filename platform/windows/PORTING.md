@@ -43,3 +43,27 @@ Windows reimplementation** — the integration layer below (the hardest 30%).
 4. A reminders/to-do backend for `shared/reminders_sync.py` (Microsoft To Do / Outlook Tasks).
 5. `run.ps1` + Task Scheduler task definitions to replace `platform/mac/morning/run.sh`
    and the four launchd `.plist.template` files, plus a non-iMessage delivery channel.
+
+## Status (first-draft adapters — UNTESTED on Windows)
+
+All five adapters are drafted under `platform/windows/`. They parse cleanly (Python `ast`,
+PowerShell parser) but have **not been run on Windows** — validate on a real Windows box with
+classic desktop Outlook before relying on them. Each file carries an "UNTESTED" banner and a
+`## Manual test` section.
+
+- `install.ps1` / `uninstall.ps1` — run `shared/kit_setup.py`, NTFS-ACL folder lock-down,
+  `kitmail`/`kitcal` PATH shims, and a classic-Outlook presence check.
+- `mail/kitmail.py` — Outlook COM, mirrors `kitmail.swift` subcommands; drafts only, no send.
+- `calendar/kitcal.py` — Outlook COM, full CLI parity + attendee/read-only guards. Recurring
+  "this-and-future" edits are refused with a TODO; validate recurrence deletes on Windows.
+- `reminders/` — Outlook Tasks COM backend + entry point.
+- `morning/` — `run.ps1`, Task Scheduler register/unregister, pluggable delivery (toast → file
+  fallback; email/SMS hooks). No iMessage.
+
+**Known follow-ups:**
+- Mail/calendar/reminders require **classic desktop Outlook** (COM); the new Outlook and web
+  clients don't expose it.
+- The reconciliation logic is currently duplicated in `reminders/reminders_sync_win.py`.
+  Planned refactor: extract `reconcile(todo, backend, …)` into `shared/reminders_sync.py` with a
+  `MacRemindersBackend`, so Mac (JXA) and Windows (Outlook Tasks) share one implementation.
+- Everything needs an end-to-end run on Windows; recurrence-delete off-by-one is the top risk.
