@@ -2,3 +2,5 @@
 **/logs/
 **/morning/config
 platform/mac/**/*.app
+__pycache__/
+*.pyc
