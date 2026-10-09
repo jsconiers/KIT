@@ -24,7 +24,7 @@ pywin32 provides `win32com.client` (the COM bridge) and `pythoncom`. Python 3.8+
 If pywin32 is missing, or Outlook is not installed/configured, `kitmail` exits with a clear
 error instead of a traceback.
 
-> Per ICE policy, `pip install` of a project dependency is allowed, but do not install
+> Per work policy, `pip install` of a project dependency is allowed, but do not install
 > "latest" blindly -- pin the version your environment has standardized on, or the latest
 > with no known advisories.
 

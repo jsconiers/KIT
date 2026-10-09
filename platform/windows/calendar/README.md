@@ -22,7 +22,7 @@ Requirements:
   not Outlook on the web, neither of which exposes the COM automation model).
 - Python 3.8+.
 
-pywin32 is a build dependency installed via `pip`, which the ICE policy permits
+pywin32 is a build dependency installed via `pip`, which the work policy permits
 for project toolchains; pin the version the installer specifies if one is set,
 otherwise install the latest pywin32 with no known advisories.
 

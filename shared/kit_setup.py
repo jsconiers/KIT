@@ -207,10 +207,10 @@ def cmd_scaffold(args):
         for sub in ("kit", "shared", "platform"):
             s = REPO / sub
             if s.is_dir():
-                d = INSTALL_DIR / sub
-                if d.exists():
-                    shutil.rmtree(str(d))
-                shutil.copytree(str(s), str(d))
+                # Copy over the top rather than rmtree + copytree: a re-run refreshes the
+                # packaged files and keeps what this install added (shared/morning/config,
+                # the built KitCal and KitMail apps).
+                shutil.copytree(str(s), str(INSTALL_DIR / sub), dirs_exist_ok=True)
     if os.name != "nt":
         for rel in ("shared/kit_setup.py", "platform/mac/install.sh", "platform/mac/uninstall.sh"):
             p = INSTALL_DIR / rel

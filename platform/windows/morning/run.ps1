@@ -197,7 +197,7 @@ function Send-Email([string]$message) {
 }
 
 # ---- HOOK: SMS-API delivery -----------------------------------------------------------------
-# Intentionally a stub: wire your SMS gateway (Twilio, etc.) here. Per ICE policy the API key is
+# Intentionally a stub: wire your SMS gateway (Twilio, etc.) here. Per work policy the API key is
 # referenced by the NAME of an environment variable (DELIVERY_SMS_API_KEY_ENV), never stored in
 # the config and never written to disk. Fill in the HTTP call for your provider, then return
 # $true on a confirmed send.

@@ -54,13 +54,13 @@ if (Get-Command py -ErrorAction SilentlyContinue) {
     $pyArgs = @()
 }
 if (-not $pyExe) {
-    Die "Python not found. Install Python 3.8+ from the ICE software catalogue, then run this installer again."
+    Die "Python not found. Install Python 3.8+ from the work software catalogue, then run this installer again."
 }
 
 # Confirm it actually runs and is >= 3.8 (same gate as install.sh).
 & $pyExe @pyArgs -c "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)" 2>$null
 if ($LASTEXITCODE -ne 0) {
-    Die "Python didn't run, or it's older than 3.8. Install Python 3.8+ from the ICE software catalogue, then run this again."
+    Die "Python didn't run, or it's older than 3.8. Install Python 3.8+ from the work software catalogue, then run this again."
 }
 
 # --- Sanity-check the package layout ---------------------------------------------------------

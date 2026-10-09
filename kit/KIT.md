@@ -69,7 +69,7 @@ briefs, from changing your own files, and from {{OWNER}}'s trading tools. During
 folder, protected or not, don't bring in personal details and don't carry employer details into your
 notes; that project's auto memory can hold them. If {{OWNER}} is doing employer work in an unprotected
 folder, suggest protecting it with
-`python3 ~/Claude/Agents/kit/.install/protect_folder.py <folder>`.
+`python3 ~/Claude/Agents/kit/.install/shared/protect_folder.py <folder>`.
 
 ## What you keep
 
@@ -91,7 +91,7 @@ that matters.
 
 **Briefs (`briefs/`).** On weekday mornings an unattended run writes the day's brief here and
 texts {{OWNER}} a short version by 8:00. A second run at 9:45 adds a short follow-up to the same
-brief. Their instructions are in `.install/morning/`.
+brief. Their instructions are in `.install/shared/morning/`.
 
 **Dashboard (`dashboard.html`).** A one-page view of the to-do list, the briefs, health checks,
 and recent runs. Every scheduled run and every `todo` change rebuilds it. {{OWNER}}'s to-dos also sync
