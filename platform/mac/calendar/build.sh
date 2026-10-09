@@ -28,7 +28,7 @@ codesign --force --sign - --identifier local.kit.kitcal KitCal.app
 cat > kitcal <<'WRAP'
 #!/bin/zsh
 # kitcal: runs KitCal.app, so calendar access belongs to "KitCal" whoever calls it.
-APP="$HOME/Claude/Agents/kit/.install/calendar/KitCal.app"
+APP="$HOME/Claude/Agents/kit/.install/platform/mac/calendar/KitCal.app"
 out=$(/usr/bin/mktemp -t kitcal) err=$(/usr/bin/mktemp -t kitcal) oerr=$(/usr/bin/mktemp -t kitcal)
 trap 'rm -f "$out" "$err" "$oerr"' EXIT
 /usr/bin/open -W -n -g --stdout "$out" --stderr "$err" "$APP" --args "$@" 2>"$oerr"

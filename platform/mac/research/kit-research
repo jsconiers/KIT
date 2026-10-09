@@ -29,7 +29,7 @@ TICKER=${2:u}
 DAY=${3:-$(/bin/date +%Y-%m-%d)}
 NAME="$TICKER-$DAY"
 cd "$TA" || { echo "Can't find TradingAgents at $TA" >&2; exit 1; }
-nohup uv run --frozen python "$HOME/Claude/Agents/kit/.install/research/run_ta.py" \
+nohup uv run --frozen python "$HOME/Claude/Agents/kit/.install/shared/research/run_ta.py" \
   "$TICKER" "$DAY" "$OUT/$NAME.md" > "$OUT/logs/$NAME.log" 2>&1 &
 echo "Started TradingAgents on $TICKER for $DAY. It takes several minutes."
 echo "Report: $OUT/$NAME.md (a notification will say when it's done)."

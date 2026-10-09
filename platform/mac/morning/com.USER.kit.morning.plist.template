@@ -7,7 +7,7 @@
   <key>ProgramArguments</key>
   <array>
     <string>/bin/zsh</string>
-    <string>{{HOME}}/Claude/Agents/kit/.install/morning/run.sh</string>
+    <string>{{HOME}}/Claude/Agents/kit/.install/platform/mac/morning/run.sh</string>
   </array>
   <key>StartCalendarInterval</key>
   <array>
@@ -18,8 +18,8 @@
     <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>7</integer><key>Minute</key><integer>45</integer></dict>
   </array>
   <key>StandardOutPath</key>
-  <string>{{HOME}}/Claude/Agents/kit/.install/morning/logs/launchd.out</string>
+  <string>{{HOME}}/Claude/Agents/kit/.install/logs/launchd.out</string>
   <key>StandardErrorPath</key>
-  <string>{{HOME}}/Claude/Agents/kit/.install/morning/logs/launchd.err</string>
+  <string>{{HOME}}/Claude/Agents/kit/.install/logs/launchd.err</string>
 </dict>
 </plist>

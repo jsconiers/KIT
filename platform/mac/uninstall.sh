@@ -5,15 +5,16 @@
 # ~/Claude/Agents/kit are left alone.
 set -euo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # platform/mac within the package
+ROOT="$(cd "$HERE/../.." && pwd)"                        # package root
 PY="$(command -v python3 || true)"
 [ -n "$PY" ] || { printf 'uninstall: python3 not found\n' >&2; exit 1; }
 
-"$PY" "$HERE/kit_setup.py" deactivate
+"$PY" "$ROOT/shared/kit_setup.py" deactivate
 
 cat <<MSG
 
 Kit's files are still in $HOME/Claude/Agents/kit. To delete them too:
   rm -rf ~/Claude/Agents/kit
-To put Kit back:  bash ~/Claude/Agents/kit/.install/install.sh
+To put Kit back:  bash ~/Claude/Agents/kit/.install/platform/mac/install.sh
 MSG

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Add Kit's work protection to a folder, check it, or take it off.
 
-  python3 ~/Claude/Agents/kit/.install/protect_folder.py <folder>
-  python3 ~/Claude/Agents/kit/.install/protect_folder.py --check <folder>
-  python3 ~/Claude/Agents/kit/.install/protect_folder.py --remove <folder>
+  python3 ~/Claude/Agents/kit/.install/shared/protect_folder.py <folder>
+  python3 ~/Claude/Agents/kit/.install/shared/protect_folder.py --check <folder>
+  python3 ~/Claude/Agents/kit/.install/shared/protect_folder.py --remove <folder>
 
 The rules go in <folder>/.claude/settings.local.json, which Claude Code applies when you start
 it in that folder. The file is personal: in a git repo it's listed in the repo's

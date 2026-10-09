@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Sync Kit's to-do list with Apple Reminders, so the list lives on your phone too.
 
-  python3 ~/Claude/Agents/kit/.install/reminders_sync.py
+  python3 ~/Claude/Agents/kit/.install/shared/reminders_sync.py
 
 - "Kit Inbox": anything you add there (by hand or "Hey Siri, add ... to Kit Inbox") becomes one
   of your to-dos at the next sync. Start it with "Kit:" to give it to Kit instead.
@@ -20,10 +20,10 @@ import sys
 
 HOME = pathlib.Path.home()
 KIT = HOME / "Claude/Agents/kit"
-LOG = KIT / ".install/morning/logs/sync.log"
+LOG = KIT / ".install/logs/sync.log"
 INBOX = "Kit Inbox"
 
-loader = importlib.machinery.SourceFileLoader("todo", str(KIT / ".install/bin/todo"))
+loader = importlib.machinery.SourceFileLoader("todo", str(KIT / ".install/shared/bin/todo"))
 spec = importlib.util.spec_from_loader("todo", loader)
 todo = importlib.util.module_from_spec(spec)
 loader.exec_module(todo)

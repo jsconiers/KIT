@@ -5,24 +5,25 @@
 #   run.sh weekly   weekly review
 #   run.sh journal  trade journal after the close (weekdays 16:20; no text unless it fails)
 # To test a run without using up that day's run:
-#   touch ~/Claude/Agents/kit/.install/morning/test-run
+#   touch ~/Claude/Agents/kit/.install/platform/mac/morning/test-run
 #   launchctl kickstart gui/$(id -u)/com.$USER.kit.morning      (or .open, .weekly)
 # Settings live in ./config: OWNER_NAME, IMESSAGE_TO, IMESSAGE_TO_ALT, SKIP_DAYS, BLOCK_TOOLS.
 MODE="${1:-morning}"
 KIT="$HOME/Claude/Agents/kit"
-DIR="$KIT/.install/morning"
-LOGDIR="$DIR/logs"
+MACDIR="$KIT/.install/platform/mac/morning"   # mac runner assets (test-run marker)
+SHAREDIR="$KIT/.install/shared/morning"        # shared prompts + config
+LOGDIR="$KIT/.install/logs"                    # OS-neutral run logs
 TODAY=$(date +%Y-%m-%d)
 LOG="$LOGDIR/$TODAY.log"
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 mkdir -p "$LOGDIR" "$KIT/briefs" "$KIT/journal"
-[ -f "$DIR/config" ] && source "$DIR/config"
+[ -f "$SHAREDIR/config" ] && source "$SHAREDIR/config"
 
 case "$MODE" in
-  open)   PROMPT="$DIR/prompt-open.md";   TEXT="briefs/open-text.txt" ;;
-  weekly) PROMPT="$DIR/prompt-weekly.md"; TEXT="briefs/weekly-text.txt" ;;
-  journal) PROMPT="$DIR/prompt-journal.md"; TEXT="briefs/journal-text.txt" ;;
-  *)      MODE=morning; PROMPT="$DIR/prompt.md"; TEXT="briefs/latest-text.txt" ;;
+  open)   PROMPT="$SHAREDIR/prompt-open.md";   TEXT="briefs/open-text.txt" ;;
+  weekly) PROMPT="$SHAREDIR/prompt-weekly.md"; TEXT="briefs/weekly-text.txt" ;;
+  journal) PROMPT="$SHAREDIR/prompt-journal.md"; TEXT="briefs/journal-text.txt" ;;
+  *)      MODE=morning; PROMPT="$SHAREDIR/prompt.md"; TEXT="briefs/latest-text.txt" ;;
 esac
 DONE="$LOGDIR/$TODAY.$MODE.done"
 [ "$MODE" = "morning" ] && DONE="$LOGDIR/$TODAY.done"
@@ -33,9 +34,9 @@ if [ "$MODE" = "journal" ] && [ $(date +%k) -lt 16 ]; then
 fi
 
 TEST=""
-if [ -f "$DIR/test-run" ]; then
+if [ -f "$MACDIR/test-run" ]; then
   TEST="[Test] "
-  rm -f "$DIR/test-run"
+  rm -f "$MACDIR/test-run"
 else
   # Skip the days in SKIP_DAYS (date +%u: 1 = Monday ... 7 = Sunday); the weekly review keeps
   # its own schedule. One run of each kind a day, and no post-open read once it's stale.
@@ -78,7 +79,7 @@ send_text() {  # keep trying for about 20 minutes, then leave a notification on 
 cd "$KIT" || exit 1
 rm -f "$TEXT"
 if [ "$MODE" = "morning" ] || [ "$MODE" = "weekly" ]; then
-  python3 "$KIT/.install/doctor.py" --brief > briefs/health.txt 2>&1
+  python3 "$KIT/.install/shared/doctor.py" --brief > briefs/health.txt 2>&1
 fi
 PROMPT_TEXT=$(sed "s/{{OWNER}}/${OWNER_NAME:-the owner}/g" "$PROMPT")
 args=(-p "$PROMPT_TEXT" --output-format text
@@ -105,7 +106,7 @@ elif [ -s "$TEXT" ]; then
     echo "== text failed" >> "$LOG"
   fi
 else
-  send_text "${TEST}Kit's $MODE run didn't finish (rc=$rc). Log: ~/Claude/Agents/kit/.install/morning/logs/$TODAY.log" >> "$LOG" 2>&1
+  send_text "${TEST}Kit's $MODE run didn't finish (rc=$rc). Log: ~/Claude/Agents/kit/.install/logs/$TODAY.log" >> "$LOG" 2>&1
   echo "== sent failure notice" >> "$LOG"
 fi
 
@@ -114,5 +115,5 @@ if [ -d "$KIT/.git" ]; then
   git -C "$KIT" add -A >/dev/null 2>&1
   git -C "$KIT" commit -qm "auto: $MODE run $TODAY" >/dev/null 2>&1
 fi
-[ -f "$KIT/.install/dashboard.py" ] && python3 "$KIT/.install/dashboard.py" >/dev/null 2>&1
+[ -f "$KIT/.install/shared/dashboard.py" ] && python3 "$KIT/.install/shared/dashboard.py" >/dev/null 2>&1
 exit 0

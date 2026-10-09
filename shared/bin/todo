@@ -18,7 +18,7 @@ import sys
 
 KIT = pathlib.Path.home() / "Claude/Agents/kit"
 QUEUE = KIT / "QUEUE.md"
-CONFIG = KIT / ".install/morning/config"
+CONFIG = KIT / ".install/shared/morning/config"
 DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 FULL = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 TODAY = dt.date.today()
@@ -84,7 +84,7 @@ def save(lines):
     tmp.write_text("\n".join(lines).rstrip("\n") + "\n")
     os.replace(tmp, QUEUE)
     for helper in ("dashboard.py",):
-        script = KIT / ".install" / helper
+        script = KIT / ".install" / "shared" / helper
         if script.exists():
             subprocess.run([sys.executable, str(script)], capture_output=True)
 

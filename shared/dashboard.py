@@ -1,30 +1,34 @@
 #!/usr/bin/env python3
 """Build Kit's dashboard: ~/Claude/Agents/kit/dashboard.html (open it in any browser).
 
-  python3 ~/Claude/Agents/kit/.install/dashboard.py          rebuild
-  python3 ~/Claude/Agents/kit/.install/dashboard.py --open   rebuild and open
+  python3 ~/Claude/Agents/kit/.install/shared/dashboard.py          rebuild
+  python3 ~/Claude/Agents/kit/.install/shared/dashboard.py --open   rebuild and open
 
 The scheduled runs and the todo command rebuild it; the page reloads itself every 5 minutes.
 """
 import datetime as dt
 import html
 import json
+import os
 import pathlib
 import re
 import subprocess
 import sys
 
+# strftime no-pad hour: glibc/BSD use %-I, the Windows CRT uses %#I.
+HOUR = "%#I" if os.name == "nt" else "%-I"
+
 HOME = pathlib.Path.home()
 KIT = HOME / "Claude/Agents/kit"
 OUT = KIT / "dashboard.html"
-LOGS = KIT / ".install/morning/logs"
+LOGS = KIT / ".install/logs"
 NOW = dt.datetime.now()
 TODAY = NOW.date()
 e = html.escape
 
 
 def owner():
-    cfg = KIT / ".install/morning/config"
+    cfg = KIT / ".install/shared/morning/config"
     if cfg.exists():
         m = re.search(r'^OWNER_NAME="?([^"\n]+)"?', cfg.read_text(), re.M)
         if m:
@@ -90,7 +94,7 @@ def lane(name, css, items, empty):
 
 def health():
     try:
-        r = subprocess.run([sys.executable, str(KIT / ".install/doctor.py")],
+        r = subprocess.run([sys.executable, str(KIT / ".install/shared/doctor.py")],
                            capture_output=True, text=True, timeout=60)
         rows = []
         for ln in r.stdout.splitlines():
@@ -156,7 +160,7 @@ def schedule():
         else:
             a = dt.datetime.strptime(ev["start"], "%Y-%m-%d %H:%M")
             b = dt.datetime.strptime(ev["end"], "%Y-%m-%d %H:%M")
-            when = f"{a:%-I:%M}–{b:%-I:%M %p}"
+            when = f"{a.strftime(HOUR + ':%M')}–{b.strftime(HOUR + ':%M %p')}"
         cal = ev.get("calendar", "").split("|")[0]
         rows.append(f'<li><time>{e(when)}</time> {e(ev.get("title", ""))} <span class="cal">{e(cal)}</span></li>')
     return '<ul class="sched">' + "".join(rows) + "</ul>"
@@ -302,7 +306,12 @@ code {{ font-size: .9em; }}
 """
     OUT.write_text(page)
     if "--open" in argv:
-        subprocess.run(["open", str(OUT)])
+        if os.name == "nt":
+            os.startfile(str(OUT))  # noqa: S606  (Windows-only)
+        elif sys.platform == "darwin":
+            subprocess.run(["open", str(OUT)])
+        else:
+            subprocess.run(["xdg-open", str(OUT)])
     print(f"Dashboard: {OUT}")
 
 

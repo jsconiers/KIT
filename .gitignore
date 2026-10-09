@@ -1,3 +1,4 @@
 .DS_Store
-morning/config
-morning/logs/
+**/logs/
+**/morning/config
+platform/mac/**/*.app
