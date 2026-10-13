@@ -15,7 +15,7 @@ thin OS-integration layer is platform-specific.
 ```
 kit/                 The agent "brain" — 100% shared, no platform code:
                        KIT.md (who Kit is), QUEUE.md (to-do), STATUS.md,
-                       memory/, lessons/, preferences/, sub-agents.
+                       memory/, lessons/, preferences/, agents/ (sub-agents).
 shared/              Cross-platform Python + assets:
   kit_setup.py         install/activate/deactivate logic
   bin/todo             command-line to-do that shares QUEUE.md
@@ -67,6 +67,25 @@ backend. See `platform/windows/PORTING.md` for the roadmap, then:
 ```powershell
 powershell -ExecutionPolicy Bypass -File install.ps1
 ```
+
+## Kit's staff
+
+`kit/agents/` holds Kit's staff, Claude Code subagents that Kit directs: a researcher, a
+librarian, an IA writer and a GDS writer, a reviewer, a diagrammer, a scheduler, and a demand
+tracker. They work through Kit, except the two writers, which also talk to each other directly.
+Each reads a setup file in `memory/context/`, and `memory/context/agents.md` describes them all.
+
+The installer copies the agents into `~/Claude/Agents/kit/agents/`. To make them available
+in Claude Code, copy them into `~/.claude/agents/`:
+
+```bash
+python3 ~/Claude/Agents/kit/.install/shared/doctor.py --fix-agents
+```
+
+For the diagrammer, draw.io Desktop works well: its command line exports PNG, SVG, and PDF
+without opening a window. JGraph's draw.io skill (`plugins/claude-code/skills/drawio` in
+github.com/jgraph/drawio-mcp) can be copied into `~/.claude/skills/drawio/`. It fetches
+reference files from GitHub, so keep local copies next to it for agents without web access.
 
 ## Privacy
 
