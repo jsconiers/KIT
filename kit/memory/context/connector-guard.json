@@ -1,0 +1,6 @@
+{
+  "audit_dir": "~/Claude/Agents/kit/audit",
+  "allowed_servers": [],
+  "allow_tools": [],
+  "deny_tools": []
+}

@@ -19,6 +19,8 @@ kit/                 The agent "brain" — 100% shared, no platform code:
 shared/              Cross-platform Python + assets:
   kit_setup.py         install/activate/deactivate logic
   bin/todo             command-line to-do that shares QUEUE.md
+  bin/connector-guard  read-only guard and audit log for agents that reach outside systems
+  bin/vsdx-finish      fills in title blocks and builds legends in Visio diagrams
   doctor.py            health check for the install, schedules, notes, secrets
   dashboard.py         one-page dashboard (to-do, briefs, health, runs)
   reminders_sync.py    two-way to-do sync (device backend is per-OS)
@@ -71,8 +73,12 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 ## Kit's staff
 
 `kit/agents/` holds Kit's staff, Claude Code subagents that Kit directs: a researcher, a
-librarian, an IA writer and a GDS writer, a reviewer, a diagrammer, a scheduler, and a demand
-tracker. They work through Kit, except the two writers, which also talk to each other directly.
+librarian, a curator, an IA writer and a GDS writer, a reviewer, a diagrammer, a scheduler, a
+demand tracker, a connector gateway, an intake triager, a dependency mapper, a status reporter,
+an implementation planner, a deck builder, a handoff agent, and a meeting scribe. They work
+through Kit, apart from a few direct pairings listed in `memory/context/agents.md`. The gateway
+is the agent meant to reach outside systems: `shared/bin/connector-guard` runs as a hook on it
+to keep connectors read-only and record every request in an audit log.
 Each reads a setup file in `memory/context/`, and `memory/context/agents.md` describes them all.
 
 The installer copies the agents into `~/Claude/Agents/kit/agents/`. To make them available

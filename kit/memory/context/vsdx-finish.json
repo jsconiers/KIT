@@ -1,0 +1,22 @@
+{
+  "_about": "Settings for vsdx-finish. Name your stencil's title-block and legend masters, list the line styles your diagramming standard defines and what each means, and the shape markers it uses. Keep your organization's real values in your own copy of this file, not in the repo.",
+  "title_block_master": "TitleBlock",
+  "legend_master": "Legend",
+  "classification": "Internal",
+  "reference_pattern": "^([A-Z]+-[0-9#]+)_",
+  "version_pattern": "_v(\\d+(?:\\.\\d+)?)\\.vsdx$",
+  "reference_placeholder": "(no reference)",
+  "font": "Arial",
+  "text_color": "#333333",
+  "lines": [
+    {"color": "#333333", "pattern": 1, "label": "Existing connection"},
+    {"color": "#E36C09", "pattern": 1, "label": "New connection"},
+    {"color": "#1F6FB2", "pattern": 2, "label": "Management traffic"}
+  ],
+  "markers": [
+    {"match": "zone", "label": "Zone", "fill": "#EAF1F8", "outline": "#1F6FB2"},
+    {"match": "#E36C09", "label": "New component", "fill": "#FFFFFF", "outline": "#E36C09"}
+  ],
+  "letter_width": 11.0,
+  "tabloid_width": 17.0
+}

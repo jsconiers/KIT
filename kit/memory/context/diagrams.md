@@ -12,5 +12,6 @@ only has this blank template.
   work: for example the draw.io command line for images, or a Mermaid-to-Visio converter such as
   mmd2vsdx. Give each run a time limit, because a stuck export would hang the job.
 - **Recipe:** optional. The steps that produce a finished diagram, including any tool that fills in
-  title blocks or legends.
+  title blocks or legends. Kit's `vsdx-finish` does that for Visio files; set it up in
+  `vsdx-finish.json`, next to this file.
 - **Stencils:** optional. The shape libraries the standard calls for, and where they are.

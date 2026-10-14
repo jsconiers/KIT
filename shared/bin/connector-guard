@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+"""connector-guard: read-only enforcement and an audit log for Kit's outside-system connectors.
+
+Claude Code runs it as a hook on agents that reach outside systems, passing each event as JSON on
+stdin. In an agent's frontmatter:
+
+  hooks:
+    PreToolUse:
+      - matcher: "mcp__.*"
+        hooks:
+          - type: command
+            command: 'python3 "$HOME/Claude/Agents/kit/.install/shared/bin/connector-guard" pre <agent>'
+    PostToolUse:   (the same, with "post")
+    Stop:          (the same, with "stop" and no matcher)
+
+pre   Allows a call only when its connector (MCP server) is in allowed_servers and its tool name reads
+      as read-only (get, list, search, query, read, fetch, find, describe, view, show, lookup,
+      count, retrieve, browse). Anything that looks like a write is denied, and so is any name it
+      doesn't recognize. It fails closed: if it can't read its config or write the audit log, the
+      call is denied. It never auto-approves; allowed calls still go through normal permissions.
+post  Logs the size of the result and whether it was an error. Result contents are never logged.
+stop  Logs the end of the agent's session.
+
+Each event becomes one line in <audit_dir>/connectors-YYYY-MM.jsonl. Inputs are logged with any
+field that looks like a credential redacted.
+
+Config (override the path with KIT_CONNECTOR_GUARD_CONFIG):
+  ~/Claude/Agents/kit/memory/context/connector-guard.json
+  {"audit_dir": "...", "allowed_servers": ["..."], "allow_tools": [], "deny_tools": []}
+allow_tools and deny_tools take full tool names (mcp__<server>__<tool>) and win over the name rules.
+"""
+import datetime
+import json
+import os
+import re
+import sys
+
+CONFIG = os.environ.get("KIT_CONNECTOR_GUARD_CONFIG",
+                        os.path.expanduser("~/Claude/Agents/kit/memory/context/connector-guard.json"))
+READ_WORDS = {"get", "list", "search", "query", "read", "fetch", "find", "describe", "view", "show",
+              "lookup", "count", "retrieve", "browse"}
+WRITE_WORDS = {"create", "update", "delete", "remove", "add", "upload", "post", "put", "patch", "set",
+               "assign", "transition", "comment", "close", "resolve", "approve", "reject", "move",
+               "edit", "write", "send", "insert", "modify", "archive", "restore", "link", "attach",
+               "submit", "cancel", "merge", "import", "run", "execute", "trigger", "start", "stop"}
+SECRET = re.compile(r"pass|token|secret|key|auth|cookie|credential|session", re.I)
+
+
+def load_config():
+    with open(CONFIG, encoding="utf-8") as f:
+        cfg = json.load(f)
+    if not isinstance(cfg.get("allowed_servers"), list):
+        raise ValueError("allowed_servers must be a list")
+    cfg["allow_tools"] = list(cfg.get("allow_tools") or [])
+    cfg["deny_tools"] = list(cfg.get("deny_tools") or [])
+    cfg["audit_dir"] = os.path.expanduser(cfg.get("audit_dir") or "~/Claude/Agents/kit/audit")
+    return cfg
+
+
+def redact(value):
+    if isinstance(value, dict):
+        return {k: ("<redacted>" if SECRET.search(str(k)) else redact(v)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [redact(v) for v in value]
+    if isinstance(value, str) and len(value) > 500:
+        return value[:500] + "...(truncated)"
+    return value
+
+
+def split(tool):
+    m = re.match(r"^mcp__(.+?)__(.+)$", tool or "")
+    return (m.group(1), m.group(2)) if m else (None, tool or "")
+
+
+def words(name):
+    parts = re.split(r"[_\-.\s]+", name)
+    out = []
+    for p in parts:
+        out += re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+", p) or [p]
+    return [w.lower() for w in out if w]
+
+
+def decide(cfg, tool):
+    server, name = split(tool)
+    if server is None:
+        return "allow", "not a connector tool"
+    if tool in cfg["deny_tools"]:
+        return "deny", "on the deny list"
+    if server not in cfg["allowed_servers"]:
+        return "deny", f"'{server}' isn't an allowed connector"
+    if tool in cfg["allow_tools"]:
+        return "allow", "on the allow list"
+    w = words(name)
+    if any(x in WRITE_WORDS for x in w):
+        return "deny", "looks like a write, and connectors are read-only"
+    if any(x in READ_WORDS for x in w):
+        return "allow", "read-only"
+    return "deny", "not recognized as read-only; add it to allow_tools if it is"
+
+
+def write_log(cfg, entry):
+    os.makedirs(cfg["audit_dir"], exist_ok=True)
+    path = os.path.join(cfg["audit_dir"], f"connectors-{datetime.date.today():%Y-%m}.jsonl")
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def deny(reason):
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                             "permissionDecisionReason": f"connector-guard: {reason}"}}))
+
+
+def main(event, agent, raw):
+    data = json.loads(raw) if raw.strip() else {}
+    tool = data.get("tool_name")
+    entry = {"time": datetime.datetime.now().astimezone().isoformat(timespec="seconds"), "event": event,
+             "agent": agent, "session": data.get("session_id"), "transcript": data.get("transcript_path"),
+             "tool": tool}
+    if event == "pre":
+        cfg = load_config()
+        decision, reason = decide(cfg, tool)
+        entry.update(decision=decision, reason=reason, input=redact(data.get("tool_input")))
+        write_log(cfg, entry)
+        if decision == "deny":
+            deny(reason)
+    elif event == "post":
+        resp = data.get("tool_response")
+        entry.update(result_bytes=len(json.dumps(resp, ensure_ascii=False, default=str)) if resp is not None else 0,
+                     is_error=bool(isinstance(resp, dict) and (resp.get("isError") or resp.get("is_error"))))
+        write_log(load_config(), entry)
+    elif event == "stop":
+        entry.pop("tool")
+        write_log(load_config(), entry)
+
+
+if __name__ == "__main__":
+    ev = sys.argv[1] if len(sys.argv) > 1 else "pre"
+    who = sys.argv[2] if len(sys.argv) > 2 else "unknown"
+    try:
+        main(ev, who, sys.stdin.read())
+    except Exception as e:
+        if ev == "pre":
+            deny(f"guard error, so the call is blocked: {e}")
+        else:
+            print(f"connector-guard: {e}", file=sys.stderr)
+    sys.exit(0)

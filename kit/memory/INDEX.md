@@ -11,3 +11,8 @@ when its line is relevant. Keep this under 100 lines and put detail in the files
 - `context/diagrams.md`: the diagramming standard, stencils, and formats the diagrammer uses
 - `context/calendar.md`: the scheduler's calendar tool, working hours, and habits
 - `context/demands.md`: where the demand tracker finds demands and tickets, and where it keeps its register
+- `context/knowledge.md`: where the curator keeps the knowledge base, what it covers first, and who it's shared with
+- `context/connectors.md`: the outside systems the gateway may reach, its direct callers, and the audit log (guard settings in `connector-guard.json`)
+- `context/intake.md`: the intake checklist, when an impact assessment is needed, and how projects are named
+- `context/meetings.md`: the meeting inbox, where the architect's notes are, and the mail commands the meeting scribe uses
+- `context/status.md`: the status report's format, window, and audiences

@@ -1,0 +1,431 @@
+#!/usr/bin/env python3
+"""vsdx-finish: fill in a diagram's title block and build its legend in a Visio (.vsdx) file.
+
+Made for diagrams drawn with mmd2vsdx and a stencil that has a title-block master and a legend
+master, but it works on any .vsdx that uses such masters. Your diagramming standard's details come
+from a JSON settings file, so the tool itself stays generic: the masters' names, the line styles
+and what they mean, the shape markers, and the default classification. It never changes the input
+file; it writes a new one.
+
+Usage:
+  vsdx-finish IN.vsdx -o OUT.vsdx [--config FILE] [--title TEXT] [--ref ID] [--author NAME]
+              [--date YYYY-MM-DD] [--version v1.0] [--classification TEXT]
+              [--no-legend] [--no-move] [--force]
+
+What it does:
+  - Title block: the title in bold, then "reference | author | date | version", then the
+    classification, with the text box reset to fill the shape.
+  - Legend: a sample of each line style and marker the diagram actually uses, with its meaning;
+    the frame grows to fit.
+  - Moves the title block to the lower-right corner with the legend above it, keeps the diagram's
+    own title in step, and warns about unknown line styles, overlaps, and wide pages.
+
+Settings: --config, or ~/Claude/Agents/kit/memory/context/vsdx-finish.json. Without either, it uses
+generic built-in settings and says so. Keys (any you leave out keep their built-in value):
+  title_block_master, legend_master   master names (NameU) of the two stencil shapes
+  classification                      default for the title block's last line
+  reference_pattern, version_pattern  regexes that pull the reference and the version number from
+                                      the output file's name
+  reference_placeholder               used when no reference is given or found
+  font, text_color                    for the title block and legend text
+  lines     [{"color": "#RRGGBB", "pattern": 1, "label": "..."}]  pattern: 1 solid, 2 dashed, 3 dotted
+  markers   [{"match": "zone" or "#RRGGBB", "label": "...", "fill": "#RRGGBB", "outline": "#RRGGBB"}]
+            "zone" matches containers; a color matches shapes outlined in that color
+  letter_width, tabloid_width         page widths, in inches, to warn about
+
+Defaults: the title comes from the diagram's own title, the reference and version from the file
+name, the date is today, and the author is this account's full name.
+"""
+import argparse
+import datetime
+import json
+import os
+import re
+import subprocess
+import sys
+import zipfile
+import xml.etree.ElementTree as ET
+
+NS = "http://schemas.microsoft.com/office/visio/2012/main"
+V = "{" + NS + "}"
+RID = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+ET.register_namespace("", NS)
+ET.register_namespace("r", "http://schemas.openxmlformats.org/officeDocument/2006/relationships")
+PT = 1 / 72.0  # inches per point
+DEFAULT_CONFIG = os.path.expanduser("~/Claude/Agents/kit/memory/context/vsdx-finish.json")
+GENERIC = {
+    "title_block_master": "TitleBlock",
+    "legend_master": "Legend",
+    "classification": "Internal",
+    "reference_pattern": r"^([A-Z]+-[0-9#]+)_",
+    "version_pattern": r"_v(\d+(?:\.\d+)?)\.vsdx$",
+    "reference_placeholder": "(no reference)",
+    "font": "Arial",
+    "text_color": "#333333",
+    "lines": [
+        {"color": "#333333", "pattern": 1, "label": "Existing connection"},
+        {"color": "#E36C09", "pattern": 1, "label": "New connection"},
+        {"color": "#1F6FB2", "pattern": 2, "label": "Management traffic"},
+    ],
+    "markers": [
+        {"match": "zone", "label": "Zone", "fill": "#EAF1F8", "outline": "#1F6FB2"},
+        {"match": "#E36C09", "label": "New component", "fill": "#FFFFFF", "outline": "#E36C09"},
+    ],
+    "letter_width": 11.0,
+    "tabloid_width": 17.0,
+}
+
+
+def load_settings(path, report):
+    if path:
+        with open(path, encoding="utf-8") as f:
+            given = json.load(f)
+    elif os.path.exists(DEFAULT_CONFIG):
+        with open(DEFAULT_CONFIG, encoding="utf-8") as f:
+            given = json.load(f)
+    else:
+        report.append("note: no settings file found, so generic built-in settings were used")
+        given = {}
+    cfg = {**GENERIC, **{k: v for k, v in given.items() if not k.startswith("_")}}
+    cfg["lines"] = [(l["color"].upper(), int(l.get("pattern", 1)), l["label"]) for l in cfg["lines"]]
+    markers = {}
+    for m in cfg["markers"]:
+        key = "zone" if m["match"] == "zone" else m["match"].upper()
+        markers[key] = (m["label"], m.get("fill", "#FFFFFF").upper(),
+                        m.get("outline", key if key != "zone" else cfg["text_color"]).upper())
+    cfg["markers"] = markers
+    cfg["text_color"] = cfg["text_color"].upper()
+    return cfg
+
+
+def num(v, default=0.0):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def fmt(v):
+    return repr(round(v, 10)) if isinstance(v, float) else str(v)
+
+
+def get(el, name):
+    c = el.find(f"{V}Cell[@N='{name}']")
+    return None if c is None else c.get("V")
+
+
+def put(el, name, value):
+    c = el.find(f"{V}Cell[@N='{name}']")
+    if c is None:
+        c = ET.Element(V + "Cell", {"N": name})
+        kids = list(el)
+        at = next((i for i, k in enumerate(kids) if k.tag != V + "Cell"), len(kids))
+        el.insert(at, c)
+    c.attrib.pop("F", None)
+    c.set("V", fmt(value))
+
+
+def put_section(shape, name, rows):
+    old = shape.find(f"{V}Section[@N='{name}']")
+    kids = list(shape)
+    if old is not None:
+        at = kids.index(old)
+        shape.remove(old)
+    else:
+        at = next((i for i, k in enumerate(kids) if k.tag in (V + "Text", V + "Shapes")), len(kids))
+    sec = ET.Element(V + "Section", {"N": name})
+    for i, cells in enumerate(rows):
+        row = ET.SubElement(sec, V + "Row", {"IX": str(i)})
+        for k, v in cells.items():
+            ET.SubElement(row, V + "Cell", {"N": k, "V": fmt(v)})
+    shape.insert(at, sec)
+
+
+def put_text(shape, runs):
+    t = shape.find(V + "Text")
+    if t is None:
+        t = ET.Element(V + "Text")
+        kids = list(shape)
+        at = next((i for i, k in enumerate(kids) if k.tag == V + "Shapes"), len(kids))
+        shape.insert(at, t)
+    for k in list(t):
+        t.remove(k)
+    t.text = None
+    for text, ix in runs:
+        ET.SubElement(t, V + "cp", {"IX": str(ix)}).tail = text
+
+
+def text_of(shape):
+    t = shape.find(V + "Text")
+    return "" if t is None else "".join(t.itertext()).strip()
+
+
+def bbox(s):
+    x = num(get(s, "PinX")) - num(get(s, "LocPinX"))
+    y = num(get(s, "PinY")) - num(get(s, "LocPinY"))
+    w, h = num(get(s, "Width")), num(get(s, "Height"))
+    return (min(x, x + w), min(y, y + h), max(x, x + w), max(y, y + h))
+
+
+def overlaps(a, b):
+    return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+
+
+def is_1d(s):
+    return get(s, "BeginX") is not None
+
+
+def is_container(s):
+    for row in s.findall(f"{V}Section[@N='User']/{V}Row[@N='msvStructureType']"):
+        if (get(row, "Value") or "").strip('"') == "Container":
+            return True
+    return False
+
+
+def text_block(s, w, h, valign, margin):
+    for name, value in (("TxtPinX", w / 2), ("TxtPinY", h / 2), ("TxtWidth", w), ("TxtHeight", h),
+                        ("TxtLocPinX", w / 2), ("TxtLocPinY", h / 2), ("LeftMargin", margin),
+                        ("RightMargin", margin), ("TopMargin", margin), ("BottomMargin", margin),
+                        ("VerticalAlign", valign)):
+        put(s, name, value)
+
+
+def geometry(points, rel=False, nofill=False):
+    sec = ET.Element(V + "Section", {"N": "Geometry", "IX": "0"})
+    ET.SubElement(sec, V + "Cell", {"N": "NoFill", "V": "1" if nofill else "0"})
+    for i, (x, y) in enumerate(points, start=1):
+        kind = ("Rel" if rel else "") + ("MoveTo" if i == 1 else "LineTo")
+        row = ET.SubElement(sec, V + "Row", {"T": kind, "IX": str(i)})
+        ET.SubElement(row, V + "Cell", {"N": "X", "V": fmt(float(x))})
+        ET.SubElement(row, V + "Cell", {"N": "Y", "V": fmt(float(y))})
+    return sec
+
+
+def char_section(cfg, size_pt, bold=False):
+    sec = ET.Element(V + "Section", {"N": "Character"})
+    row = ET.SubElement(sec, V + "Row", {"IX": "0"})
+    for k, v in (("Font", cfg["font"]), ("Color", cfg["text_color"]), ("Style", "1" if bold else "0"),
+                 ("Size", fmt(size_pt * PT))):
+        ET.SubElement(row, V + "Cell", {"N": k, "V": v})
+    return sec
+
+
+def para_section(align):
+    sec = ET.Element(V + "Section", {"N": "Paragraph"})
+    ET.SubElement(ET.SubElement(sec, V + "Row", {"IX": "0"}), V + "Cell", {"N": "HorzAlign", "V": str(align)})
+    return sec
+
+
+def new_shape(sid, name, cells, sections=(), text=None):
+    s = ET.Element(V + "Shape", {"ID": str(sid), "NameU": name, "Type": "Shape",
+                                 "LineStyle": "0", "FillStyle": "0", "TextStyle": "0"})
+    for k, v in cells:
+        ET.SubElement(s, V + "Cell", {"N": k, "V": fmt(v)})
+    for sec in sections:
+        s.append(sec)
+    if text is not None:
+        ET.SubElement(ET.SubElement(s, V + "Text"), V + "cp", {"IX": "0"}).tail = text
+    return s
+
+
+def finish_page(root, cfg, tb_ids, lg_ids, values, add_legend, move, page_h, report):
+    shapes_el = root.find(V + "Shapes")
+    tops = shapes_el.findall(V + "Shape")
+    next_id = max(int(s.get("ID")) for s in root.iter(V + "Shape")) + 1
+    tbs = [s for s in tops if s.get("Master") in tb_ids]
+    lgs = [s for s in tops if s.get("Master") in lg_ids]
+    if not values["title"]:
+        values["title"] = next((text_of(s) for s in tops if s.get("NameU") == "Title"), "") or "Untitled diagram"
+    for s in tops:  # keep the diagram's own title in step with the title block
+        if s.get("NameU") == "Title" and not s.get("Master") and text_of(s) != values["title"]:
+            put_text(s, [(values["title"], 0)])
+            report.append("diagram title updated to match the title block")
+
+    # What does the diagram use?
+    known = cfg["lines"]
+    lines, markers = [], []
+    for s in tops:
+        if s in tbs or s in lgs:
+            continue
+        color = (get(s, "LineColor") or "").upper()
+        if is_1d(s):
+            pattern = int(num(get(s, "LinePattern"), 1))
+            if pattern == 0:
+                continue
+            key = next((lt for lt in known if lt[0] == color and lt[1] == pattern), None)
+            if key is None:
+                key = (color, pattern, f"Other line ({color}, pattern {pattern})")
+            if key not in [k for k, _ in lines]:
+                if key not in known:
+                    report.append(f"warning: a line style isn't in your settings: {key[2]}")
+                lines.append((key, num(get(s, "LineWeight"), 1.5 * PT)))
+        else:
+            k = "zone" if is_container(s) and "zone" in cfg["markers"] else (color if color in cfg["markers"] else None)
+            if k and k not in markers:
+                markers.append(k)
+    lines.sort(key=lambda kw: known.index(kw[0]) if kw[0] in known else len(known))
+    order = list(cfg["markers"])
+    markers.sort(key=order.index)
+
+    # Title block: fill the fields and give the text the whole shape.
+    for s in tbs:
+        w, h = num(get(s, "Width"), 3.5), num(get(s, "Height"), 1.2)
+        text_block(s, w, h, valign=1, margin=0.06)
+        put_section(s, "Character", [{"Font": cfg["font"], "Color": cfg["text_color"], "Style": 1, "Size": 10 * PT},
+                                     {"Font": cfg["font"], "Color": cfg["text_color"], "Style": 0, "Size": 8 * PT}])
+        put_section(s, "Paragraph", [{"HorzAlign": 1}])
+        fields = " | ".join([values["ref"], values["author"], values["date"], values["version"]])
+        put_text(s, [(values["title"] + "\n", 0), (fields + "\n" + values["classification"], 1)])
+        report.append(f"title block: {values['title']} / {fields} / {values['classification']}")
+    if not tbs:
+        report.append(f"warning: no '{cfg['title_block_master']}' shape on the page; add the title block from your stencil")
+
+    # Legend frame: size it for the entries.
+    entries = [("line", k, wt) for k, wt in lines] + [("marker", k, None) for k in markers]
+    labels = [k[2] if kind == "line" else cfg["markers"][k][0] for kind, k, _ in entries]
+    label_w = max([len(t) for t in labels] + [12]) * 0.062 + 0.1
+    lg = lgs[0] if lgs else None
+    if lg is not None and add_legend:
+        lw, lh = max(2.0, 0.72 + label_w + 0.1), 0.34 + len(entries) * 0.24 + 0.08
+        for name, value in (("Width", lw), ("Height", lh), ("LocPinX", lw / 2), ("LocPinY", lh / 2)):
+            put(lg, name, value)
+        text_block(lg, lw, lh, valign=0, margin=0.06)
+        put_section(lg, "Character", [{"Font": cfg["font"], "Color": cfg["text_color"], "Style": 1, "Size": 9 * PT}])
+        put_section(lg, "Paragraph", [{"HorzAlign": 1}])
+        put_text(lg, [("Legend", 0)])
+    elif add_legend:
+        report.append(f"warning: no '{cfg['legend_master']}' shape on the page; add the legend from your stencil")
+
+    # Lower-right corner: title block at the bottom, legend above it.
+    margin = 0.25
+    if move and (tbs or lgs):
+        col_right = max(bbox(s)[2] for s in tbs + lgs)
+        y = margin
+        for s in tbs[:1] + lgs[:1]:
+            w, h = num(get(s, "Width")), num(get(s, "Height"))
+            put(s, "PinX", col_right - w + num(get(s, "LocPinX")))
+            put(s, "PinY", y + num(get(s, "LocPinY")))
+            y += h + 0.15
+        if y - 0.15 + margin > page_h:
+            report.append(f"page height raised from {page_h:.2f} to {y - 0.15 + margin:.2f} in to fit")
+            page_h = y - 0.15 + margin
+
+    # Legend entries: a sample of each line style or marker, with its meaning.
+    if lg is not None and add_legend and entries:
+        left, _, _, top = bbox(lg)
+        for i, (kind, key, wt) in enumerate(entries):
+            y = top - 0.34 - (i + 0.5) * 0.24
+            x0, x1 = left + 0.12, left + 0.62
+            if kind == "line":
+                color, pattern, label = key
+                sample = new_shape(next_id, f"Legend line {i + 1}", [
+                    ("PinX", (x0 + x1) / 2), ("PinY", y), ("Width", x1 - x0), ("Height", 0.0),
+                    ("LocPinX", (x1 - x0) / 2), ("LocPinY", 0.0), ("BeginX", x0), ("BeginY", y),
+                    ("EndX", x1), ("EndY", y), ("LineColor", color), ("LineWeight", wt),
+                    ("LinePattern", pattern), ("BeginArrow", 0), ("EndArrow", 0), ("ObjType", 2)],
+                    [geometry([(0, 0), (x1 - x0, 0)], nofill=True)])
+            else:
+                label, fill, outline = cfg["markers"][key]
+                w, h = 0.4, 0.15
+                sample = new_shape(next_id, f"Legend marker {i + 1}", [
+                    ("PinX", x0 + 0.25), ("PinY", y), ("Width", w), ("Height", h), ("LocPinX", w / 2),
+                    ("LocPinY", h / 2), ("FillForegnd", fill), ("FillPattern", 1), ("LineColor", outline),
+                    ("LineWeight", 2.25 * PT), ("LinePattern", 1)],
+                    [geometry([(0, 0), (1, 0), (1, 1), (0, 1), (0, 0)], rel=True)])
+            shapes_el.append(sample)
+            shapes_el.append(new_shape(next_id + 1, f"Legend label {i + 1}", [
+                ("PinX", left + 0.72 + label_w / 2), ("PinY", y), ("Width", label_w), ("Height", 0.2),
+                ("LocPinX", label_w / 2), ("LocPinY", 0.1), ("LinePattern", 0), ("FillPattern", 0),
+                ("LeftMargin", 0.0), ("RightMargin", 0.0), ("TopMargin", 0.0), ("BottomMargin", 0.0),
+                ("VerticalAlign", 1)], [char_section(cfg, 8), para_section(0)], text=label))
+            next_id += 2
+        report.append("legend: " + "; ".join(labels))
+    elif lg is not None and add_legend:
+        report.append("warning: none of the line styles or markers in your settings were found, so the legend has no entries")
+
+    # Anything the title block or legend now sits on?
+    placed = tbs[:1] + lgs[:1]
+    for s in tops:
+        if s in placed or is_1d(s) or s.get("NameU", "").startswith("Legend "):
+            continue
+        for p in placed:
+            if overlaps(bbox(s), bbox(p)):
+                report.append(f"warning: {p.get('NameU') or 'the title block'} overlaps {s.get('NameU') or 'shape ' + s.get('ID')}")
+    return page_h
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description="Fill the title block and build the legend in a .vsdx.")
+    ap.add_argument("input")
+    ap.add_argument("-o", "--output", required=True)
+    ap.add_argument("--config", help="settings file (JSON)")
+    ap.add_argument("--title")
+    ap.add_argument("--ref", help="the diagram's reference, such as a document or project number")
+    ap.add_argument("--author")
+    ap.add_argument("--date", default=datetime.date.today().isoformat())
+    ap.add_argument("--version", help="for example v1.0")
+    ap.add_argument("--classification")
+    ap.add_argument("--no-legend", action="store_true")
+    ap.add_argument("--no-move", action="store_true", help="leave the title block and legend where they are")
+    ap.add_argument("--force", action="store_true", help="overwrite the output file if it exists")
+    args = ap.parse_args(argv)
+
+    if os.path.abspath(args.output) == os.path.abspath(args.input):
+        sys.exit("vsdx-finish: write to a new file; the input is never changed")
+    if os.path.exists(args.output) and not args.force:
+        sys.exit(f"vsdx-finish: {args.output} exists; use a new name or --force")
+    report = []
+    cfg = load_settings(args.config, report)
+    stem = os.path.basename(args.output)
+    ref = args.ref or (re.search(cfg["reference_pattern"], stem) or [None, None])[1]
+    ver = args.version or (lambda m: "v" + m.group(1) if m else None)(re.search(cfg["version_pattern"], stem))
+    author = args.author
+    if not author:
+        try:
+            author = subprocess.run(["id", "-F"], capture_output=True, text=True, timeout=5).stdout.strip()
+        except Exception:
+            author = ""
+        author = author or os.environ.get("USER", "")
+    if not ref:
+        report.append(f"warning: no reference given or found in the file name; used {cfg['reference_placeholder']}")
+    if not ver:
+        report.append("warning: no version given or found in the file name; used v0.1")
+    values = {"title": args.title, "ref": ref or cfg["reference_placeholder"], "author": author,
+              "date": args.date, "version": ver or "v0.1",
+              "classification": args.classification or cfg["classification"]}
+
+    zin = zipfile.ZipFile(args.input)
+    masters = ET.fromstring(zin.read("visio/masters/masters.xml"))
+    tb_ids = {m.get("ID") for m in masters.findall(V + "Master") if m.get("NameU") == cfg["title_block_master"]}
+    lg_ids = {m.get("ID") for m in masters.findall(V + "Master") if m.get("NameU") == cfg["legend_master"]}
+    pages = ET.fromstring(zin.read("visio/pages/pages.xml"))
+    rid2file = {r.get("Id"): r.get("Target") for r in ET.fromstring(zin.read("visio/pages/_rels/pages.xml.rels"))}
+    out = {}
+    for pg in pages.findall(V + "Page"):
+        part = "visio/pages/" + rid2file[pg.find(V + "Rel").get(RID)]
+        sheet = pg.find(V + "PageSheet")
+        pw, ph = num(get(sheet, "PageWidth")), num(get(sheet, "PageHeight"))
+        root = ET.fromstring(zin.read(part))
+        new_ph = finish_page(root, cfg, tb_ids, lg_ids, values, not args.no_legend, not args.no_move, ph, report)
+        if new_ph > ph:
+            put(sheet, "PageHeight", new_ph)
+        name = pg.get("NameU") or pg.get("Name")
+        if pw > cfg["tabloid_width"]:
+            report.append(f"warning: page {name} is {pw:.1f} in wide, wider than Tabloid ({cfg['tabloid_width']:g} in); re-lay it out or split it")
+        elif pw > cfg["letter_width"]:
+            report.append(f"note: page {name} is {pw:.1f} in wide, wider than Letter landscape ({cfg['letter_width']:g} in)")
+        out[part] = ET.tostring(root, encoding="UTF-8", xml_declaration=True)
+    out["visio/pages/pages.xml"] = ET.tostring(pages, encoding="UTF-8", xml_declaration=True)
+
+    tmp = args.output + ".tmp"
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
+        for info in zin.infolist():
+            zout.writestr(info, out.get(info.filename, zin.read(info.filename)))
+    os.replace(tmp, args.output)
+    print(f"wrote {args.output}")
+    for line in report:
+        print("  " + line)
+
+
+if __name__ == "__main__":
+    main()

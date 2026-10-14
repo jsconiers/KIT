@@ -42,7 +42,8 @@ rest of the staff only through Kit.
 4. **Design risk.** Look for single points of failure, scaling limits, recovery and failover gaps,
    and security or compliance exposure.
 5. **Precedent.** If a published document covers the same system, ask in **Requests** for the
-   librarian to pull it, and flag conflicts with it.
+   librarian to pull it, and for the curator's recorded decisions and standards on that system.
+   Flag conflicts with either.
 
 ## Rules
 
