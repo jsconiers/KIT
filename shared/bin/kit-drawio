@@ -1,0 +1,749 @@
+#!/usr/bin/env python3
+"""kit-drawio: write editable draw.io (.drawio) diagrams from a JSON spec or a PowerPoint diagram.
+
+  kit-drawio spec.json -o out.drawio                    build a diagram from a spec (see below)
+  kit-drawio diagram.pptx -o out.drawio                 convert every slide, one page per slide
+  kit-drawio diagram.pptx -o out.drawio --slide 3       convert slide 3 only (or --slide "Slide title")
+  kit-drawio spec.json -o out.drawio --styles s.json    override the colors and line styles below
+
+Spec JSON (sizes and positions in inches, measured from the top-left of the page; 1 inch = 96 px):
+  {"title": "Payments flow",
+   "nodes": [{"id": "dc", "label": "Data center", "kind": "zone", "x": 0.5, "y": 0.5, "w": 6, "h": 3},
+             {"id": "api", "label": "API gateway", "sublabel": "REST, TLS", "kind": "system",
+              "x": 1, "y": 1.2, "w": 1.6, "h": 0.6, "parent": "dc"}],
+   "edges": [{"from": "api", "to": "db", "label": "SQL", "kind": "existing", "arrow": "end"}]}
+  Node kinds: system, zone, new, external, newzone, plain. Edge kinds: existing, new, external,
+  management (dashed), secondary. arrow: end (default), start, both, or none. A node with "parent" is
+  written as a real draw.io child of that zone, so moving the zone moves it; give its x and y on the page
+  as usual, and kit-drawio converts them. Edges are bound to their boxes with orthogonal routing; the
+  attachment points are picked from the boxes' positions unless the edge gives "exit"/"entry" as [fx, fy]
+  fractions of the source/target box (for example [1, 0.5] = middle of the right side). "points":
+  [[x, y], ...] adds waypoints in inches.
+
+PowerPoint input: every rectangle and text box becomes a vertex (position, size, fill, outline, text runs
+with size, bold, italic, color, and alignment), and every connector or line becomes an edge (color, width,
+dash, arrowheads). Each connector end is bound to the shape whose border it touches, preferring the
+smallest shape that isn't a container, with exitX/exitY/entryX/entryY set so routing matches the slide.
+Lines drawn as several joined segments are merged into one edge with waypoints. Shapes drawn fully inside
+another shape become its draw.io children. Template placeholders (titles, footers, slide numbers) are
+skipped. Page names are slide titles. Reading .pptx needs python-pptx; nothing else does.
+
+--styles: a JSON file whose entries override or extend the tables below, kind by kind:
+  {"font": "Arial", "text": "#333333",
+   "nodes": {"system": {"fill": "#FFFFFF", "stroke": "#123456", "width": 1.5, "label": "#123456"}},
+   "edges": {"existing": {"color": "#333333", "width": 1.5, "dash": false}}}
+  Without --styles, the file named in the KIT_DRAWIO_STYLES environment variable is used, if set.
+
+Exit status: 0 written, 1 bad input, 2 usage error or python-pptx missing.
+"""
+import argparse
+import json
+import os
+import re
+import sys
+from xml.sax.saxutils import escape, quoteattr
+
+# ---------------------------------------------------------------------------------------------------------
+# Style tables ("default" set). Override with --styles or KIT_DRAWIO_STYLES. Widths are in points.
+# Node: fill, stroke, width (pt), label (title color; defaults to "text"), dash.
+# Zones (zone, newzone) put their label top-left in bold; other nodes center it.
+# ---------------------------------------------------------------------------------------------------------
+STYLES = {
+    "font": "Arial",
+    "text": "#333333",                 # node labels, sublabels, and edge labels
+    "label_size": 10,                  # node label, bold (zones use zone_label_size)
+    "zone_label_size": 10.5,
+    "sublabel_size": 8,                # regular
+    "edge_label_size": 8,
+    "nodes": {
+        "system":   {"fill": "#FFFFFF", "stroke": "#1F4E79", "width": 1.5},
+        "zone":     {"fill": "#DEEBF7", "stroke": "#1F4E79", "width": 2.5, "label": "#1F4E79"},
+        "new":      {"fill": "#FFFFFF", "stroke": "#C55A11", "width": 2.25},
+        "external": {"fill": "#FFFFFF", "stroke": "#7030A0", "width": 1.5},
+        "newzone":  {"fill": "#DEEBF7", "stroke": "#C55A11", "width": 2.5, "label": "#1F4E79"},
+        "plain":    {"fill": "#FFFFFF", "stroke": "#404040", "width": 1.0},
+    },
+    "edges": {
+        "existing":   {"color": "#404040", "width": 1.5, "dash": False},
+        "new":        {"color": "#C55A11", "width": 2.25, "dash": False},
+        "external":   {"color": "#7030A0", "width": 1.5, "dash": False},
+        "management": {"color": "#5B9BD5", "width": 1.0, "dash": True},
+        "secondary":  {"color": "#7F7F7F", "width": 1.5, "dash": False},
+    },
+}
+ZONE_KINDS = {"zone", "newzone"}
+
+PX_IN = 96.0                 # px per inch
+PX_PT = 96.0 / 72.0          # px per point
+PX_EMU = 96.0 / 914400.0     # px per EMU
+BIND_TOL = 0.06 * PX_IN      # a connector end this close to a shape border binds to it
+JOIN_TOL = 0.02 * PX_IN      # segment ends this close together are joined into one line
+
+
+class InputError(Exception):
+    pass
+
+
+def load_styles(path):
+    styles = json.loads(json.dumps(STYLES))
+    path = path or os.environ.get("KIT_DRAWIO_STYLES")
+    if not path:
+        return styles
+    try:
+        with open(path, encoding="utf8") as f:
+            over = json.load(f)
+    except (OSError, ValueError) as e:
+        raise InputError(f"can't read styles file {path}: {e}")
+    for key, val in over.items():
+        if key in ("nodes", "edges") and isinstance(val, dict):
+            for kind, props in val.items():
+                styles[key].setdefault(kind, {}).update(props)
+        else:
+            styles[key] = val
+    return styles
+
+
+def num(v):
+    return f"{v:.4f}".rstrip("0").rstrip(".") if isinstance(v, float) else str(v)
+
+
+def style_str(d):
+    return "".join(f"{k}={num(v)};" for k, v in d.items() if v is not None)
+
+
+# ---------------------------------------------------------------------------------------------------------
+# Writing the .drawio file
+# ---------------------------------------------------------------------------------------------------------
+class Page:
+    def __init__(self, name, width, height, pid):
+        self.name, self.width, self.height, self.pid = name, width, height, pid
+        self.cells = []
+        self.edges = []      # (id, has_source, has_target), for the summary
+
+    def vertex(self, cid, value, style, x, y, w, h, parent="1"):
+        self.cells.append(
+            f'<mxCell id={quoteattr(cid)} value={quoteattr(value)} style={quoteattr(style_str(style))} '
+            f'vertex="1" parent={quoteattr(parent)}><mxGeometry x="{x:.1f}" y="{y:.1f}" width="{w:.1f}" '
+            f'height="{h:.1f}" as="geometry"/></mxCell>')
+
+    def edge(self, cid, style, source=None, target=None, spoint=None, tpoint=None, points=(), value=""):
+        attrs = (f' source={quoteattr(source)}' if source else "") + (f' target={quoteattr(target)}' if target else "")
+        geo = ""
+        if spoint:
+            geo += f'<mxPoint x="{spoint[0]:.1f}" y="{spoint[1]:.1f}" as="sourcePoint"/>'
+        if tpoint:
+            geo += f'<mxPoint x="{tpoint[0]:.1f}" y="{tpoint[1]:.1f}" as="targetPoint"/>'
+        if points:
+            geo += '<Array as="points">' + "".join(f'<mxPoint x="{x:.1f}" y="{y:.1f}"/>' for x, y in points) + "</Array>"
+        self.cells.append(
+            f'<mxCell id={quoteattr(cid)} value={quoteattr(value)} style={quoteattr(style_str(style))} edge="1" '
+            f'parent="1"{attrs}><mxGeometry relative="1" as="geometry">{geo}</mxGeometry></mxCell>')
+        self.edges.append((cid, bool(source), bool(target)))
+
+    def xml(self):
+        w, h = int(round(self.width)), int(round(self.height))
+        return (f'<diagram name={quoteattr(self.name)} id={quoteattr(self.pid)}><mxGraphModel dx="{w}" dy="{h}" '
+                f'grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" '
+                f'pageScale="1" pageWidth="{w}" pageHeight="{h}" math="0" shadow="0"><root><mxCell id="0"/>'
+                f'<mxCell id="1" parent="0"/>' + "".join(self.cells) + "</root></mxGraphModel></diagram>")
+
+
+def write_file(path, pages):
+    xml = '<mxfile host="kit-drawio">' + "".join(p.xml() for p in pages) + "</mxfile>\n"
+    d = os.path.dirname(os.path.abspath(path))
+    os.makedirs(d, exist_ok=True)
+    with open(path, "w", encoding="utf8") as f:
+        f.write(xml)
+
+
+EDGE_BASE = {"edgeStyle": "orthogonalEdgeStyle", "rounded": 0, "orthogonalLoop": 1, "jettySize": "auto",
+             "html": 1}
+
+
+# ---------------------------------------------------------------------------------------------------------
+# Spec JSON input
+# ---------------------------------------------------------------------------------------------------------
+def font_tag(text, size, color, bold=False, italic=False, family=None):
+    t = escape(text).replace("\n", "<br>")
+    css = f"font-size:{num(round(size * PX_PT, 1))}px"
+    if family:
+        css += f";font-family:{family}"
+    t = f'<font style="{css}" color="{color}">{t}</font>'
+    if italic:
+        t = f"<i>{t}</i>"
+    return f"<b>{t}</b>" if bold else t
+
+
+def auto_ports(a, b):
+    """Pick exit and entry points (fractions of each box) for a tidy orthogonal route from box a to box b."""
+    ax0, ay0, ax1, ay1 = a["x"], a["y"], a["x"] + a["w"], a["y"] + a["h"]
+    bx0, by0, bx1, by1 = b["x"], b["y"], b["x"] + b["w"], b["y"] + b["h"]
+    lo, hi = max(ay0, by0), min(ay1, by1)
+    if hi - lo > 0.05:                                    # side by side: straight across
+        m = (lo + hi) / 2
+        fa, fb = round((m - ay0) / a["h"], 3), round((m - by0) / b["h"], 3)
+        return ((1, fa), (0, fb)) if bx0 >= ax1 else ((0, fa), (1, fb))
+    lo, hi = max(ax0, bx0), min(ax1, bx1)
+    if hi - lo > 0.05:                                    # stacked: straight up or down
+        m = (lo + hi) / 2
+        fa, fb = round((m - ax0) / a["w"], 3), round((m - bx0) / b["w"], 3)
+        return ((fa, 1), (fb, 0)) if by0 >= ay1 else ((fa, 0), (fb, 1))
+    # diagonal: leave a's side facing b, enter b's top or bottom (one bend)
+    return ((1 if bx0 >= ax1 else 0, 0.5), (0.5, 0 if by0 >= ay1 else 1))
+
+
+def from_spec(path, styles):
+    try:
+        with open(path, encoding="utf8") as f:
+            spec = json.load(f)
+    except (OSError, ValueError) as e:
+        raise InputError(f"can't read spec {path}: {e}")
+    nodes = spec.get("nodes") or []
+    edges = spec.get("edges") or []
+    ids = {}
+    for n in nodes:
+        for k in ("id", "label", "x", "y", "w", "h"):
+            if k not in n:
+                raise InputError(f"node {n.get('id', n)} is missing '{k}'")
+        nid = str(n["id"])
+        if nid in ("0", "1") or nid in ids:
+            raise InputError(f"node id '{nid}' is reserved or used twice")
+        if n.get("kind", "system") not in styles["nodes"]:
+            raise InputError(f"node {nid}: unknown kind '{n.get('kind')}' (known: {', '.join(styles['nodes'])})")
+        ids[nid] = n
+    for n in nodes:
+        if n.get("parent") is not None and str(n["parent"]) not in ids:
+            raise InputError(f"node {n['id']}: parent '{n['parent']}' isn't a node")
+
+    order, seen = [], set()        # parents before children, so draw.io nests them
+
+    def visit(n, trail=()):
+        nid = str(n["id"])
+        if nid in trail:
+            raise InputError(f"node {nid}: parent loop")
+        if nid in seen:
+            return
+        if n.get("parent") is not None:
+            visit(ids[str(n["parent"])], trail + (nid,))
+        seen.add(nid)
+        order.append(n)
+    for n in nodes:
+        visit(n)
+
+    font, text = styles["font"], styles["text"]
+    maxx = max([(n["x"] + n["w"]) * PX_IN for n in nodes] + [100])
+    maxy = max([(n["y"] + n["h"]) * PX_IN for n in nodes] + [100])
+    page = Page(spec.get("title") or os.path.splitext(os.path.basename(path))[0], maxx + 40, maxy + 40, "page-1")
+    for n in order:
+        kind = n.get("kind", "system")
+        ns = styles["nodes"][kind]
+        zone = kind in ZONE_KINDS
+        lab = font_tag(str(n["label"]), styles["zone_label_size" if zone else "label_size"],
+                       ns.get("label", text), bold=True)
+        if n.get("sublabel"):
+            lab += "<br>" + font_tag(str(n["sublabel"]), styles["sublabel_size"], text)
+        st = {"rounded": 0, "whiteSpace": "wrap", "html": 1, "fontFamily": font, "fontColor": text,
+              "fillColor": ns.get("fill", "none"), "strokeColor": ns.get("stroke", "none"),
+              "strokeWidth": round(ns.get("width", 1) * PX_PT, 2), "dashed": 1 if ns.get("dash") else None,
+              "align": "left" if zone else "center", "verticalAlign": "top" if zone else "middle",
+              "spacingLeft": 8 if zone else 4, "spacingRight": 4, "spacingTop": 4 if zone else 2,
+              "spacingBottom": 2, "spacing": 0}
+        if zone:
+            st.update({"container": 1, "collapsible": 0})
+        x, y = n["x"] * PX_IN, n["y"] * PX_IN
+        parent = "1"
+        if n.get("parent") is not None:
+            p = ids[str(n["parent"])]
+            x, y, parent = x - p["x"] * PX_IN, y - p["y"] * PX_IN, str(p["id"])
+        page.vertex(str(n["id"]), lab, st, x, y, n["w"] * PX_IN, n["h"] * PX_IN, parent)
+
+    for i, e in enumerate(edges, 1):
+        src, dst = str(e.get("from", "")), str(e.get("to", ""))
+        for end in (src, dst):
+            if end not in ids:
+                raise InputError(f"edge {i}: '{end}' isn't a node id")
+        kind = e.get("kind", "existing")
+        if kind not in styles["edges"]:
+            raise InputError(f"edge {i}: unknown kind '{kind}' (known: {', '.join(styles['edges'])})")
+        es = styles["edges"][kind]
+        arrow = e.get("arrow", "end")
+        if arrow not in ("end", "start", "both", "none"):
+            raise InputError(f"edge {i}: arrow must be end, start, both, or none")
+        st = dict(EDGE_BASE)
+        st.update({"endArrow": "block" if arrow in ("end", "both") else "none",
+                   "startArrow": "block" if arrow in ("start", "both") else "none", "endFill": 1, "startFill": 1,
+                   "strokeColor": es.get("color", text), "strokeWidth": round(es.get("width", 1) * PX_PT, 2),
+                   "dashed": 1 if es.get("dash") else None, "fontFamily": font, "fontColor": text,
+                   "fontSize": round(styles["edge_label_size"] * PX_PT, 1), "labelBackgroundColor": "#FFFFFF"})
+        ex, en = auto_ports(ids[src], ids[dst])
+        ex, en = e.get("exit") or ex, e.get("entry") or en
+        st.update({"exitX": ex[0], "exitY": ex[1], "exitDx": 0, "exitDy": 0,
+                   "entryX": en[0], "entryY": en[1], "entryDx": 0, "entryDy": 0})
+        pts = [(px * PX_IN, py * PX_IN) for px, py in e.get("points", [])]
+        page.edge(f"e{i}", st, src, dst, points=pts, value=escape(str(e.get("label", ""))))
+    return [page]
+
+
+# ---------------------------------------------------------------------------------------------------------
+# PowerPoint input
+# ---------------------------------------------------------------------------------------------------------
+def load_pptx():
+    try:
+        import pptx  # noqa: F401
+    except ImportError:
+        print("kit-drawio: reading .pptx needs python-pptx, which isn't installed for this Python "
+              f"({sys.executable}). Run kit-drawio with a Python that has it, or install python-pptx.",
+              file=sys.stderr)
+        sys.exit(2)
+    from pptx import Presentation
+    return Presentation
+
+
+ARROWS = {"triangle": ("block", 1), "arrow": ("open", 0), "stealth": ("classic", 1), "diamond": ("diamond", 1),
+          "oval": ("oval", 1)}
+DASHES = {"dash": "8 4", "lgDash": "12 4", "sysDash": "4 2", "dashDot": "8 4 1 4", "lgDashDot": "12 4 1 4",
+          "lgDashDotDot": "12 4 1 4 1 4", "sysDot": "1 2", "dot": "1 4", "sysDashDot": "4 2 1 2",
+          "sysDashDotDot": "4 2 1 2 1 2"}
+GEOMS = {"ellipse": "ellipse", "triangle": "triangle", "diamond": "rhombus", "hexagon": "hexagon",
+         "can": "cylinder3"}
+
+
+def q(tag):
+    from pptx.oxml.ns import qn
+    return qn(tag)
+
+
+def rgb_of(colorfmt):
+    try:
+        if colorfmt.type is not None and colorfmt.rgb is not None:
+            return "#" + str(colorfmt.rgb)
+    except (AttributeError, TypeError, ValueError):
+        pass
+    return None
+
+
+def fill_of(shape):
+    try:
+        if shape.fill.type == 1:          # solid
+            return "#" + str(shape.fill.fore_color.rgb)
+    except (AttributeError, TypeError, ValueError):
+        pass
+    return "none"
+
+
+def sp_ln(shape):
+    sppr = shape._element.find(q("p:spPr"))
+    return sppr.find(q("a:ln")) if sppr is not None else None
+
+
+def line_of(shape):
+    ln = sp_ln(shape)
+    if ln is None or ln.find(q("a:noFill")) is not None:
+        return "none", 0.0, None
+    try:
+        c = "#" + str(shape.line.color.rgb)
+    except (AttributeError, TypeError, ValueError):
+        c = "#000000"
+    w = (shape.line.width or 12700) / 12700 * PX_PT
+    pd = ln.find(q("a:prstDash"))
+    dash = DASHES.get(pd.get("val")) if pd is not None else None
+    return c, round(w, 2), dash
+
+
+class Xform:
+    """Maps a group's child coordinates (EMU) to slide coordinates (px)."""
+
+    def __init__(self, sx=PX_EMU, sy=PX_EMU, dx=0.0, dy=0.0):
+        self.sx, self.sy, self.dx, self.dy = sx, sy, dx, dy
+
+    def pt(self, x, y):
+        return x * self.sx + self.dx, y * self.sy + self.dy
+
+    def group(self, grp):
+        xfrm = grp._element.find(q("p:grpSpPr")).find(q("a:xfrm"))
+        off, ext = xfrm.find(q("a:off")), xfrm.find(q("a:ext"))
+        choff, chext = xfrm.find(q("a:chOff")), xfrm.find(q("a:chExt"))
+        ox, oy, cx, cy = (int(off.get("x")), int(off.get("y")), int(ext.get("cx")), int(ext.get("cy")))
+        chx, chy = (int(choff.get("x")), int(choff.get("y"))) if choff is not None else (ox, oy)
+        ccx, ccy = (int(chext.get("cx")), int(chext.get("cy"))) if chext is not None else (cx, cy)
+        kx, ky = (cx / ccx if ccx else 1.0), (cy / ccy if ccy else 1.0)
+        # child x -> group-space x: (x - chx) * kx + ox, then through this transform
+        return Xform(self.sx * kx, self.sy * ky, self.dx + (ox - chx * kx) * self.sx,
+                     self.dy + (oy - chy * ky) * self.sy)
+
+
+def label_html(tf, family_default):
+    parts = []
+    for p in tf.paragraphs:
+        runs = []
+        for r in p.runs:
+            if not r.text:
+                continue
+            sz = r.font.size.pt if r.font.size else 18
+            fam = r.font.name if r.font.name and r.font.name != family_default else None
+            runs.append(font_tag(r.text, sz, rgb_of(r.font.color) or "#000000", bool(r.font.bold),
+                                 bool(r.font.italic), fam))
+        line = "".join(runs)
+        if p.alignment is not None and len(tf.paragraphs) > 1:
+            al = str(p.alignment).split(".")[-1].split(" ")[0].lower()
+            if al in ("left", "right", "center"):
+                line = f'<div style="text-align:{al}">{line or "<br>"}</div>'
+                parts.append(("div", line))
+                continue
+        parts.append(("txt", line))
+    while parts and not re.sub(r"<[^>]+>", "", parts[-1][1]).strip():
+        parts.pop()
+    out = ""
+    for i, (k, s) in enumerate(parts):
+        if i and k == "txt" and parts[i - 1][0] == "txt":
+            out += "<br>"
+        out += s
+    return out
+
+
+def text_style(shape, is_textbox):
+    from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
+    tf = shape.text_frame
+    align = {PP_ALIGN.LEFT: "left", PP_ALIGN.RIGHT: "right", PP_ALIGN.CENTER: "center"}.get(
+        tf.paragraphs[0].alignment, "left" if is_textbox else "center")
+    anchor = tf.vertical_anchor
+    valign = {MSO_ANCHOR.TOP: "top", MSO_ANCHOR.BOTTOM: "bottom", MSO_ANCHOR.MIDDLE: "middle"}.get(
+        anchor, "top" if is_textbox else "middle")
+    m = lambda v: round((v or 0) * PX_EMU, 1)
+    return {"align": align, "verticalAlign": valign, "spacingLeft": m(tf.margin_left),
+            "spacingRight": m(tf.margin_right), "spacingTop": m(tf.margin_top),
+            "spacingBottom": m(tf.margin_bottom), "spacing": 0,
+            "whiteSpace": "wrap" if tf.word_wrap is not False else None}
+
+
+def collect(shapes, xf, out):
+    """Flatten a slide's shapes (through groups) into ('v'|'e', shape, xform), skipping placeholders."""
+    from pptx.enum.shapes import MSO_SHAPE_TYPE
+    for sh in shapes:
+        if sh.is_placeholder:
+            continue
+        if sh.shape_type == MSO_SHAPE_TYPE.GROUP:
+            collect(sh.shapes, xf.group(sh), out)
+        elif sh.shape_type == MSO_SHAPE_TYPE.LINE or sh._element.tag == q("p:cxnSp"):
+            out.append(("e", sh, xf))
+        elif sh.shape_type in (MSO_SHAPE_TYPE.AUTO_SHAPE, MSO_SHAPE_TYPE.TEXT_BOX) or \
+                sh._element.tag == q("p:sp"):
+            out.append(("v", sh, xf))
+
+
+def border_dist(px, py, v):
+    x, y, w, h = v["x"], v["y"], v["w"], v["h"]
+    if x <= px <= x + w and y <= py <= y + h:
+        return min(px - x, x + w - px, py - y, y + h - py)
+    dx = max(x - px, 0, px - x - w)
+    dy = max(y - py, 0, py - y - h)
+    return (dx * dx + dy * dy) ** 0.5
+
+
+def bind(pt, verts):
+    best = None
+    for v in verts:
+        if v["w"] <= 0 or v["h"] <= 0:
+            continue
+        if border_dist(pt[0], pt[1], v) <= BIND_TOL:
+            key = (v["stroke"] == "none", v["container"], v["w"] * v["h"])
+            if best is None or key < best[0]:
+                best = (key, v)
+    if best is None:
+        return None, None
+    v = best[1]
+    fx = min(max((pt[0] - v["x"]) / v["w"], 0.0), 1.0)
+    fy = min(max((pt[1] - v["y"]) / v["h"], 0.0), 1.0)
+    # snap to the nearest side so the arrow meets the border
+    sides = {"l": pt[0] - v["x"], "r": v["x"] + v["w"] - pt[0], "t": pt[1] - v["y"], "b": v["y"] + v["h"] - pt[1]}
+    side = min(sides, key=lambda k: abs(sides[k]))
+    if side == "l":
+        fx = 0.0
+    elif side == "r":
+        fx = 1.0
+    elif side == "t":
+        fy = 0.0
+    else:
+        fy = 1.0
+    return v, (round(fx, 4), round(fy, 4))
+
+
+def segments_to_paths(segs):
+    """Join segments that meet end to end (same look) into paths. Returns lists of (points, arrows)."""
+    # a segment end that lands partway along another segment (a T-junction) splits that segment there
+    def on_interior(p, t):
+        (x0, y0), (x1, y1) = t["p0"], t["p1"]
+        L2 = (x1 - x0) ** 2 + (y1 - y0) ** 2
+        if L2 == 0:
+            return False
+        u = ((p[0] - x0) * (x1 - x0) + (p[1] - y0) * (y1 - y0)) / L2
+        cx, cy = x0 + u * (x1 - x0), y0 + u * (y1 - y0)
+        near = ((p[0] - cx) ** 2 + (p[1] - cy) ** 2) ** 0.5 <= JOIN_TOL
+        return near and u * L2 ** 0.5 > JOIN_TOL and (1 - u) * L2 ** 0.5 > JOIN_TOL
+    changed = True
+    while changed:
+        changed = False
+        for s in list(segs):
+            for p in (s["p0"], s["p1"]):
+                for t in segs:
+                    if t is not s and t["look"] == s["look"] and on_interior(p, t):
+                        segs.append({**t, "p0": p, "arr0": ("none", 1)})
+                        t["p1"], t["arr1"] = p, ("none", 1)
+                        changed = True
+                        break
+                if changed:
+                    break
+            if changed:
+                break
+    clusters = []      # representative points
+
+    def cid(p):
+        for i, c in enumerate(clusters):
+            if abs(c[0] - p[0]) <= JOIN_TOL and abs(c[1] - p[1]) <= JOIN_TOL:
+                return i
+        clusters.append(p)
+        return len(clusters) - 1
+
+    for s in segs:
+        s["a"], s["b"] = cid(s["p0"]), cid(s["p1"])
+    # union segments that share a cluster and look the same
+    parent = list(range(len(segs)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+    for i, s in enumerate(segs):
+        for j in range(i):
+            t = segs[j]
+            if s["look"] == t["look"] and {s["a"], s["b"]} & {t["a"], t["b"]} and s["a"] != s["b"]:
+                parent[find(i)] = find(j)
+    groups = {}
+    for i in range(len(segs)):
+        groups.setdefault(find(i), []).append(segs[i])
+
+    paths = []
+    for comp in groups.values():
+        comp.sort(key=lambda s: s["order"])
+        adj = {}
+        for s in comp:
+            adj.setdefault(s["a"], []).append(s)
+            adj.setdefault(s["b"], []).append(s)
+        nclust = len(adj)
+        if len(comp) == 1 or len(comp) != nclust - 1:   # single segment, or a loop: keep segments as drawn
+            for s in comp:
+                paths.append((s, [s["p0"], s["p1"]], s["arr0"], s["arr1"]))
+            continue
+        leaves = [c for c, ss in adj.items() if len(ss) == 1]
+
+        def end_arrow(c):
+            s = adj[c][0]
+            return s["arr0"] if s["a"] == c else s["arr1"]
+        plain = [c for c in leaves if end_arrow(c)[0] == "none"]
+        root = plain[0] if len(plain) == 1 else leaves[0]
+        # walk the tree from the root, recording the path to every other leaf
+        prev = {root: None}
+        stack = [root]
+        while stack:
+            c = stack.pop()
+            for s in adj[c]:
+                n = s["b"] if s["a"] == c else s["a"]
+                if n not in prev:
+                    prev[n] = c
+                    stack.append(n)
+        for leaf in leaves:
+            if leaf == root:
+                continue
+            chain, c = [], leaf
+            while c is not None:
+                chain.append(c)
+                c = prev[c]
+            chain.reverse()
+            paths.append((comp[0], [clusters[c] for c in chain], end_arrow(root), end_arrow(leaf)))
+    paths.sort(key=lambda p: p[0]["order"])
+    return paths
+
+
+def corners(pts):
+    """Drop interior points that sit on a straight run."""
+    out = [pts[0]]
+    for i in range(1, len(pts) - 1):
+        a, b, c = out[-1], pts[i], pts[i + 1]
+        if abs((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])) > 1.0:
+            out.append(b)
+    out.append(pts[-1])
+    return out
+
+
+def slide_page(slide, num_, name, width, height, family):
+    page = Page(name, width, height, f"page-{num_}")
+    items = []
+    collect(slide.shapes, Xform(), items)
+    verts, segs = [], []
+    for order, (k, sh, xf) in enumerate(items):
+        if k == "v":
+            x0, y0 = xf.pt(sh.left or 0, sh.top or 0)
+            x1, y1 = xf.pt((sh.left or 0) + (sh.width or 0), (sh.top or 0) + (sh.height or 0))
+            stroke, sw, dash = line_of(sh)
+            verts.append({"sh": sh, "order": order, "x": x0, "y": y0, "w": x1 - x0, "h": y1 - y0,
+                          "stroke": stroke, "sw": sw, "dash": dash, "fill": fill_of(sh),
+                          "id": f"s{num_}-{sh.shape_id}", "parent": None, "container": False})
+        else:
+            stroke, sw, dash = line_of(sh)
+            ln = sp_ln(sh)
+
+            def arrow(tag):
+                el = ln.find(q(tag)) if ln is not None else None
+                return ARROWS.get(el.get("type", "none") if el is not None else "none", ("none", 1))
+            segs.append({"order": order, "p0": xf.pt(sh.begin_x, sh.begin_y), "p1": xf.pt(sh.end_x, sh.end_y),
+                         "look": (stroke, sw, dash), "arr0": arrow("a:headEnd"), "arr1": arrow("a:tailEnd")})
+
+    # nesting: a shape drawn fully inside an earlier, larger outlined or filled shape becomes its child
+    eps = 1.0
+    for v in verts:
+        best = None
+        for p in verts:
+            if p is v or p["order"] > v["order"] or (p["stroke"] == "none" and p["fill"] == "none"):
+                continue
+            if p["w"] * p["h"] <= v["w"] * v["h"]:
+                continue
+            if (p["x"] - eps <= v["x"] and p["y"] - eps <= v["y"] and v["x"] + v["w"] <= p["x"] + p["w"] + eps
+                    and v["y"] + v["h"] <= p["y"] + p["h"] + eps):
+                if best is None or p["w"] * p["h"] < best["w"] * best["h"]:
+                    best = p
+        if best is not None:
+            v["parent"] = best
+            best["container"] = True
+
+    # write parents before children (draw.io needs the parent cell first), otherwise slide order
+    written = set()
+
+    def emit(v):
+        if v["id"] in written:
+            return
+        if v["parent"] is not None:
+            emit(v["parent"])
+        written.add(v["id"])
+        sh = v["sh"]
+        from pptx.enum.shapes import MSO_SHAPE_TYPE
+        is_tb = sh.shape_type == MSO_SHAPE_TYPE.TEXT_BOX
+        st = {"rounded": 0, "html": 1, "fontFamily": family, "fillColor": v["fill"], "strokeColor": v["stroke"],
+              "strokeWidth": v["sw"] or None, "dashed": 1 if v["dash"] else None, "dashPattern": v["dash"]}
+        geom = sh._element.find(".//" + q("a:prstGeom"))
+        if geom is not None and geom.get("prst") in GEOMS:
+            st["shape"] = GEOMS[geom.get("prst")]
+        value = ""
+        if sh.has_text_frame and sh.text_frame.text.strip():
+            value = label_html(sh.text_frame, family)
+            st.update(text_style(sh, is_tb))
+        else:
+            st["whiteSpace"] = "wrap"
+        if v["container"]:
+            st.update({"container": 1, "collapsible": 0})
+        x, y, parent = v["x"], v["y"], "1"
+        if v["parent"] is not None:
+            x, y, parent = x - v["parent"]["x"], y - v["parent"]["y"], v["parent"]["id"]
+        page.vertex(v["id"], value, st, x, y, v["w"], v["h"], parent)
+
+    for v in verts:
+        emit(v)
+
+    for n, (seg, pts, a0, a1) in enumerate(segments_to_paths(segs), 1):
+        pts = corners(pts)
+        stroke, sw, dash = seg["look"]
+        sv, sfx = bind(pts[0], verts)
+        tv, tfx = bind(pts[-1], verts)
+        if sv is not None and sv is tv and len(pts) == 2:
+            sv = tv = None                     # a line drawn inside one box (a divider): leave it free
+        st = {"rounded": 0, "html": 1, "endArrow": a1[0], "endFill": a1[1], "startArrow": a0[0],
+              "startFill": a0[1], "strokeColor": stroke if stroke != "none" else "#000000",
+              "strokeWidth": sw or 1, "dashed": 1 if dash else None, "dashPattern": dash}
+        if sv is not None or tv is not None or len(pts) > 2:
+            st = {**EDGE_BASE, **st}
+        if sv is not None:
+            st.update({"exitX": sfx[0], "exitY": sfx[1], "exitDx": 0, "exitDy": 0, "exitPerimeter": 0})
+        if tv is not None:
+            st.update({"entryX": tfx[0], "entryY": tfx[1], "entryDx": 0, "entryDy": 0, "entryPerimeter": 0})
+        page.edge(f"s{num_}-e{n}", st, sv["id"] if sv else None, tv["id"] if tv else None,
+                  spoint=pts[0], tpoint=pts[-1], points=pts[1:-1])
+    return page
+
+
+def slide_title(slide):
+    try:
+        t = slide.shapes.title
+        return t.text.strip() if t is not None and t.has_text_frame else ""
+    except (AttributeError, KeyError):
+        return ""
+
+
+def from_pptx(path, which, styles):
+    Presentation = load_pptx()
+    try:
+        prs = Presentation(path)
+    except Exception as e:  # python-pptx raises several types for bad files
+        raise InputError(f"can't open {path}: {e}")
+    slides = list(prs.slides)
+    chosen = list(enumerate(slides, 1))
+    if which is not None:
+        if re.fullmatch(r"\d+", which):
+            k = int(which)
+            if not 1 <= k <= len(slides):
+                raise InputError(f"--slide {k}: the file has {len(slides)} slide(s)")
+            chosen = [(k, slides[k - 1])]
+        else:
+            chosen = [(i, s) for i, s in chosen if slide_title(s).lower() == which.strip().lower()]
+            if not chosen:
+                raise InputError(f"--slide: no slide titled '{which}'")
+    W, H = prs.slide_width * PX_EMU, prs.slide_height * PX_EMU
+    stem = os.path.splitext(os.path.basename(path))[0]
+    pages = []
+    for i, s in chosen:
+        name = slide_title(s) or (stem if len(chosen) == 1 else f"{stem} {i}")
+        pages.append(slide_page(s, i, name, W, H, styles["font"]))
+    return pages
+
+
+# ---------------------------------------------------------------------------------------------------------
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="kit-drawio", description="Write editable draw.io diagrams from a JSON "
+                                 "spec or a PowerPoint diagram. Run with --help-spec for the spec format.")
+    ap.add_argument("input", nargs="?", help="spec.json or diagram.pptx")
+    ap.add_argument("-o", "--output", help="the .drawio file to write")
+    ap.add_argument("--slide", help="PowerPoint only: slide number (from 1) or exact slide title")
+    ap.add_argument("--styles", help="JSON file that overrides the style tables")
+    ap.add_argument("--help-spec", action="store_true", help="print the full usage and spec format")
+    a = ap.parse_args(argv)
+    if a.help_spec:
+        print(__doc__)
+        return 0
+    if not a.input or not a.output:
+        ap.print_usage(sys.stderr)
+        print("kit-drawio: give an input file and -o out.drawio", file=sys.stderr)
+        return 2
+    ext = os.path.splitext(a.input)[1].lower()
+    try:
+        styles = load_styles(a.styles)
+        if ext == ".json":
+            if a.slide:
+                raise InputError("--slide only applies to .pptx input")
+            pages = from_spec(a.input, styles)
+        elif ext == ".pptx":
+            pages = from_pptx(a.input, a.slide, styles)
+        else:
+            print("kit-drawio: input must be a .json spec or a .pptx file", file=sys.stderr)
+            return 2
+    except InputError as e:
+        print(f"kit-drawio: {e}", file=sys.stderr)
+        return 1
+    write_file(a.output, pages)
+    for p in pages:
+        bound = sum(1 for _, s, t in p.edges if s and t)
+        print(f"{a.output}: page '{p.name}': {len(p.cells) - len(p.edges)} shapes, {len(p.edges)} edges "
+              f"({bound} bound at both ends)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Kit shared record: status-snapshot",
+  "description": "Where one project stands for one Kit: STATUS.md items tagged to the project, waiting items from QUEUE.md, or the headline of the latest status report.",
+  "x-kit-version": "1.0",
+  "allOf": [
+    {
+      "$ref": "envelope.schema.json"
+    }
+  ],
+  "properties": {
+    "schema": {
+      "const": "status-snapshot"
+    },
+    "body": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "as_of",
+        "health",
+        "headline",
+        "in_progress",
+        "blocked",
+        "next",
+        "waiting"
+      ],
+      "properties": {
+        "as_of": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date"
+        },
+        "health": {
+          "type": "string",
+          "enum": [
+            "on-track",
+            "at-risk",
+            "off-track",
+            "unknown"
+          ]
+        },
+        "headline": {
+          "type": "string",
+          "maxLength": 280
+        },
+        "in_progress": {
+          "type": "array",
+          "maxItems": 25,
+          "items": {
+            "type": "string",
+            "maxLength": 240
+          }
+        },
+        "blocked": {
+          "type": "array",
+          "maxItems": 25,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "item",
+              "waiting_on"
+            ],
+            "properties": {
+              "item": {
+                "type": "string",
+                "maxLength": 240
+              },
+              "waiting_on": {
+                "type": "string",
+                "maxLength": 80
+              }
+            }
+          }
+        },
+        "next": {
+          "type": "array",
+          "maxItems": 25,
+          "items": {
+            "type": "string",
+            "maxLength": 240
+          }
+        },
+        "waiting": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "item",
+              "waiting_on",
+              "since",
+              "due"
+            ],
+            "properties": {
+              "item": {
+                "type": "string",
+                "maxLength": 240
+              },
+              "waiting_on": {
+                "type": "string",
+                "maxLength": 80
+              },
+              "since": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date"
+              },
+              "due": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

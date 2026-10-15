@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Kit shared record envelope",
+  "description": "Fields every shared Kit record carries. Each record type's schema includes this one and defines body.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "id",
+    "kit_id",
+    "owner_role",
+    "project",
+    "created",
+    "updated",
+    "classification",
+    "source",
+    "body"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "enum": [
+        "status-snapshot",
+        "decision",
+        "lesson",
+        "artifact-pointer",
+        "demand-rollup",
+        "handoff-pointer"
+      ]
+    },
+    "schema_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+$"
+    },
+    "id": {
+      "type": "string",
+      "maxLength": 200,
+      "pattern": "^[a-z0-9][a-z0-9-]{2,39}:(status-snapshot|decision|lesson|artifact-pointer|demand-rollup|handoff-pointer):[a-z0-9][a-z0-9._-]{0,95}$"
+    },
+    "kit_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{2,39}$"
+    },
+    "owner_role": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 60
+    },
+    "project": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "created": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "classification": {
+      "type": "string",
+      "enum": [
+        "internal",
+        "confidential"
+      ]
+    },
+    "source": {
+      "type": "string",
+      "maxLength": 250,
+      "pattern": "^(kit|library):(?!.*\\.\\.)(?!(?:.*/)?personal/)[A-Za-z0-9_][^\\n\\\\:]*$"
+    },
+    "body": {
+      "type": "object"
+    }
+  }
+}

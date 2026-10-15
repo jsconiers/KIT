@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
-"""Sync Kit's to-do list with Apple Reminders, so the list lives on your phone too.
+"""Sync Kit's to-do list (QUEUE.md) with Outlook Tasks or Apple Reminders on macOS.
 
   python3 ~/Claude/Agents/kit/.install/shared/reminders_sync.py
 
-- "Kit Inbox": anything you add there (by hand or "Hey Siri, add ... to Kit Inbox") becomes one
-  of your to-dos at the next sync. Start it with "Kit:" to give it to Kit instead.
+REMINDERS_BACKEND in .install/shared/morning/config picks the device:
+  outlook  (default) classic Outlook for Mac tasks, via platform/mac/reminders/
+           outlook_tasks_backend.py. Stays inside Microsoft 365 and reaches your phone through
+           Microsoft To Do. Outlook must be running; the sync never launches it.
+  apple    Apple Reminders (the JXA below). Syncs through iCloud, so keep work items out of it.
+Windows has its own entry point, platform/windows/reminders/reminders_sync_win.py (Outlook only).
+
+- "Kit Inbox": anything you add there becomes one of your to-dos at the next sync. Start it with
+  "Kit:" to give it to Kit instead.
 - "Kit: <your name>": your open to-dos, with alerts at 9:00 on their due dates. Check one off on
-  your phone and it's checked off in QUEUE.md.
-A launchd job runs this every 15 minutes. The first run asks for permission to use Reminders.
+  your phone or in Outlook and it's checked off in QUEUE.md.
+A launchd job runs this every 15 minutes. The first run asks for Automation permission.
 """
 import datetime as dt
 import importlib.machinery
@@ -21,6 +28,8 @@ import sys
 HOME = pathlib.Path.home()
 KIT = HOME / "Claude/Agents/kit"
 LOG = KIT / ".install/logs/sync.log"
+CONFIG = KIT / ".install/shared/morning/config"
+MAC_REMINDERS = pathlib.Path(__file__).resolve().parent.parent / "platform/mac/reminders"
 INBOX = "Kit Inbox"
 
 loader = importlib.machinery.SourceFileLoader("todo", str(KIT / ".install/shared/bin/todo"))
@@ -99,13 +108,46 @@ def log(msg):
         f.write(f"{dt.datetime.now():%Y-%m-%d %H:%M} {msg}\n")
 
 
-def main():
-    me = todo.owner()
+class AppleRemindersBackend:
+    """Apple Reminders through JXA: the same pull_open / mirror operations as the Outlook
+    backends (platform/mac/reminders, platform/windows/reminders)."""
+
+    def pull_open(self, list_name):
+        return jxa(JS_INBOX, list_name)
+
+    def mirror(self, desired_items, list_name):
+        return jxa(JS_MIRROR, json.dumps(desired_items), list_name)
+
+
+def backend_name():
+    if CONFIG.exists():
+        m = re.search(r"^REMINDERS_BACKEND=[\"']?(\w+)", CONFIG.read_text(), re.M)
+        if m:
+            return m.group(1).lower()
+    return "outlook"
+
+
+def make_backend(name):
+    if name == "apple":
+        return AppleRemindersBackend()
+    if name != "outlook":
+        raise RuntimeError(f"unknown REMINDERS_BACKEND {name!r} (use outlook or apple)")
+    path = MAC_REMINDERS / "outlook_tasks_backend.py"
+    loader = importlib.machinery.SourceFileLoader("outlook_tasks_backend", str(path))
+    spec = importlib.util.spec_from_loader("outlook_tasks_backend", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod.OutlookTasksMacBackend()
+
+
+def reconcile(backend, me, inbox_name, mirror_name):
+    """OS-independent reconciliation: inbox list -> QUEUE.md, then QUEUE.md -> mirror list, with
+    completions on the device checked off. Returns a list of what changed."""
     changed = []
 
-    # 1) Phone inbox -> QUEUE.md
-    for r in jxa(JS_INBOX, INBOX):
-        title = r["name"].strip()
+    # 1) Inbox list -> QUEUE.md
+    for r in backend.pull_open(inbox_name):
+        title = (r.get("name") or "").strip()
         if not title:
             continue
         section = me
@@ -124,7 +166,7 @@ def main():
         todo.save(lines)
         changed.append(f"added for {section}: {title}")
 
-    # 2) QUEUE.md -> "Kit: <name>" list; completions on the phone come back as done.
+    # 2) QUEUE.md -> "Kit: <name>" list; completions on the device come back as done.
     lines = todo.QUEUE.read_text().splitlines()
     want = []
     for i, _ in todo.items(lines, me):
@@ -135,14 +177,19 @@ def main():
         want.append({"title": m.group(1),
                      "due": dt.datetime.strptime(due.group(1), "%d-%b-%Y").date().isoformat()
                      if due else None})
-    for title in jxa(JS_MIRROR, json.dumps(want), f"Kit: {me}"):
+    for title in backend.mirror(want, mirror_name):
         lines = todo.QUEUE.read_text().splitlines()
         for n, (i, _) in enumerate(todo.items(lines, me), 1):
             if f"**{title}**" in lines[i]:
                 todo.done(me, n)
                 changed.append(f"checked off on phone: {title}")
                 break
+    return changed
 
+
+def main():
+    me = todo.owner()
+    changed = reconcile(make_backend(backend_name()), me, INBOX, f"Kit: {me}")
     if changed:
         log("; ".join(changed))
     print("\n".join(changed) or "in sync")

@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Kit shared record: decision",
+  "description": "A decision that matters beyond one to-do: from a decision note in memory/decisions/, a decision record (ADR) in the library, or the curator's knowledge base.",
+  "x-kit-version": "1.0",
+  "allOf": [
+    {
+      "$ref": "envelope.schema.json"
+    }
+  ],
+  "properties": {
+    "schema": {
+      "const": "decision"
+    },
+    "body": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "title",
+        "decided",
+        "status",
+        "summary",
+        "options",
+        "why",
+        "revisit",
+        "sources",
+        "origin"
+      ],
+      "properties": {
+        "title": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "decided": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "current",
+            "proposed",
+            "superseded"
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "maxLength": 600
+        },
+        "options": {
+          "type": "array",
+          "maxItems": 10,
+          "items": {
+            "type": "string",
+            "maxLength": 200
+          }
+        },
+        "why": {
+          "type": "string",
+          "maxLength": 600
+        },
+        "revisit": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "sources": {
+          "type": "array",
+          "maxItems": 10,
+          "items": {
+            "type": "string",
+            "maxLength": 120
+          }
+        },
+        "origin": {
+          "type": "string",
+          "enum": [
+            "decision-note",
+            "knowledge-base",
+            "decision-record"
+          ]
+        }
+      }
+    }
+  }
+}

@@ -10,6 +10,7 @@
     <string>{{HOME}}/Claude/Agents/kit/.install/platform/mac/morning/run.sh</string>
   </array>
   <key>StartCalendarInterval</key>
+  <!-- Morning brief: weekdays 07:45. -->
   <array>
     <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>7</integer><key>Minute</key><integer>45</integer></dict>
     <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>7</integer><key>Minute</key><integer>45</integer></dict>

@@ -231,6 +231,17 @@ def check_calendar():
           "kitcal can't read your calendars: " + out.strip()[:120], "warn")
 
 
+def check_grammar():
+    """Optional: LanguageTool and Java for the reviewer's grammar pass. Missing is fine, never a warning."""
+    tool = pathlib.Path(__file__).resolve().parent / "bin" / "kit-grammar"
+    if not tool.exists():
+        return
+    code, out = run([sys.executable, str(tool), "--where"], timeout=60)
+    found = code == 0 and "not found" not in out
+    add("ok", "Grammar check", "LanguageTool and Java found: " + " | ".join(out.split("\n")[:2]).strip()
+        if found else "LanguageTool or Java not installed; optional, reviews skip the grammar pass")
+
+
 def check_servers():
     code, out = run([str(HOME / ".local/bin/claude"), "mcp", "list"], timeout=180)
     bad = [ln.split(":")[0] for ln in out.splitlines() if "✗" in ln or "Failed" in ln]
@@ -270,7 +281,7 @@ def main(argv):
         return 0
     for fn in (check_import, check_settings, check_index, check_jobs, check_runs, check_tokens,
                check_secrets, check_permissions, check_agents, check_git, check_calendar, check_mail,
-               check_guard):
+               check_guard, check_grammar):
         try:
             fn()
         except Exception as e:  # noqa: BLE001

@@ -21,6 +21,16 @@ shared/              Cross-platform Python + assets:
   bin/todo             command-line to-do that shares QUEUE.md
   bin/connector-guard  read-only guard and audit log for agents that reach outside systems
   bin/vsdx-finish      fills in title blocks and builds legends in Visio diagrams
+  bin/kit-grammar      optional offline spelling and grammar pass (LanguageTool), skipped if absent
+  bin/kit-drawio       editable draw.io files from a diagram spec or a PowerPoint diagram
+  bin/kit-publish      writes selected records to an outbox for a team dashboard (off by default)
+  bin/kit-audit        daily and weekly checks of the connector audit log, for the brief and dashboard
+  team_dashboard.py    read-only team dashboard built from one or more outboxes
+  templates/           HTML templates for both dashboards; copy one to ~/Claude/Agents/kit/templates/
+                       to restyle it (your copy wins and survives reinstalls)
+  kit_template.py      finds and fills the dashboard templates
+  kit_records.py       record validator and credential checks used by kit-publish
+  records/             shared record formats (JSON Schema) and their rules
   doctor.py            health check for the install, schedules, notes, secrets
   dashboard.py         one-page dashboard (to-do, briefs, health, runs)
   reminders_sync.py    two-way to-do sync (device backend is per-OS)
@@ -75,7 +85,9 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 `kit/agents/` holds Kit's staff, Claude Code subagents that Kit directs: a researcher, a
 librarian, a curator, an IA writer and a GDS writer, a reviewer, a diagrammer, a scheduler, a
 demand tracker, a connector gateway, an intake triager, a dependency mapper, a status reporter,
-an implementation planner, a deck builder, a handoff agent, and a meeting scribe. They work
+an implementation planner, a deck builder, a handoff agent, a meeting scribe, a standards
+checker, a risk and compliance mapper, a cost estimator, a change board prep agent, a decision
+recorder, a PMO estimator, an onboarding guide, and an auditor. They work
 through Kit, apart from a few direct pairings listed in `memory/context/agents.md`. The gateway
 is the agent meant to reach outside systems: `shared/bin/connector-guard` runs as a hook on it
 to keep connectors read-only and record every request in an audit log.
@@ -92,6 +104,37 @@ For the diagrammer, draw.io Desktop works well: its command line exports PNG, SV
 without opening a window. JGraph's draw.io skill (`plugins/claude-code/skills/drawio` in
 github.com/jgraph/drawio-mcp) can be copied into `~/.claude/skills/drawio/`. It fetches
 reference files from GitHub, so keep local copies next to it for agents without web access.
+
+## Optional: grammar checks
+
+The reviewer runs an offline spelling and grammar pass when LanguageTool and Java are installed, and
+skips it, saying so, when they aren't. Nothing else changes either way. On macOS:
+
+```bash
+brew install languagetool    # brings a Java runtime with it
+python3 ~/Claude/Agents/kit/.install/shared/bin/kit-grammar --where
+```
+
+`kit-grammar` looks in Homebrew's folder, then `~/Claude/Agents/kit/tools/LanguageTool*`, and on
+Windows in Program Files, AppData, and Scoop. Set `KIT_LANGUAGETOOL` to the folder holding
+`languagetool-commandline.jar` if it's elsewhere. LanguageTool 6 and later needs Java 17 or later.
+The health check reports whether it's available, and never counts its absence as a problem.
+
+## Sharing with a team (preview)
+
+Several Kits, one per architect, can share selected records for a team dashboard and shared
+lessons. Turn it on in `memory/context/sharing.md`: set a Kit id (not your name), your role, and
+the record types to publish. Nothing is shared until you do.
+
+```bash
+python3 ~/Claude/Agents/kit/.install/shared/bin/kit-publish --dry-run   # see what would be shared
+python3 ~/Claude/Agents/kit/.install/shared/bin/kit-publish             # write records to the outbox
+python3 ~/Claude/Agents/kit/.install/shared/team_dashboard.py --source <outbox> --source <teammate outbox> --open
+```
+
+Records are small JSON summaries, never document text, credentials, or personal notes. Lessons
+are shared only when tagged `share: team`. Formats and rules: `shared/records/README.md`. Syncing
+outboxes through a shared folder comes later; for now, copy them.
 
 ## Privacy
 

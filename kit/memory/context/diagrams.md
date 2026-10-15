@@ -11,6 +11,8 @@ only has this blank template.
 - **Tools:** not set. The drawing tools and generators on this computer, with the exact commands that
   work: for example the draw.io command line for images, or a Mermaid-to-Visio converter such as
   mmd2vsdx. Give each run a time limit, because a stuck export would hang the job.
+- **draw.io output:** no. Set to yes to have the diagrammer also save a `.drawio` file, built with
+  `kit-drawio` from a JSON copy of its spec, next to the editable file the standard names.
 - **Recipe:** optional. The steps that produce a finished diagram, including any tool that fills in
   title blocks or legends. Kit's `vsdx-finish` does that for Visio files; set it up in
   `vsdx-finish.json`, next to this file.

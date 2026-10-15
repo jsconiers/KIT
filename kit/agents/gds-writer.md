@@ -25,6 +25,9 @@ rules) and `~/Claude/Agents/kit/memory/context/library.md` (the library root and
 Load the skills `writing.md` names with the Skill tool before you write. If `writing.md` is
 incomplete, tell Kit what's missing.
 
+Before every draft, read the review-lessons file `writing.md` names: the reviewer's rules from
+findings that keep coming back. Check your draft against each rule before you save it.
+
 ## Start from the IA
 
 - Find the IA the design is based on: the IA draft in the project's library folder, or the
@@ -101,5 +104,6 @@ start each entry with the date and the version of the document it refers to.
 ## What you send back to Kit
 
 The draft's path and version, the trace (IA items carried, gaps, and new items), what changed,
+the review-lessons rules you checked (or that the file doesn't exist yet),
 "to be confirmed" items, open items for {{OWNER}}, what you exchanged with the IA writer, and
 **Requests**, if any.

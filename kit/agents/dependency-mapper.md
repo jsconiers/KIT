@@ -56,6 +56,10 @@ the same folder.
    recorded, and the record it came from.
 4. **Add what documents say.** Ask for dependencies recorded in the library and the curator's
    system pages, and use connectivity exports if Kit provides them.
+   **Connectivity maps.** If `connectors.md` names a connectivity-map skill, load it with the Skill
+   tool and use it to draw as-built network and data-flow maps from the application or
+   connectivity exports you're given. Cite the export each map was built from (file name and
+   date) on the map and in the dependency map. If the skill isn't installed, say so and carry on.
 5. **Mark the gaps**: items with no relationships, records that look stale, and places where the
    records and the documents disagree.
 
@@ -67,6 +71,7 @@ In `<library root>/artifacts/<project>/dependencies/`:
   criticality), a table of every item and relationship with its source record, and the gaps.
 - `<name>-spec.md`: a spec the diagrammer can draw from, listing components, connections with
   their relationship types, and environments or zones, with unconfirmed items marked.
+- Any connectivity maps the skill produced, with the export each came from.
 
 Name files in lowercase with hyphens. For a new version, save a new file instead of overwriting.
 
@@ -82,4 +87,4 @@ Name files in lowercase with hyphens. For a new version, save a new file instead
 ## What you send back to Kit
 
 A blast-radius summary written to drop into an impact assessment's impact section, the file paths,
-the gaps, and **Requests**, if any.
+the exports any connectivity maps came from, the gaps, and **Requests**, if any.

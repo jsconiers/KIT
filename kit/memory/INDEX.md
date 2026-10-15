@@ -16,3 +16,12 @@ when its line is relevant. Keep this under 100 lines and put detail in the files
 - `context/intake.md`: the intake checklist, when an impact assessment is needed, and how projects are named
 - `context/meetings.md`: the meeting inbox, where the architect's notes are, and the mail commands the meeting scribe uses
 - `context/status.md`: the status report's format, window, and audiences
+- `context/sharing.md`: what kit-publish shares with the team, the outbox, the Kit id, and the owner role
+- `context/standards.md`: the engineering standards, reference architectures, and baselines the standards checker uses
+- `context/compliance.md`: control frameworks, data classes, and sign-off roles for the risk and compliance mapper
+- `context/costs.md`: rate cards, labor rates, currency, and contingency for the cost estimator
+- `context/changeboard.md`: the change board's template, risk matrix, checklist, and lead times
+- `context/decisions.md`: the ADR template, folder, numbering, and sources for the decision recorder
+- `context/estimating.md`: past project data, phase model, and roles for the PMO estimator
+- `context/onboarding.md`: core reading by role, team conventions, and what's off limits for the onboarding guide
+- `context/audit.md`: the auditor's audit folder, reviewers, working hours, and kit-audit thresholds

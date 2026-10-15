@@ -1,9 +1,39 @@
 # Kit's run settings. Copy to ~/Claude/Agents/kit/.install/shared/morning/config and edit.
 OWNER_NAME="Alex"
-# Where Kit texts the briefs (iMessage). It tries these in order.
+
+# How the morning brief and weekly review reach you (shared/deliver.py), space-separated, any of:
+#   local           desktop notification with the first lines, plus a dashboard rebuild (default)
+#   outlook-drafts  save the brief as a draft in Outlook's Drafts folder, addressed to
+#                   DELIVERY_EMAIL_TO, with no window and no send; falls back to local if Outlook
+#                   isn't running
+#   outlook-review  the same draft, opened in a window for you to review; never sent
+#   imessage        LEGACY, macOS only: texts the short version to IMESSAGE_TO. Leaves Microsoft
+#                   365, so never use it for work content.
+#   sms             LEGACY, Windows only: SMS gateway hook (a stub). Leaves Microsoft 365, so never
+#                   use it for work content.
+# Kit never sends mail: the Outlook channels only save or open a draft.
+DELIVERY="local"
+# Address the Outlook drafts are made out to (usually your own work address).
+DELIVERY_EMAIL_TO="you@example.com"
+
+# Legacy imessage channel only: where Kit texts the briefs. It tries these in order.
 IMESSAGE_TO="+15555550123"
 IMESSAGE_TO_ALT="you@example.com"
+
+# To-do sync backend: outlook (Outlook Tasks, the default on macOS and Windows) or apple
+# (Apple Reminders, macOS only; syncs through iCloud, so keep work items out of it).
+REMINDERS_BACKEND="outlook"
+
 # Days with no morning or open run (date +%u: 1 = Monday ... 7 = Sunday), space-separated.
 SKIP_DAYS=""
 # Tools the unattended runs may never call, space-separated.
 BLOCK_TOOLS=""
+# Extra tools the unattended runs may use, as Claude Code permission rules separated by semicolons
+# (rules can contain spaces), for example the read-only mail and calendar commands your setup files
+# name. Leave empty for none.
+ALLOW_TOOLS=""
+# More tools for the weekly review only (semicolon-separated), for example "Agent" for the auditor.
+ALLOW_TOOLS_WEEKLY=""
+# Optional: a command that prints today's events as a JSON list, for the dashboard's Today panel
+# (fields start, end, all_day, title or subject, calendar). Empty uses the macOS kitcal tool.
+CALENDAR_JSON_CMD=""

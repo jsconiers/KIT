@@ -9,14 +9,14 @@
 # the plists exactly:
 #
 #   Kit Morning Brief     weekdays (Mon-Fri)  07:45   -> run.ps1 morning
-#   Kit Post-Open Read    weekdays (Mon-Fri)  09:45   -> run.ps1 open
-#   Kit Weekly Review     Saturday            18:00   -> run.ps1 weekly
+#   Kit Post-Open Read    weekdays (Mon-Fri)  09:45   -> run.ps1 open      (optional; see note)
+#   Kit Weekly Review     Monday              07:30   -> run.ps1 weekly
 #   Kit Reminders Sync    every 15 min + at logon     -> reminders_sync_win.py
 #   Kit Trade Journal     weekdays (Mon-Fri)  16:20   -> run.ps1 journal   (optional; see note)
 #
-# The journal task has no launchd plist on the Mac (run.sh documents a 16:20 journal run but no
-# plist ships for it). run.ps1 fully supports journal mode, so we register it too for parity;
-# set $RegisterJournal = $false below to skip it.
+# The post-open read and the trade journal are optional extras for a trading setup. If you don't
+# trade, set $RegisterOpen and $RegisterJournal to $false below. (The journal has no launchd plist
+# on the Mac; run.sh documents a 16:20 journal run.)
 #
 # Tasks run as the current user, only when that user is logged on (launchd runs in the user's
 # GUI session; so do these). StartWhenAvailable catches runs missed while the machine was off,
@@ -24,7 +24,8 @@
 
 $ErrorActionPreference = "Stop"
 
-$RegisterJournal = $true   # set $false to skip the 16:20 trade-journal task
+$RegisterOpen    = $true   # optional trading extra: set $false to skip the 09:45 post-open read
+$RegisterJournal = $true   # optional trading extra: set $false to skip the 16:20 trade journal
 
 $KitHome   = Join-Path $env:USERPROFILE "Claude\Agents\kit"
 $RunPs1    = Join-Path $KitHome ".install\platform\windows\morning\run.ps1"
@@ -67,16 +68,18 @@ Register-KitTask -Name "Kit Morning Brief" `
     -Trigger (New-ScheduledTaskTrigger -Weekly -DaysOfWeek $weekdays -At "7:45am") `
     -ActionArgs @("-ExecutionPolicy", "Bypass", "-NoProfile", "-WindowStyle", "Hidden", "-File", "`"$RunPs1`"", "morning")
 
-# --- Kit Post-Open Read: weekdays 09:45 ------------------------------------------------------
-Register-KitTask -Name "Kit Post-Open Read" `
-    -Description "Kit's post-open read (port of com.USER.kit.open)." `
-    -Trigger (New-ScheduledTaskTrigger -Weekly -DaysOfWeek $weekdays -At "9:45am") `
-    -ActionArgs @("-ExecutionPolicy", "Bypass", "-NoProfile", "-WindowStyle", "Hidden", "-File", "`"$RunPs1`"", "open")
+# --- Kit Post-Open Read: weekdays 09:45 (optional extra for a trading setup) -----------------
+if ($RegisterOpen) {
+    Register-KitTask -Name "Kit Post-Open Read" `
+        -Description "Kit's post-open read (port of com.USER.kit.open)." `
+        -Trigger (New-ScheduledTaskTrigger -Weekly -DaysOfWeek $weekdays -At "9:45am") `
+        -ActionArgs @("-ExecutionPolicy", "Bypass", "-NoProfile", "-WindowStyle", "Hidden", "-File", "`"$RunPs1`"", "open")
+}
 
-# --- Kit Weekly Review: Saturday 18:00 -------------------------------------------------------
+# --- Kit Weekly Review: Monday 07:30 ---------------------------------------------------------
 Register-KitTask -Name "Kit Weekly Review" `
     -Description "Kit's weekly review (port of com.USER.kit.weekly)." `
-    -Trigger (New-ScheduledTaskTrigger -Weekly -DaysOfWeek "Saturday" -At "6:00pm") `
+    -Trigger (New-ScheduledTaskTrigger -Weekly -DaysOfWeek "Monday" -At "7:30am") `
     -ActionArgs @("-ExecutionPolicy", "Bypass", "-NoProfile", "-WindowStyle", "Hidden", "-File", "`"$RunPs1`"", "weekly")
 
 # --- Kit Reminders Sync: every 15 minutes + at logon -----------------------------------------
@@ -91,7 +94,7 @@ Register-KitTask -Name "Kit Reminders Sync" `
     -ActionArgs @("-ExecutionPolicy", "Bypass", "-NoProfile", "-WindowStyle", "Hidden", "-Command",
                   "& { py -3 `"$SyncPy`" ; if (`$LASTEXITCODE -ne 0) { python `"$SyncPy`" } }")
 
-# --- Kit Trade Journal: weekdays 16:20 (optional; no Mac plist) ------------------------------
+# --- Kit Trade Journal: weekdays 16:20 (optional extra for a trading setup; no Mac plist) -----
 if ($RegisterJournal) {
     Register-KitTask -Name "Kit Trade Journal" `
         -Description "Kit's post-close trade journal (run.sh documents 16:20; no Mac plist ships)." `

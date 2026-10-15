@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Kit shared record: lesson",
+  "description": "A lesson its owner tagged share: team.",
+  "x-kit-version": "1.0",
+  "allOf": [
+    {
+      "$ref": "envelope.schema.json"
+    }
+  ],
+  "properties": {
+    "schema": {
+      "const": "lesson"
+    },
+    "body": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "title",
+        "rule",
+        "why",
+        "how_to_apply"
+      ],
+      "properties": {
+        "title": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "rule": {
+          "type": "string",
+          "maxLength": 600
+        },
+        "why": {
+          "type": "string",
+          "maxLength": 600
+        },
+        "how_to_apply": {
+          "type": "string",
+          "maxLength": 800
+        }
+      }
+    }
+  }
+}

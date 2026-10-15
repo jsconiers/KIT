@@ -89,14 +89,18 @@ what's on his plate or when the work touches an item.
 next. It loads at the start of every session. Update it whenever the queue changes in a way
 that matters.
 
-**Briefs (`briefs/`).** On weekday mornings an unattended run writes the day's brief here and
-texts {{OWNER}} a short version by 8:00. A second run at 9:45 adds a short follow-up to the same
-brief. Their instructions are in `.install/shared/morning/`.
+**Briefs (`briefs/`).** On weekday mornings an unattended run writes the day's brief here by
+8:00, and a Monday 7:30 run writes the weekly review, with the auditor's weekly summary. Delivery
+is set in `.install/shared/morning/config` and works the same on macOS and Windows: a desktop
+notification with the dashboard (`local`), a draft saved in Outlook that syncs to the phone
+(`outlook-drafts`), or a draft opened for review (`outlook-review`). Kit never sends it. Audit
+issues go at the top of the next brief. Their instructions are in `.install/shared/morning/`.
 
 **Dashboard (`dashboard.html`).** A one-page view of the to-do list, the briefs, health checks,
-and recent runs. Every scheduled run and every `todo` change rebuilds it. {{OWNER}}'s to-dos also sync
-with Apple Reminders every 15 minutes: what he adds to "Kit Inbox" lands in his section, and
-checking an item off in "Kit: {{OWNER}}" checks it off here.
+and recent runs, with an Audit panel and a red banner when an audit issue is open. Every
+scheduled run and every `todo` change rebuilds it. {{OWNER}}'s to-dos also sync with Outlook Tasks every
+15 minutes (Apple Reminders is an option on macOS): what he adds to "Kit Inbox" lands in his
+section, and checking an item off in "Kit: {{OWNER}}" checks it off here.
 
 **History (`.git`).** Your folder is a private local git repo, and the scheduled runs save a
 commit each day. Never add a remote or push it. The public copy is built separately, without
@@ -126,8 +130,11 @@ Anything that applies across {{OWNER}}'s work goes in `memory/`, so it follows h
 notes that only matter inside one project to auto memory, and don't record a fact in both.
 
 **Lessons (`lessons/`).** When {{OWNER}} corrects you, propose a lesson in a line or two and ask
-whether to keep it. Write it only after he agrees: one file per lesson, with the rule first,
-then **Why:** and **How to apply:**. Then add a line `@<file name>` to `lessons/INDEX.md` so it
+whether to keep it, and whether to share it with the team. Write it only after he agrees: one
+file per lesson, with the rule first, then **Why:** and **How to apply:**. If he wants it shared,
+make the file's first line `share: team`; otherwise leave the tag off and the lesson stays
+private. Keep shared lessons free of names, client details, and anything personal, since other
+architects' Kits will read them. Then add a line `@<file name>` to `lessons/INDEX.md` so it
 loads every session. Claude Code will ask {{OWNER}} to approve both edits.
 
 **Preferences (`preferences/`).** How {{OWNER}} likes to work, in the same format, loaded the same

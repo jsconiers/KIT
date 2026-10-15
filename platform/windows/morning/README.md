@@ -37,7 +37,7 @@ when that user is logged on (launchd runs in the user's GUI session; these match
 |---|---|---|---|
 | Kit Morning Brief | Weekdays (Mon-Fri) 07:45 | `run.ps1 morning` | `com.USER.kit.morning` |
 | Kit Post-Open Read | Weekdays (Mon-Fri) 09:45 | `run.ps1 open` | `com.USER.kit.open` |
-| Kit Weekly Review | Saturday 18:00 | `run.ps1 weekly` | `com.USER.kit.weekly` |
+| Kit Weekly Review | Monday 07:30 | `run.ps1 weekly` | `com.USER.kit.weekly` |
 | Kit Reminders Sync | Every 15 min + at logon | `reminders_sync_win.py` | `com.USER.kit.sync` |
 | Kit Trade Journal | Weekdays (Mon-Fri) 16:20 | `run.ps1 journal` | *(no plist; see note)* |
 
@@ -48,50 +48,28 @@ for parity. Set `$RegisterJournal = $false` at the top of that script to skip it
 The reminders-sync task calls `.install\platform\windows\reminders\reminders_sync_win.py` (the
 Windows reminders backend, delivered separately). The task tries `py -3` first, then `python`.
 
-## BurntToast (optional dependency)
-
-The default delivery channel is a **Windows toast notification**, shown via the
-[BurntToast](https://github.com/Windos/BurntToast) PowerShell module. It is optional:
-
-```powershell
-Install-Module BurntToast -Scope CurrentUser
-```
-
-If BurntToast is **not** installed — or the task runs in a non-interactive session where a toast
-can't appear — delivery automatically **falls back to a file** (see below). Nothing is ever lost.
-
 ## Delivery channels
 
-There is no iMessage on Windows, so delivery is pluggable. The channel is read from the shared
-morning config at `.install\shared\morning\config` (the same file the Mac uses; `KEY="value"`
-lines). Add these keys as needed:
+Delivery is the same on Windows and macOS: both runners call `shared/deliver.py`, which reads
+`DELIVERY` from the shared config at `.install\shared\morning\config` (`KEY="value"` lines).
+List one or more channels, space-separated:
 
 ```ini
-# Which channel to use: toast | file | email | sms   (default: toast)
-DELIVERY_CHANNEL="toast"
-
-# email channel (opens an Outlook DRAFT via kitmail.py; never auto-sends):
-DELIVERY_EMAIL_TO="you@example.com"
-DELIVERY_EMAIL_FROM=""          # optional: the account to draft from
-
-# sms channel (HOOK/stub — wire your own gateway in run.ps1's Send-Sms):
-DELIVERY_SMS_TO="+15555550123"
-DELIVERY_SMS_API_URL="https://api.example.com/send"
-DELIVERY_SMS_API_KEY_ENV="KIT_SMS_API_KEY"   # NAME of the env var holding the key, not the key
+DELIVERY="local"                 # local | outlook-drafts | outlook-review (any combination)
+DELIVERY_EMAIL_TO="you@example.com"   # the address the Outlook draft is addressed to
 ```
 
-Channels implemented in `run.ps1`:
+- **`local`** (default): a toast notification using built-in Windows APIs (falling back to a log
+  message if toasts aren't available), then the dashboard is rebuilt. The brief file is in
+  `briefs\`.
+- **`outlook-drafts`**: saves the brief as a draft in classic Outlook's Drafts folder (COM
+  `.Save()`), with no window. Exchange syncs it to Outlook on the phone. Never sent. Falls back to
+  `local` if Outlook isn't running.
+- **`outlook-review`**: the same draft, opened on screen (`.Display()`) for review. Never sent.
+- **`sms`** (legacy, opt-in): a stub that leaves Microsoft 365; not for work content.
 
-- **`toast`** (default) — BurntToast notification; falls back to a file if unavailable.
-- **`file`** (fallback, also selectable) — writes the brief to
-  `briefs\delivered-<mode>-<timestamp>.txt` and logs it under `.install\logs`. Always available.
-- **`email`** (hook) — reuses the Windows mail tool (`platform/windows/mail/kitmail.py`) to open
-  an Outlook **draft** addressed to `DELIVERY_EMAIL_TO`. `kitmail` never sends on its own, so the
-  owner reviews and sends. For a true unattended send, replace this with SMTP/Graph in
-  `Send-Email`.
-- **`sms`** (hook) — a clearly-marked **stub** in `Send-Sms`. Wire your provider's HTTP call
-  there. The API key is referenced by the **name** of an environment variable
-  (`DELIVERY_SMS_API_KEY_ENV`), never stored in config or on disk.
+The older `DELIVERY_CHANNEL` key still works when `DELIVERY` isn't set: `toast` and `file` map to
+`local`, `email` to `outlook-review`, and `sms` to `sms`.
 
 Any channel that fails falls back to the file channel, so a brief is never dropped. On a hard
 failure (even the file write fails), `run.ps1` keeps an `unsent-<mode>.txt` copy and does **not**

@@ -107,8 +107,18 @@ def reconcile(todo, backend, me, inbox_name, mirror_name):
     return changed
 
 
+def check_backend_setting():
+    """REMINDERS_BACKEND (shared config) is outlook or apple; Windows only has outlook."""
+    cfg = KIT / ".install/shared/morning/config"
+    if cfg.exists():
+        m = re.search(r"^REMINDERS_BACKEND=[\"']?(\w+)", cfg.read_text(), re.M)
+        if m and m.group(1).lower() != "outlook":
+            log(f"REMINDERS_BACKEND={m.group(1)} isn't available on Windows; using outlook")
+
+
 def main():
     me = todo.owner()
+    check_backend_setting()
     backend = OutlookTasksBackend()
     changed = reconcile(todo, backend, me, INBOX, f"Kit: {me}")
     if changed:

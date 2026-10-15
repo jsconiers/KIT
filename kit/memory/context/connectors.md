@@ -13,4 +13,6 @@ current.
   `audit_dir` at storage your employer manages.
 - **Audit log:** one JSON line per request, result, and session end, in monthly files. Result
   contents and credentials are never logged. Say who reviews it.
+- **Connectivity-map skill:** optional. A skill the dependency mapper uses to draw as-built network
+  and data-flow maps from application or connectivity exports, and where it comes from.
 - **Status:** optional. Connectors that aren't working yet, and why.

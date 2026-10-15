@@ -3,7 +3,8 @@
 What the status reporter uses. It reads this before every job, so keep it current.
 
 - **Format:** completed, in progress, blockers, issues, and escalations needed, plus a timeline of
-  dated commitments, unless you set another here.
+  dated commitments and a "Since last report" section (slipped dates, blockers by age, reopened
+  items, and the trend), unless you set another here.
 - **Window:** the last 14 days, unless you set another.
 - **Audiences:** optional. Who reads each kind of report, such as a leadership summary or a team
   view, and how long each should be.

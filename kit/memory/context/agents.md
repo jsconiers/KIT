@@ -165,3 +165,100 @@ what Kit gives them, never personal notes, and all run for {{OWNER}} on this com
 - **Routine:** after it reports, have the librarian catalog the minutes and the curator record the
   decisions, and put the actions in the queue.
 - **Setup:** `memory/context/meetings.md`.
+
+## standards-checker
+
+- **Does:** checks a design (usually a GDS, sometimes an IA) against the team's engineering
+  standards, reference architectures, and security baselines. Writes a conformance report
+  (conforms, gap, not applicable, or can't tell, with evidence and section) and lists the
+  exceptions that would need a waiver. Read-only on the document.
+- **Reach it:** the document and version, its project, and the kind of change.
+- **Routine:** run it on each GDS draft alongside the reviewer, before {{OWNER}} shares it.
+- **Setup:** `memory/context/standards.md`.
+
+## risk-compliance-mapper
+
+- **Does:** maps a design to the regulatory and policy controls it touches, and drafts the IA's or
+  GDS's risk and compliance section with a control table and open questions for the compliance
+  owner. Flags and drafts; never decides compliance.
+- **Reach it:** the document and version, its project, and any data classes or vendors already
+  known.
+- **Setup:** `memory/context/compliance.md`.
+
+## cost-estimator
+
+- **Does:** rough-order-of-magnitude costs from a design's bill of materials: licenses,
+  infrastructure, support, and effort, with low, likely, and high ranges, every assumption listed,
+  and every price cited or marked assumed. Never a quote. Prices the pmo-estimator's effort figures
+  rather than estimating effort again.
+- **Reach it:** the document and version, its project, and the term to cost over.
+- **Setup:** `memory/context/costs.md`.
+
+## change-board-prep
+
+- **Does:** packages an approved design and the implementation planner's documents into a change
+  board pack: a change request summary, a risk score with the rule shown, a rollback summary, a
+  test evidence checklist, a deck outline, and anticipated questions. Never submits or books a
+  window.
+- **Reach it:** the project, the GDS version, and the target change board meeting.
+- **Routine:** after the implementation planner reports, send its outputs here, then send the deck
+  outline to the deck builder.
+- **Setup:** `memory/context/changeboard.md`.
+
+## decision-recorder
+
+- **Does:** writes architecture decision records (ADRs) from minutes, reviews, IA and GDS drafts,
+  and Kit's briefs: context, decision, options, consequences, status, who decided (by role), date,
+  and sources. Numbers them ADR-0001 and up, never reused, and keeps an index. Records anything
+  without a clear decision as proposed. Writes only in the library's `decisions/` folder.
+- **Reach it:** the source documents or meeting, the project, and the decision if you know it, or
+  "record the decisions from <minutes>".
+- **Routine:** after it reports, have the librarian catalog the new and changed ADRs and the
+  curator record them, and ask {{OWNER}} about each proposed one.
+- **Setup:** `memory/context/decisions.md`.
+
+## pmo-estimator
+
+- **Does:** effort and timeline ranges for a new demand or project, from comparable past projects
+  and the demand register (actuals against estimates where they exist): phases, effort by role,
+  low, likely, and high duration, confidence, comparables, and assumptions. Says plainly when there
+  are too few comparables, and never commits a date. Writes in the project's `estimates/` folder.
+- **Reach it:** the demand or project, its scope or IA, who's asking (PM or PMO), and any
+  constraints.
+- **Routine:** if it asks for actuals from an outside system, get them from the gateway or the
+  status reporter and brief it again. Send its effort by role to the cost estimator when costs
+  are needed.
+- **Setup:** `memory/context/estimating.md`.
+
+## onboarding-guide
+
+- **Does:** answers "how do we do X here" for a new architect or project manager from the library,
+  the knowledge base, setup files, and published documents, with citations, and builds first-week
+  reading lists and glossaries on request. Read-only; saves nothing.
+- **Reach it:** the question, or "reading list for a new <role>", or "glossary for <topic>".
+- **Routine:** check anything it flags as resting on private sources with {{OWNER}} before passing
+  it to the new person.
+- **Setup:** `memory/context/onboarding.md`.
+
+## Changes to existing routines (15-Oct-2026)
+
+- **Reviewer:** also re-reviews a revised document against its earlier review, runs the optional
+  grammar pass (kit-grammar), and keeps the review-lessons file that the IA and GDS writers check
+  their drafts against.
+- **Diagrammer:** also saves a draw.io copy, built with kit-drawio, when `diagrams.md` says yes.
+- **Dependency mapper:** also draws as-built network and data-flow maps from application or
+  connectivity exports, when `connectors.md` names a connectivity-map skill.
+- **Status reporter:** each report shows what changed since the last one; the first is the
+  baseline.
+
+## auditor
+
+- **Does:** checks how the staff reach outside systems: runs kit-audit on the connector audit log
+  and the guard setup, explains each finding, separates real issues from noise, tracks the
+  standing gaps, and writes a weekly audit report. Read-only on the logs; never calls a connector.
+- **Reach it:** "daily audit", "weekly audit", or a finding to explain.
+- **Routine:** kit-audit runs before every morning brief (daily) and the Monday weekly review
+  (weekly); issues go to the top of the brief and a banner on the dashboard. Run the auditor after
+  the weekly review and whenever audit.txt shows a critical or warning finding; put its Requests
+  in the queue.
+- **Setup:** `memory/context/audit.md`.

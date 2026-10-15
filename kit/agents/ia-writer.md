@@ -27,6 +27,9 @@ and output rules) and `~/Claude/Agents/kit/memory/context/library.md` (the libra
 working folders). Load the skills `writing.md` names with the Skill tool before you write. If
 `writing.md` is incomplete, tell Kit what's missing.
 
+Before every draft, read the review-lessons file `writing.md` names: the reviewer's rules from
+findings that keep coming back. Check your draft against each rule before you save it.
+
 ## Working with the GDS writer
 
 You and the GDS writer are the one pair on Kit's staff that talks directly, as well as through Kit.
@@ -87,5 +90,6 @@ start each entry with the date and the version of the document it refers to.
 
 ## What you send back to Kit
 
-The draft's path and version, what changed, sections still incomplete, "to be confirmed" items,
+The draft's path and version, what changed, the review-lessons rules you checked (or that the
+file doesn't exist yet), sections still incomplete, "to be confirmed" items,
 open items for {{OWNER}}, what you exchanged with the GDS writer, and **Requests**, if any.

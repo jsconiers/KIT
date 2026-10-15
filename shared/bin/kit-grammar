@@ -1,0 +1,215 @@
+#!/usr/bin/env python3
+"""kit-grammar: an optional, offline spelling and grammar pass with LanguageTool.
+
+  kit-grammar <file>              check a .docx, .pptx, .pdf, .md, or .txt file and print a summary
+  kit-grammar <file> --json       print every finding as JSON instead
+  kit-grammar --where             print the LanguageTool folder and Java in use, or why it's unavailable
+
+LanguageTool and Java are optional. When either is missing, kit-grammar prints a line starting with
+"skipped:" and exits 0, so a review carries on without the grammar pass. Nothing is installed and nothing
+leaves the machine: LanguageTool runs locally from its own folder.
+
+Where it looks for LanguageTool (the folder that holds languagetool-commandline.jar), in order:
+  --lt-dir <folder>, the KIT_LANGUAGETOOL environment variable, Homebrew (macOS and Linux),
+  ~/Claude/Agents/kit/tools/LanguageTool*, and on Windows %ProgramFiles%, %LOCALAPPDATA%, and Scoop.
+Java comes from JAVA_HOME, then the PATH. LanguageTool 6 and later needs Java 17 or later; 5.9 runs on
+Java 8.
+"""
+import glob
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import zipfile
+from collections import Counter
+
+HOME = os.path.expanduser("~")
+TIMEOUT = 600
+JAR = "languagetool-commandline.jar"
+
+
+def lt_candidates(explicit):
+    if explicit:
+        yield explicit
+    if os.environ.get("KIT_LANGUAGETOOL"):
+        yield os.environ["KIT_LANGUAGETOOL"]
+    for prefix in ("/opt/homebrew", "/usr/local", "/home/linuxbrew/.linuxbrew"):
+        yield os.path.join(prefix, "opt", "languagetool", "libexec")
+    yield from sorted(glob.glob(os.path.join(HOME, "Claude", "Agents", "kit", "tools", "LanguageTool*")),
+                      reverse=True)
+    if os.name == "nt":
+        for base in (os.environ.get("ProgramFiles", ""), os.environ.get("LOCALAPPDATA", "")):
+            if base:
+                yield from sorted(glob.glob(os.path.join(base, "LanguageTool*")), reverse=True)
+        yield os.path.join(HOME, "scoop", "apps", "languagetool", "current")
+
+
+def find_lt(explicit=None):
+    for d in lt_candidates(explicit):
+        if d and os.path.isfile(os.path.join(d, JAR)):
+            return d
+    return None
+
+
+def find_java():
+    candidates = []
+    if os.environ.get("JAVA_HOME"):
+        candidates.append(os.path.join(os.environ["JAVA_HOME"], "bin", "java.exe" if os.name == "nt" else "java"))
+    if shutil.which("java"):
+        candidates.append(shutil.which("java"))
+    for java in candidates:
+        try:
+            r = subprocess.run([java, "-version"], capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        out = r.stderr + r.stdout
+        m = re.search(r'version "([^"]+)"', out)
+        if r.returncode == 0 and m:      # macOS ships a /usr/bin/java stub that fails with no runtime
+            return java, m.group(1)
+    return None, None
+
+
+def lt_version(lt_dir):
+    try:
+        with zipfile.ZipFile(os.path.join(lt_dir, JAR)) as z:
+            m = re.search(r"(?:ComponentVersion|Implementation-Version):\s*(\S+)",
+                          z.read("META-INF/MANIFEST.MF").decode("utf-8", "ignore"))
+            if m:
+                return m.group(1)
+    except (OSError, KeyError, zipfile.BadZipFile):
+        pass
+    m = re.search(r"(\d+\.\d+(?:\.\d+)?)", os.path.basename(os.path.normpath(lt_dir)))
+    return m.group(1) if m else "unknown"
+
+
+def xml_text(xml, para_tag, text_tag):
+    paras = re.split(rf"</{para_tag}>", xml)
+    out = []
+    for p in paras:
+        runs = re.findall(rf"<{text_tag}(?:\s[^>]*)?>([^<]*)</{text_tag}>", p)
+        line = "".join(runs).strip()
+        if line:
+            out.append(line)
+    return "\n".join(out)
+
+
+def unescape(t):
+    return (t.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"')
+             .replace("&apos;", "'").replace("&amp;", "&"))
+
+
+def extract(path):
+    """Return the document's text, one paragraph per line, or raise ValueError with a reason."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext in (".txt", ".md", ".markdown"):
+        return open(path, encoding="utf-8", errors="ignore").read()
+    if ext == ".docx":
+        with zipfile.ZipFile(path) as z:
+            return unescape(xml_text(z.read("word/document.xml").decode("utf-8"), "w:p", "w:t"))
+    if ext == ".pptx":
+        with zipfile.ZipFile(path) as z:
+            names = sorted((n for n in z.namelist() if re.match(r"ppt/slides/slide\d+\.xml$", n)),
+                           key=lambda n: int(re.search(r"(\d+)", n).group(1)))
+            return unescape("\n".join(xml_text(z.read(n).decode("utf-8"), "a:p", "a:t") for n in names))
+    if ext == ".pdf":
+        if not shutil.which("pdftotext"):
+            raise ValueError("PDF text needs pdftotext (Poppler), which isn't installed")
+        r = subprocess.run(["pdftotext", "-layout", path, "-"], capture_output=True, text=True, timeout=120)
+        return r.stdout
+    raise ValueError(f"unsupported file type {ext or '(none)'}")
+
+
+def clean(text):
+    text = re.sub(r"https?://\S+|\b[\w.+-]+@[\w-]+\.[\w.]+\b", " ", text)   # links and email addresses
+    return "\n".join(ln for ln in text.splitlines() if len(ln.split()) > 2 or ln.rstrip().endswith((".", "?")))
+
+
+def skipped(reason, as_json):
+    if as_json:
+        print(json.dumps({"status": "skipped", "reason": reason}))
+    else:
+        print(f"skipped: {reason}. The review continues without a grammar pass.")
+    return 0
+
+
+def main(argv):
+    as_json = "--json" in argv
+    lt_arg = None
+    if "--lt-dir" in argv:
+        i = argv.index("--lt-dir")
+        lt_arg = argv[i + 1] if i + 1 < len(argv) else None
+        del argv[i:i + 2]
+    args = [a for a in argv if not a.startswith("--")]
+    lt_dir, (java, jver) = find_lt(lt_arg), find_java()
+
+    if "--where" in argv:
+        print(f"LanguageTool: {lt_dir + ' (' + lt_version(lt_dir) + ')' if lt_dir else 'not found'}")
+        print(f"Java: {java + ' (' + jver + ')' if java else 'not found'}")
+        return 0
+    if len(args) != 1:
+        print(__doc__)
+        return 2
+    path = args[0]
+    if not os.path.isfile(path):
+        print(f"kit-grammar: no such file: {path}", file=sys.stderr)
+        return 2
+    if not lt_dir:
+        return skipped("LanguageTool isn't installed (set KIT_LANGUAGETOOL to its folder if it's elsewhere)", as_json)
+    if not java:
+        return skipped("Java isn't installed or doesn't run", as_json)
+    try:
+        text = clean(extract(path))
+    except (ValueError, KeyError, zipfile.BadZipFile) as e:
+        return skipped(f"couldn't read the text: {e}", as_json)
+    if not text.strip():
+        return skipped("the file has no checkable text", as_json)
+
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as f:
+        f.write(text)
+        tmp = f.name
+    try:
+        r = subprocess.run([java, "-jar", os.path.join(lt_dir, JAR), "-l", "en-US", "--json", tmp],
+                           capture_output=True, text=True, timeout=TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return skipped(f"LanguageTool didn't finish within {TIMEOUT} seconds", as_json)
+    finally:
+        os.unlink(tmp)
+    start = r.stdout.find("{")
+    try:
+        data = json.loads(r.stdout[start:]) if start >= 0 else None
+    except json.JSONDecodeError:
+        data = None
+    if not data:
+        hint = " (LanguageTool 6 and later needs Java 17 or later)" if jver and jver.startswith(("1.", "8", "11")) else ""
+        return skipped(f"LanguageTool didn't return results{hint}", as_json)
+
+    matches = data.get("matches", [])
+    words = len(text.split())
+    if as_json:
+        print(json.dumps({"status": "ok", "languagetool": lt_version(lt_dir), "java": jver, "words": words,
+                          "matches": [{"category": m["rule"]["category"]["name"], "rule": m["rule"]["id"],
+                                       "message": m["message"],
+                                       "context": m["context"]["text"][m["context"]["offset"]:
+                                                                       m["context"]["offset"] + m["context"]["length"]],
+                                       "suggestions": [x["value"] for x in m.get("replacements", [])[:3]]}
+                                      for m in matches]}, indent=1))
+        return 0
+    print(f"LanguageTool {lt_version(lt_dir)} on Java {jver}: {len(matches)} findings in about {words} words "
+          f"({len(matches) * 1000 / max(words, 1):.1f} per 1,000 words)")
+    for cat, n in Counter(m["rule"]["category"]["name"] for m in matches).most_common():
+        print(f"  {n:>4}  {cat}")
+    for m in matches[:40]:
+        ctx = m["context"]
+        bad = ctx["text"][ctx["offset"]:ctx["offset"] + ctx["length"]]
+        sug = ", ".join(x["value"] for x in m.get("replacements", [])[:3])
+        print(f"- \"{bad}\": {m['message']}" + (f" Try: {sug}" if sug else ""))
+    if len(matches) > 40:
+        print(f"... and {len(matches) - 40} more; use --json for all of them")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

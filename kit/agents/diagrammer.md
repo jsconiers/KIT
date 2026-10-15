@@ -35,6 +35,13 @@ talk to the rest of the staff only through Kit.
   format `diagrams.md` names, a preview if it names one, and a spec (`<name>-spec.md`) listing
   every component, connection, and zone, so the diagram can be rebuilt in another tool. Name files
   in lowercase with hyphens.
+- **draw.io copy.** If `diagrams.md` says draw.io output: yes, also save the spec as JSON
+  (`<name>-spec.json`): `{"title", "nodes": [{"id", "label", "sublabel", "kind", "x", "y", "w",
+  "h", "parent"}], "edges": [{"from", "to", "label", "kind", "arrow"}]}`, with positions and sizes
+  in inches and kinds named for the standard's shapes and line types. Then build the draw.io file:
+  `python3 ~/Claude/Agents/kit/.install/shared/bin/kit-drawio <name>-spec.json -o <name>.drawio`.
+  This is in addition to the editable file the standard names, never instead of it. If `kit-drawio`
+  isn't installed, skip this step and say so.
 - For a new version, save a new file (`-v2`, `-v3`) instead of overwriting.
 - When you need a document or a fact you don't have, ask for it in a **Requests** section.
 
@@ -48,5 +55,6 @@ talk to the rest of the staff only through Kit.
 
 ## What you send back to Kit
 
-What you drew and where it's saved, "to be confirmed" items, any departures from the standard and
+What you drew and where it's saved (including the draw.io file, or why it was skipped), "to be
+confirmed" items, any departures from the standard and
 why, and **Requests**, if any.

@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Kit shared record: handoff-pointer",
+  "description": "Points to a handoff brief in the owner's library, with its one-paragraph standing.",
+  "x-kit-version": "1.0",
+  "allOf": [
+    {
+      "$ref": "envelope.schema.json"
+    }
+  ],
+  "properties": {
+    "schema": {
+      "const": "handoff-pointer"
+    },
+    "body": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "date",
+        "title",
+        "where_it_stands",
+        "sections",
+        "path"
+      ],
+      "properties": {
+        "date": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date"
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "where_it_stands": {
+          "type": "string",
+          "maxLength": 400
+        },
+        "sections": {
+          "type": "array",
+          "maxItems": 12,
+          "items": {
+            "type": "string",
+            "maxLength": 80
+          }
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 240,
+          "pattern": "^(?!.*\\.\\.)(?!(?:.*/)?personal/)[A-Za-z0-9_][^\\n\\\\:]*$"
+        }
+      }
+    }
+  }
+}

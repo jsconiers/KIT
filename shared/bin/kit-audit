@@ -1,0 +1,704 @@
+#!/usr/bin/env python3
+"""kit-audit: checks the connector audit log and the guard setup, and writes a short status for the brief.
+
+  kit-audit --daily        check the last 24 hours, and anything since the last daily run, for issues
+  kit-audit --weekly       a 7-day summary: calls by agent, server, and tool, denials, failures, data
+                           volume, the trend against the week before, and findings by severity
+  kit-audit ... --json     also print the status as JSON
+
+Options (mostly for testing):
+  --log-dir <folder>       read connectors-YYYY-MM.jsonl from here instead of the library's audit folder
+  --kit-dir <folder>       Kit's home (default ~/Claude/Agents/kit): setup in memory/context, agents in
+                           agents/, output in briefs/
+  --out-dir <folder>       write audit-status.json and audit.txt here instead of <kit>/briefs
+  --now <ISO time>         pretend it's this time
+
+What it reads: the audit logs the connector guard writes (one JSON line per call, result, and session
+end), the guard settings (connector-guard.json, or KIT_CONNECTOR_GUARD_CONFIG), connectors.md for the
+direct callers, library.md for the library root, audit.md for working hours and thresholds, and the
+frontmatter of Kit's agents for the structural checks.
+
+What it writes: <out>/audit-status.json (generated time, mode, counts, findings with severity, and an
+open-issue flag) and <out>/audit.txt (plain text, issues first, "No audit issues." when clean). It never
+changes the logs. It exits 0 even when it finds problems or can't read something, so a scheduled run
+never fails because of it; only a usage error exits non-zero.
+
+Severity: critical (act today), warning (look at it), info (standing known gaps and context).
+"""
+import argparse
+import datetime as dt
+import glob
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import statistics
+import sys
+from collections import Counter, defaultdict
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SEVERITIES = ("critical", "warning", "info")
+DEFAULTS = {
+    "baseline_days": 30,       # days of history the volume checks compare against
+    "volume_factor": 3,        # calls in a day above this many times the baseline daily average
+    "volume_min_calls": 20,    # ...and at least this many calls
+    "result_bytes_max": 1000000,   # one result larger than this
+    "result_factor": 10,       # one result larger than this many times the baseline median
+    "stale_days": 14,          # no new log lines for this long while connectors are configured
+    "repeat_minutes": 60,      # a call to the same connector this soon after a failure is a repeat
+    "open_session_hours": 2,   # sessions newer than this may still be running
+    "min_baseline_days": 5,    # active days needed before the volume checks run
+}
+DEFAULT_HOURS = (7 * 60, 19 * 60, {0, 1, 2, 3, 4})
+DEFAULT_CALLERS = {"gateway", "intake-triager", "dependency-mapper", "status-reporter"}
+AUTH = re.compile(r"auth|\b401\b|\b403\b|unauthori[sz]ed|forbidden|sign.?in|log.?in|credential|"
+                  r"password|expired token|token expired|invalid token", re.I)
+DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+# The guard's own name rules, so a tool reads as write-like or unknown exactly as the guard sees it.
+READ_WORDS = {"get", "list", "search", "query", "read", "fetch", "find", "describe", "view", "show",
+              "lookup", "count", "retrieve", "browse"}
+WRITE_WORDS = {"create", "update", "delete", "remove", "add", "upload", "post", "put", "patch", "set",
+               "assign", "transition", "comment", "close", "resolve", "approve", "reject", "move",
+               "edit", "write", "send", "insert", "modify", "archive", "restore", "link", "attach",
+               "submit", "cancel", "merge", "import", "run", "execute", "trigger", "start", "stop"}
+sys.dont_write_bytecode = True
+try:
+    _p = os.path.join(HERE, "connector-guard")
+    _loader = importlib.machinery.SourceFileLoader("kit_connector_guard", _p)
+    _spec = importlib.util.spec_from_loader("kit_connector_guard", _loader)
+    _guard = importlib.util.module_from_spec(_spec)
+    _loader.exec_module(_guard)
+    READ_WORDS, WRITE_WORDS = set(_guard.READ_WORDS), set(_guard.WRITE_WORDS)
+except Exception:  # noqa: BLE001  (the copies above are the fallback)
+    pass
+
+
+def split(tool):
+    m = re.match(r"^mcp__(.+?)__(.+)$", tool or "")
+    return (m.group(1), m.group(2)) if m else (None, tool or "")
+
+
+def words(name):
+    out = []
+    for p in re.split(r"[_\-.\s]+", name or ""):
+        out += re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+", p) or [p]
+    return [w.lower() for w in out if w]
+
+
+def kind(tool):
+    w = words(split(tool)[1])
+    if any(x in WRITE_WORDS for x in w):
+        return "write"
+    if any(x in READ_WORDS for x in w):
+        return "read"
+    return "unknown"
+
+
+def fmt(t):
+    return t.astimezone().strftime("%d-%b-%Y %H:%M")
+
+
+def fdate(t):
+    return t.astimezone().strftime("%d-%b-%Y")
+
+
+def kb(n):
+    if n >= 1024 * 1024:
+        return f"{n / 1024 / 1024:.1f} MB"
+    return f"{n / 1024:.0f} KB" if n >= 1024 else f"{n} bytes"
+
+
+def read_text(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def parse_time(s):
+    if not isinstance(s, str):
+        return None
+    try:
+        t = dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return t if t.tzinfo else t.astimezone()
+
+
+class Audit:
+    def __init__(self, args):
+        self.args = args
+        self.kit = os.path.expanduser(args.kit_dir)
+        self.ctx = os.path.join(self.kit, "memory", "context")
+        self.out = os.path.expanduser(args.out_dir) if args.out_dir else os.path.join(self.kit, "briefs")
+        self.now = (parse_time(args.now) if args.now else None) or dt.datetime.now().astimezone()
+        self.findings, self.notes = [], []
+        self.prev = {}
+        try:
+            with open(os.path.join(self.out, "audit-status.json"), encoding="utf-8") as f:
+                self.prev = json.load(f)
+        except (OSError, ValueError):
+            self.prev = {}
+        self.state = dict(self.prev.get("state") or {})
+
+    def add(self, severity, check, title, detail="", count=None):
+        f = {"severity": severity, "check": check, "title": title}
+        if detail:
+            f["detail"] = detail
+        if count is not None:
+            f["count"] = count
+        self.findings.append(f)
+
+    # ---- setup ---------------------------------------------------------------------------------
+    def load_setup(self):
+        self.setup = read_text(os.path.join(self.ctx, "audit.md")) or ""
+        self.th = dict(DEFAULTS)
+        for key, val in re.findall(r"`(\w+):\s*([\d.]+)`", self.setup):
+            if key in self.th:
+                self.th[key] = float(val) if "." in val else int(val)
+        self.hours = DEFAULT_HOURS
+        m = re.search(r"\*\*Working hours:\*\*\s*(.+)", self.setup)
+        line = m.group(1) if m and not m.group(1).strip().lower().startswith("not set") else ""
+        hm = re.search(r"(\d{1,2}):(\d{2})\s*(?:-|–|to)\s*(\d{1,2}):(\d{2})", line)
+        if hm:
+            start, end = int(hm.group(1)) * 60 + int(hm.group(2)), int(hm.group(3)) * 60 + int(hm.group(4))
+            days = set(DEFAULT_HOURS[2])
+            dm = re.search(r"\b(mon|tue|wed|thu|fri|sat|sun)\w*\s*(?:-|–|to)\s*(mon|tue|wed|thu|fri|sat|sun)\w*",
+                           line, re.I)
+            if dm:
+                a, b = DAYS.index(dm.group(1).lower()), DAYS.index(dm.group(2).lower())
+                days = {d % 7 for d in range(a, (b if b >= a else b + 7) + 1)}
+            self.hours = (start, end, days)
+        else:
+            self.notes.append("Working hours aren't set in audit.md, so 07:00 to 19:00, Monday to Friday, is used.")
+
+        lib = read_text(os.path.join(self.ctx, "library.md")) or ""
+        m = re.search(r"\*\*Library root:\*\*\s*`([^`]+)`", lib)
+        self.library = os.path.expanduser(m.group(1)) if m else None
+
+        self.guard_path = os.environ.get("KIT_CONNECTOR_GUARD_CONFIG") or os.path.join(self.ctx, "connector-guard.json")
+        self.guard = None
+        if not os.path.exists(self.guard_path):
+            self.add("critical", "guard-settings", "Guard settings are missing",
+                     f"{self.guard_path} doesn't exist, so the guard blocks every connector call and logs nothing.")
+        else:
+            try:
+                with open(self.guard_path, encoding="utf-8") as f:
+                    g = json.load(f)
+                if not isinstance(g.get("allowed_servers"), list):
+                    raise ValueError("allowed_servers isn't a list")
+                g["allow_tools"] = list(g.get("allow_tools") or [])
+                g["deny_tools"] = list(g.get("deny_tools") or [])
+                self.guard = g
+            except (OSError, ValueError) as ex:
+                self.add("critical", "guard-settings", "Guard settings can't be read",
+                         f"{self.guard_path}: {ex}. The guard blocks every connector call until it's fixed.")
+        self.servers = set((self.guard or {}).get("allowed_servers") or [])
+
+        self.agents = self.read_agents()
+        callers = set()
+        m = re.search(r"^\s*-?\s*`allowed_callers:\s*([^`]+)`", self.setup, re.M)
+        if m:
+            callers = {c.strip() for c in m.group(1).split(",") if c.strip()}
+        else:
+            conn = read_text(os.path.join(self.ctx, "connectors.md"))
+            m = re.search(r"\*\*Direct callers:\*\*\s*((?:.+\n?)+?)(?:\n\s*[-#]|\Z)", conn or "")
+            if m:
+                text = " ".join(m.group(1).split()).lower()
+                callers = {"gateway"} | {a for a in self.agents if a.replace("-", " ") in text or a in text}
+        self.callers = callers if len(callers) > 1 else set(DEFAULT_CALLERS)
+
+        dirs = []
+        if self.args.log_dir:
+            dirs.append(os.path.expanduser(self.args.log_dir))
+        else:
+            if self.library:
+                dirs.append(os.path.join(self.library, "audit"))
+            if self.guard and self.guard.get("audit_dir"):
+                gd = os.path.expanduser(self.guard["audit_dir"])
+                if not dirs or os.path.normcase(os.path.abspath(gd)) != os.path.normcase(os.path.abspath(dirs[0])):
+                    if dirs:
+                        self.add("info", "log-location", "The guard and the library use different audit folders",
+                                 f"The guard writes to {gd}; the library's audit folder is {dirs[0]}. Both are read.")
+                    dirs.append(gd)
+            if not dirs:
+                dirs.append(os.path.join(self.kit, "audit"))
+        self.log_dirs = dirs
+
+    def read_agents(self):
+        agents = {}
+        for path in sorted(glob.glob(os.path.join(self.kit, "agents", "*.md"))):
+            text = read_text(path) or ""
+            m = re.match(r"---\s*\n(.*?)\n---\s*\n?(.*)", text, re.S)
+            if not m:
+                continue
+            fm, body = m.group(1), m.group(2)
+
+            def field(name):
+                mm = re.search(rf"^{name}:\s*(.*)$", fm, re.M)
+                return [t.strip() for t in mm.group(1).split(",") if t.strip()] if mm else None
+
+            name = (re.search(r"^name:\s*(\S+)", fm, re.M) or [None, os.path.splitext(os.path.basename(path))[0]])[1]
+            agents[name] = {"tools": field("tools"), "disallowed": field("disallowedTools") or [],
+                            "pre": bool(re.search(r"connector-guard\S*\"?\s+pre\b", fm)),
+                            "stop": bool(re.search(r"connector-guard\S*\"?\s+stop\b", fm)),
+                            "body": body}
+        return agents
+
+    # ---- logs ----------------------------------------------------------------------------------
+    def read_logs(self):
+        self.events, self.malformed, self.sizes = [], Counter(), {}
+        files = []
+        for d in self.log_dirs:
+            if not os.path.isdir(d):
+                continue
+            files += sorted(glob.glob(os.path.join(d, "connectors-*.jsonl")))
+        self.files = files
+        for path in files:
+            try:
+                self.sizes[path] = os.path.getsize(path)
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    for n, line in enumerate(f, 1):
+                        if not line.strip():
+                            continue
+                        try:
+                            ev = json.loads(line)
+                            t = parse_time(ev.get("time"))
+                            if not isinstance(ev, dict) or t is None or ev.get("event") not in ("pre", "post", "stop"):
+                                raise ValueError
+                        except (ValueError, AttributeError):
+                            self.malformed[path] += 1
+                            continue
+                        ev["_t"], ev["_where"] = t, f"{os.path.basename(path)}:{n}"
+                        ev["_server"] = split(ev.get("tool"))[0]
+                        self.events.append(ev)
+            except OSError as ex:
+                self.add("critical", "log-unreadable", "An audit log can't be read", f"{path}: {ex.strerror or ex}")
+        self.events.sort(key=lambda e: e["_t"])
+
+    def between(self, start, end):
+        return [e for e in self.events if start <= e["_t"] < end]
+
+    # ---- checks on the log ---------------------------------------------------------------------
+    def check_files(self):
+        configured = bool(self.servers)
+        if not any(os.path.isdir(d) for d in self.log_dirs):
+            if configured:
+                self.add("warning", "log-missing", "The audit folder doesn't exist",
+                         f"Connectors are configured, but {', '.join(self.log_dirs)} isn't there. Calls through the "
+                         "guard would create it; either none were made or the guard can't write there.")
+            return
+        month = f"connectors-{self.now:%Y-%m}.jsonl"
+        if configured and not any(os.path.basename(f) == month for f in self.files):
+            if self.files:
+                self.add("info", "log-missing", "No audit log for this month yet",
+                         f"{month} doesn't exist yet; it starts with the month's first connector call.")
+            else:
+                self.add("warning", "log-missing", "No audit log at all",
+                         f"Connectors are configured, but there are no audit logs in {', '.join(self.log_dirs)}.")
+        # A log that shrank or vanished since the last run has been edited or replaced.
+        for path, size in (self.state.get("log_sizes") or {}).items():
+            if path not in self.sizes:
+                if os.path.normcase(os.path.dirname(path)) in {os.path.normcase(os.path.normpath(d)) for d in self.log_dirs}:
+                    self.add("critical", "log-integrity", "An audit log has disappeared",
+                             f"{os.path.basename(path)} was there at the last run ({kb(size)}) and is gone now.")
+            elif self.sizes[path] < size:
+                self.add("critical", "log-integrity", "An audit log got smaller",
+                         f"{os.path.basename(path)} was {size} bytes at the last run and is {self.sizes[path]} bytes now. "
+                         "The log is append-only, so lines were removed or the file was replaced.")
+        seen = self.state.get("malformed_seen") or {}
+        for path, n in self.malformed.items():
+            old = int(seen.get(path, 0))
+            name = os.path.basename(path)
+            if n > old:
+                self.add("warning", "malformed", "Malformed lines in the audit log",
+                         f"{n - old} new unreadable line{'s' if n - old != 1 else ''} in {name} "
+                         f"({n} in all). The guard writes whole JSON lines, so something else wrote or cut them.",
+                         n - old)
+            else:
+                self.add("info", "malformed", "Malformed lines seen before",
+                         f"{n} unreadable line{'s' if n != 1 else ''} in {name}, already reported.", n)
+        if configured and self.events:
+            last = self.events[-1]["_t"]
+            idle = (self.now - last).total_seconds() / 86400
+            if idle > self.th["stale_days"]:
+                self.add("warning", "log-stale", "The audit log isn't growing",
+                         f"No new lines since {fmt(last)} ({idle:.0f} days), though connectors are configured. "
+                         "Either nobody used them, or calls are going around the guard.")
+
+    def check_window(self, start, end):
+        evs = self.between(start, end)
+        pre = [e for e in evs if e["event"] == "pre"]
+        post = [e for e in evs if e["event"] == "post"]
+        allow_tools = set((self.guard or {}).get("allow_tools") or [])
+
+        groups = defaultdict(list)
+        for e in pre:
+            tool, server, k = e.get("tool") or "", e["_server"], kind(e.get("tool"))
+            decision, reason = e.get("decision"), str(e.get("reason") or "")
+            if decision == "deny":
+                if "guard error" in reason:
+                    groups[("warning", "denied", "Guard errors blocked calls")].append(e)
+                elif server and self.servers and server not in self.servers or "isn't an allowed connector" in reason:
+                    groups[("warning", "unknown-server", "Calls to a connector that isn't approved (denied)")].append(e)
+                elif "deny list" in reason:
+                    groups[("warning", "denied", "Calls on the deny list (denied)")].append(e)
+                elif k == "write" or "looks like a write" in reason:
+                    groups[("warning", "write-attempt", "Write-like calls attempted (denied)")].append(e)
+                elif k == "unknown" or "not recognized" in reason:
+                    groups[("warning", "unknown-tool", "Calls with tool names the guard doesn't recognize (denied)")].append(e)
+                else:
+                    groups[("warning", "denied", "Calls denied by the guard")].append(e)
+            elif decision == "allow" and server:
+                if self.servers and server not in self.servers:
+                    groups[("critical", "unknown-server",
+                            "Calls allowed to a connector that isn't approved now")].append(e)
+                if tool in allow_tools:
+                    if k != "read":
+                        groups[("info", "allow-list", "Calls allowed only by allow_tools")].append(e)
+                elif k == "write":
+                    groups[("critical", "write-attempt", "Write-like calls were allowed")].append(e)
+                elif k == "unknown":
+                    groups[("critical", "unknown-tool", "Calls with unrecognized tool names were allowed")].append(e)
+            elif decision not in ("allow", "deny"):
+                groups[("warning", "malformed", "Call records with no guard decision")].append(e)
+        for (sev, check, title), items in groups.items():
+            self.add(sev, check, title, self.describe(items), len(items))
+
+        # Callers the setup doesn't allow.
+        bad = [e for e in evs if e["event"] in ("pre", "post") and e.get("agent") not in self.callers]
+        if bad:
+            self.add("warning", "caller", "Connector calls from agents that aren't allowed callers",
+                     self.describe(bad, by="agent") + f". Allowed: {', '.join(sorted(self.callers))}.", len(bad))
+
+        # Failures, and calls to the same connector soon after one.
+        fails = [e for e in post if e.get("is_error")]
+        auth = [e for e in fails if self.is_auth(e)]
+        other = [e for e in fails if e not in auth]
+        if auth:
+            self.add("warning", "auth-failure", "Sign-in failures", self.describe(auth), len(auth))
+        if other:
+            self.add("warning", "failure", "Failed connector calls",
+                     self.describe(other) + ". The guard doesn't log why a call failed, so any of these may be "
+                     "a sign-in failure.", len(other))
+        repeats, repeats_auth = [], []
+        window = dt.timedelta(minutes=self.th["repeat_minutes"])
+        for f in fails:
+            later = [e for e in self.events if e["event"] == "pre" and e["_server"] == f["_server"]
+                     and f["_t"] < e["_t"] <= f["_t"] + window and e.get("decision") == "allow"
+                     and (e.get("session") == f.get("session") or e["_t"] - f["_t"] <= window)]
+            if later:
+                (repeats_auth if f in auth else repeats).append((f, len(later)))
+        if repeats_auth:
+            self.add("critical", "auth-repeat", "Calls repeated after a sign-in failure",
+                     "; ".join(f"{f['_server']} at {fmt(f['_t'])}, {n} more call{'s' if n != 1 else ''} within "
+                               f"{self.th['repeat_minutes']} minutes" for f, n in repeats_auth)
+                     + ". Repeated sign-in failures can lock the account.", len(repeats_auth))
+        if repeats:
+            self.add("warning", "repeat", "Calls repeated after a failure",
+                     "; ".join(f"{f['_server']} at {fmt(f['_t'])}, {n} more call{'s' if n != 1 else ''} within "
+                               f"{self.th['repeat_minutes']} minutes" for f, n in repeats)
+                     + ". If the failure was a sign-in, repeats can lock the account.", len(repeats))
+
+        # Volume and size against the baseline.
+        bstart = start - dt.timedelta(days=self.th["baseline_days"])
+        base = self.between(bstart, start)
+        per_day = Counter(e["_t"].astimezone().date() for e in base if e["event"] == "pre")
+        bytes_day = Counter()
+        for e in base:
+            if e["event"] == "post":
+                bytes_day[e["_t"].astimezone().date()] += int(e.get("result_bytes") or 0)
+        days = (end - start).total_seconds() / 86400 or 1
+        if len(per_day) >= self.th["min_baseline_days"]:
+            avg = sum(per_day.values()) / len(per_day)
+            win_day = Counter(e["_t"].astimezone().date() for e in pre)
+            rate = len(pre) / max(days, 1)
+            peak_day, peak = max(win_day.items(), key=lambda kv: kv[1]) if win_day else (None, 0)
+            if peak >= self.th["volume_min_calls"] and max(peak, rate) > self.th["volume_factor"] * avg:
+                self.add("warning", "volume", "Unusually many connector calls",
+                         f"{peak} calls on {peak_day:%d-%b-%Y} ({len(pre)} in the window) against a baseline of "
+                         f"{avg:.1f} a day over {len(per_day)} active days.", peak)
+            if bytes_day:
+                bavg = sum(bytes_day.values()) / len(per_day)
+                total = sum(int(e.get("result_bytes") or 0) for e in post)
+                if total / days > self.th["volume_factor"] * bavg and total > 100 * 1024:
+                    self.add("warning", "volume", "Unusually much data returned",
+                             f"{kb(total)} of results against a baseline of {kb(int(bavg))} a day.")
+        else:
+            self.notes.append(f"Volume baseline is still building ({len(per_day)} active day"
+                              f"{'s' if len(per_day) != 1 else ''} of {self.th['min_baseline_days']} needed).")
+        sizes = [int(e.get("result_bytes") or 0) for e in base if e["event"] == "post"]
+        med = statistics.median(sizes) if len(sizes) >= 20 else None
+        big = [e for e in post if int(e.get("result_bytes") or 0) > self.th["result_bytes_max"]
+               or (med and int(e.get("result_bytes") or 0) > max(self.th["result_factor"] * med, 100 * 1024))]
+        if big:
+            top = max(int(e.get("result_bytes") or 0) for e in big)
+            self.add("warning", "large-result", "Unusually large results",
+                     self.describe(big) + f". Largest {kb(top)}"
+                     + (f"; baseline median {kb(int(med))}" if med else "") + ".", len(big))
+
+        # Outside working hours.
+        s, en, wd = self.hours
+        odd = [e for e in pre if not (e["_t"].astimezone().weekday() in wd and
+                                      s <= e["_t"].astimezone().hour * 60 + e["_t"].astimezone().minute < en)]
+        if odd:
+            self.add("warning", "after-hours", "Connector calls outside working hours",
+                     self.describe(odd, by="agent") + f", first at {fmt(odd[0]['_t'])}.", len(odd))
+
+        # Sessions with no session-end record.
+        sessions = defaultdict(list)
+        for e in evs:
+            sessions[(e.get("session"), e.get("agent"))].append(e)
+        stops = {(e.get("session"), e.get("agent")) for e in self.events if e["event"] == "stop"}
+        open_cut = self.now - dt.timedelta(hours=self.th["open_session_hours"])
+        missing = []
+        for key, items in sessions.items():
+            if key in stops or not any(i["event"] in ("pre", "post") for i in items):
+                continue
+            info = self.agents.get(key[1])
+            expects = info["stop"] if info else not self.agents
+            if expects and items[-1]["_t"] < open_cut:
+                missing.append(items[-1])
+        if missing:
+            self.add("warning", "no-session-end", "Sessions with no session-end record",
+                     self.describe(missing, by="agent") + ". The session may have crashed, or the Stop hook didn't run.",
+                     len(missing))
+        # Allowed calls with no result record: the PostToolUse hook didn't run, or the call failed in a
+        # way the guard can't see.
+        noresult = []
+        for e in pre:
+            if e.get("decision") != "allow" or e["_t"] >= open_cut:
+                continue
+            if not any(p["event"] == "post" and p.get("session") == e.get("session") and p.get("tool") == e.get("tool")
+                       and e["_t"] <= p["_t"] for p in self.events):
+                noresult.append(e)
+        if noresult:
+            self.add("warning", "no-result", "Allowed calls with no result record",
+                     self.describe(noresult) + ". The PostToolUse hook didn't log them, so result sizes and "
+                     "failures for these calls are unknown.", len(noresult))
+        nosess = [e for e in evs if not e.get("session")]
+        if nosess:
+            self.add("warning", "malformed", "Records with no session id", self.describe(nosess), len(nosess))
+        return evs
+
+    def is_auth(self, e):
+        for k in ("error", "error_type", "error_class", "status", "message", "reason"):
+            v = e.get(k)
+            if v is not None and AUTH.search(str(v)):
+                return True
+        return False
+
+    def describe(self, items, by="tool"):
+        c = Counter()
+        for e in items:
+            c[(e.get("agent") or "unknown") if by == "agent" else (e.get("tool") or "no tool")] += 1
+        top = ", ".join(f"{k} x{n}" for k, n in c.most_common(5))
+        more = f", and {len(c) - 5} more" if len(c) > 5 else ""
+        return f"{len(items)} in all: {top}{more}"
+
+    # ---- structural checks ---------------------------------------------------------------------
+    def check_structure(self):
+        if not self.agents:
+            self.add("info", "structure", "No agent files found",
+                     f"{os.path.join(self.kit, 'agents')} has no agents, so the structural checks didn't run.")
+            return
+        unguarded, direct, nostop, fanout = [], [], [], []
+        for name, a in sorted(self.agents.items()):
+            tools, dis = a["tools"], a["disallowed"]
+            holds = any(t.startswith("mcp__") for t in tools) if tools is not None else \
+                not any(t.startswith("mcp__") for t in dis)
+            if holds and not a["pre"]:
+                unguarded.append(name)
+                refs = re.findall(r"memory/context/([\w-]+\.md)", a["body"])
+                setup = " ".join(read_text(os.path.join(self.ctx, r)) or "" for r in set(refs))
+                if self.servers and any(re.search(rf"\b{re.escape(s)}\b", setup, re.I) for s in self.servers):
+                    direct.append(name)
+            if a["pre"] and not a["stop"]:
+                nostop.append(name)
+            for t in ("Agent", "SendMessage"):
+                if tools is not None:
+                    unlimited = t in tools
+                else:
+                    unlimited = t not in dis and not any(x.startswith(t + "(") for x in dis)
+                if unlimited:
+                    fanout.append(name)
+                    break
+        if direct:
+            self.add("info", "known-gap", "Unguarded agents whose setup names an approved connector",
+                     f"{', '.join(direct)}. They hold connector tools without the guard and are the likeliest "
+                     "to call one directly; those calls aren't checked or logged.", len(direct))
+        rest = [n for n in unguarded if n not in direct]
+        if rest:
+            self.add("info", "known-gap", "Agents that hold connector tools without the guard hook",
+                     f"{', '.join(rest)}. Nothing stops them calling a connector unlogged.", len(rest))
+        if nostop:
+            self.add("info", "known-gap", "Guarded agents with no Stop hook",
+                     f"{', '.join(nostop)}. Their sessions never log a session end, so missing ends can't be "
+                     "checked for them.", len(nostop))
+        if fanout:
+            self.add("info", "known-gap", "Agents with unrestricted Agent or SendMessage",
+                     f"{', '.join(fanout)}. They can start or message any agent, including ones that "
+                     "hold connector tools.", len(fanout))
+        if self.servers:
+            settings = read_text(os.path.join(os.path.expanduser("~"), ".claude", "settings.json")) or ""
+            if "connector-guard" not in settings:
+                self.add("info", "known-gap", "Kit's own session isn't guarded",
+                         "Kit, and any session outside the guarded agents, can call connectors without the guard, "
+                         "so those calls aren't logged.")
+
+    # ---- summaries -----------------------------------------------------------------------------
+    def counts(self, evs):
+        pre = [e for e in evs if e["event"] == "pre"]
+        post = [e for e in evs if e["event"] == "post"]
+        return {"calls": len(pre), "allowed": sum(e.get("decision") == "allow" for e in pre),
+                "denied": sum(e.get("decision") == "deny" for e in pre),
+                "results": len(post), "failures": sum(bool(e.get("is_error")) for e in post),
+                "result_bytes": sum(int(e.get("result_bytes") or 0) for e in post),
+                "sessions": len({e.get("session") for e in evs if e.get("session")}),
+                "session_ends": sum(e["event"] == "stop" for e in evs)}
+
+    def weekly_summary(self, evs, prev):
+        pre = [e for e in evs if e["event"] == "pre"]
+        by = lambda f: dict(Counter(f(e) for e in pre).most_common(10))  # noqa: E731
+        c, p = self.counts(evs), self.counts(prev)
+
+        def trend(k):
+            a, b = c[k], p[k]
+            if b == 0:
+                return "new" if a else "none"
+            diff = kb(abs(a - b)) if k == "result_bytes" else str(abs(a - b))
+            return f"{'+' if a >= b else '-'}{diff} ({(a - b) * 100 / b:+.0f}%)"
+        return {"by_agent": by(lambda e: e.get("agent") or "unknown"),
+                "by_server": by(lambda e: e["_server"] or "none"),
+                "by_tool": by(lambda e: e.get("tool") or "none"),
+                "denials_by_reason": dict(Counter(str(e.get("reason")) for e in pre
+                                                  if e.get("decision") == "deny").most_common(10)),
+                "previous_week": p,
+                "trend": {k: trend(k) for k in ("calls", "denied", "failures", "result_bytes")}}
+
+    # ---- run -----------------------------------------------------------------------------------
+    def run(self, mode):
+        self.load_setup()
+        self.read_logs()
+        self.check_files()
+        if mode == "weekly":
+            start = self.now - dt.timedelta(days=7)
+        else:
+            start = self.now - dt.timedelta(hours=24)
+            last = parse_time((self.prev.get("state") or {}).get("last_daily"))
+            if last and last < start:
+                start = max(last, self.now - dt.timedelta(days=31))
+        evs = self.check_window(start, self.now)
+        self.check_structure()
+        sev = Counter(f["severity"] for f in self.findings)
+        self.findings.sort(key=lambda f: SEVERITIES.index(f["severity"]))
+        result = {"generated": self.now.isoformat(timespec="seconds"), "mode": mode,
+                  "window": {"start": start.isoformat(timespec="seconds"), "end": self.now.isoformat(timespec="seconds")},
+                  "open_issue": bool(sev["critical"] or sev["warning"]),
+                  "severity_counts": {s: sev[s] for s in SEVERITIES},
+                  "counts": self.counts(evs), "findings": self.findings, "notes": self.notes,
+                  "log_dirs": self.log_dirs, "log_files": len(self.files)}
+        if mode == "weekly":
+            result["summary"] = self.weekly_summary(evs, self.between(start - dt.timedelta(days=7), start))
+        text = self.render(result)
+        result["text"] = text
+        status = {k: v for k, v in result.items()}
+        status["daily"] = result if mode == "daily" else self.prev.get("daily")
+        status["weekly"] = result if mode == "weekly" else self.prev.get("weekly")
+        state = dict(self.state)
+        state["log_sizes"] = self.sizes
+        state["malformed_seen"] = dict(self.malformed)
+        if mode == "daily":
+            state["last_daily"] = result["generated"]
+        status["state"] = state
+        return status, text
+
+    def render(self, r):
+        lines = []
+        issues = [f for f in r["findings"] if f["severity"] != "info"]
+        info = [f for f in r["findings"] if f["severity"] == "info"]
+        if issues:
+            sc = r["severity_counts"]
+            lines.append(f"Audit issues: {sc['critical']} critical, {sc['warning']} warning.")
+            for f in issues:
+                lines.append(f"{f['severity'].upper()}: {f['title']}. {f.get('detail', '')}".rstrip())
+        else:
+            lines.append("No audit issues.")
+        c = r["counts"]
+        w = r["window"]
+        lines.append("")
+        label = "Weekly audit summary" if r["mode"] == "weekly" else "Daily audit"
+        lines.append(f"{label}, {fmt(parse_time(w['start']))} to {fmt(parse_time(w['end']))}: "
+                     f"{c['calls']} calls ({c['allowed']} allowed, {c['denied']} denied), {c['failures']} failed, "
+                     f"{kb(c['result_bytes'])} of results, {c['sessions']} session{'s' if c['sessions'] != 1 else ''}.")
+        if r["mode"] == "weekly":
+            s = r["summary"]
+            fmtc = lambda d: ", ".join(f"{k} {v}" for k, v in d.items()) or "none"  # noqa: E731
+            lines.append(f"By agent: {fmtc(s['by_agent'])}.")
+            lines.append(f"By server: {fmtc(s['by_server'])}.")
+            lines.append(f"By tool: {fmtc(s['by_tool'])}.")
+            lines.append(f"Denials: {c['denied']}. Failures: {c['failures']}. Data: {kb(c['result_bytes'])}.")
+            t = s["trend"]
+            lines.append(f"Against the week before: calls {t['calls']}, denials {t['denied']}, "
+                         f"failures {t['failures']}, data {t['result_bytes']}.")
+            sc = r["severity_counts"]
+            lines.append(f"Findings: {sc['critical']} critical, {sc['warning']} warning, {sc['info']} info.")
+        if info:
+            lines.append("")
+            lines.append("Standing gaps and notes (info):")
+            for f in info:
+                lines.append(f"- {f['title']}. {f.get('detail', '')}".rstrip())
+        for n in r["notes"]:
+            lines.append(f"- {n}")
+        lines.append("")
+        lines.append(f"Generated {fmt(parse_time(r['generated']))} by kit-audit --{r['mode']}.")
+        return "\n".join(lines) + "\n"
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-audit", description="Check Kit's connector audit log.")
+    g = ap.add_mutually_exclusive_group(required=True)
+    g.add_argument("--daily", action="store_true")
+    g.add_argument("--weekly", action="store_true")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--log-dir")
+    ap.add_argument("--kit-dir", default=os.path.join("~", "Claude", "Agents", "kit"))
+    ap.add_argument("--out-dir")
+    ap.add_argument("--now")
+    args = ap.parse_args(argv)
+    if args.now and parse_time(args.now) is None:
+        ap.error("--now needs an ISO time, like 2026-10-15T09:00:00-04:00")
+    mode = "weekly" if args.weekly else "daily"
+    audit = Audit(args)
+    try:
+        status, text = audit.run(mode)
+    except Exception as ex:  # noqa: BLE001  (never fail the scheduled run)
+        f = {"severity": "warning", "check": "kit-audit", "title": "kit-audit couldn't finish", "detail": str(ex)}
+        status = {"generated": audit.now.isoformat(timespec="seconds"), "mode": mode, "open_issue": True,
+                  "severity_counts": {"critical": 0, "warning": 1, "info": 0}, "counts": {}, "findings": [f],
+                  "notes": [], "daily": audit.prev.get("daily"), "weekly": audit.prev.get("weekly"),
+                  "state": audit.state}
+        text = f"Audit issues: 0 critical, 1 warning.\nWARNING: kit-audit couldn't finish. {ex}\n"
+        status["text"] = text
+        status[mode] = {k: v for k, v in status.items() if k not in ("daily", "weekly", "state")}
+    try:
+        os.makedirs(audit.out, exist_ok=True)
+        for name, body in (("audit-status.json", json.dumps(status, indent=2, default=str) + "\n"), ("audit.txt", text)):
+            tmp = os.path.join(audit.out, name + ".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(body)
+            os.replace(tmp, os.path.join(audit.out, name))
+    except OSError as ex:
+        print(f"kit-audit: couldn't write to {audit.out}: {ex}", file=sys.stderr)
+    if args.json:
+        print(json.dumps({k: v for k, v in status.items() if k != "state"}, indent=2, default=str))
+    else:
+        print(text, end="")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -1,0 +1,625 @@
+#!/usr/bin/env python3
+"""kit-publish: write this Kit's shareable records into its outbox, for the team dashboard.
+
+  kit-publish                      write new and changed records, then print a summary
+  kit-publish --dry-run            list what it would write; change nothing
+  kit-publish --prune              also remove outbox records this run no longer produces
+  kit-publish --types lesson,decision   publish these types this run ("all" for every type)
+  kit-publish --kit-dir DIR        read another Kit folder (for testing)
+  kit-publish --outbox DIR         write somewhere other than the outbox in sharing.md
+
+Settings are in <kit>/memory/context/sharing.md: outbox, Kit id, owner role, which record types
+to publish (none until you turn them on), projects to include or exclude, and classification.
+It reads STATUS.md, the waiting items in QUEUE.md, lessons tagged share: team, decision notes in
+memory/decisions/, and, when they exist at the library root named in library.md, the catalog,
+decision records (ADRs), the knowledge base's decisions, the demand register, status reports, and
+handoff briefs. It never reads memory/personal/, and it blocks any record holding credential-shaped text.
+
+Records are validated against shared/records/schema/ and written one per file to
+<outbox>/<kit id>/<type>/<local id>.json. Unchanged records aren't rewritten, so a second run
+with the same input changes nothing. Exits 1 when a record was blocked or failed validation.
+"""
+import argparse
+import datetime as dt
+import json
+import os
+import pathlib
+import re
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import kit_records as kr  # noqa: E402
+
+VERSION = "1.0"
+CLOSED = {"closed", "resolved", "cancelled", "canceled", "done", "complete", "completed",
+          "rejected", "withdrawn", "fulfilled"}
+ARTIFACT_STATUS = {"draft", "in review", "published", "superseded", "withdrawn"}
+# Labels recognized without bold ("Why: ..."); bold labels ("**Why:** ...") can be anything.
+LABELS = "why|how to apply|decision|decided|options|options weighed|options considered|status|date|" \
+         "date decided|revisit|when to revisit|project|scope|sources|superseded by|context|consequences"
+
+
+# ---------- text helpers ----------
+
+def clean(s, n):
+    s = re.sub(r"\*\*|__", "", s or "")
+    s = " ".join(s.split())
+    return s if len(s) <= n else s[:n - 1].rstrip() + "…"
+
+
+def slug(s, n=64):
+    s = re.sub(r"[^a-z0-9._-]+", "-", (s or "").lower()).strip("-._")
+    return s[:n].rstrip("-._")
+
+
+def iso_date(s):
+    """DD-Mmm-YYYY or YYYY-MM-DD anywhere in s, as YYYY-MM-DD, or None."""
+    s = s or ""
+    m = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", s)
+    if m:
+        try:
+            return dt.date.fromisoformat(m.group(1)).isoformat()
+        except ValueError:
+            pass
+    m = re.search(r"\b(\d{1,2}-[A-Za-z]{3}-\d{4})\b", s)
+    if m:
+        try:
+            return dt.datetime.strptime(m.group(1), "%d-%b-%Y").date().isoformat()
+        except ValueError:
+            pass
+    return None
+
+
+def project_tag(text):
+    """'[proj] rest' -> ('proj', 'rest'); untagged -> (None, text)."""
+    m = re.match(r"\s*(?:\*\*)?\[([A-Za-z0-9][\w .-]+)\]\s*(.*)", text)
+    if m:
+        rest = m.group(2)
+        if text.lstrip().startswith("**") and not rest.startswith("**"):
+            rest = "**" + rest
+        return slug(m.group(1)), rest
+    return None, text
+
+
+def read(p):
+    try:
+        return p.read_text(errors="ignore")
+    except OSError:
+        return ""
+
+
+def split_tags(text):
+    """Frontmatter or leading 'key: value' lines (share, project, classification) and the rest."""
+    tags, lines = {}, text.splitlines()
+    if lines and lines[0].strip() == "---":
+        end = next((i for i, ln in enumerate(lines[1:], 1) if ln.strip() == "---"), None)
+        if end:
+            for ln in lines[1:end]:
+                if ":" in ln:
+                    k, v = ln.split(":", 1)
+                    tags[k.strip().lower()] = v.strip().strip("\"'").lower()
+            return tags, "\n".join(lines[end + 1:])
+    i = 0
+    while i < len(lines):
+        m = re.match(r"\s*(share|project|classification)\s*:\s*(\S.*?)\s*$", lines[i], re.I)
+        if m:
+            tags[m.group(1).lower()] = m.group(2).lower()
+        elif lines[i].strip():
+            break
+        i += 1
+    return tags, "\n".join(lines[i:])
+
+
+def labeled(text):
+    """Split markdown into the part before any label and {label: text} for '**Label:** text' lines."""
+    head, parts, cur = [], {}, None
+    for ln in text.splitlines():
+        m = re.match(r"\s*(?:[-*]\s+)?\*\*([A-Za-z][A-Za-z ]{1,30}?):?\*\*:?\s*(.*)", ln) or \
+            re.match(rf"\s*({LABELS}):\s+(.*)", ln, re.I)
+        if m:
+            cur = m.group(1).strip().lower()
+            parts[cur] = m.group(2).strip()
+        elif cur:
+            parts[cur] += "\n" + ln
+        else:
+            head.append(ln)
+    return "\n".join(head), parts
+
+
+def bullets(s):
+    return [clean(b, 200) for b in re.findall(r"^\s*[-*]\s+(.+)$", s or "", re.M)]
+
+
+def heading(text):
+    m = re.search(r"^#\s+(.+)$", text, re.M)
+    return m.group(1).strip() if m else ""
+
+
+def table(text, key):
+    """Rows of the first markdown table whose header mentions key, as dicts keyed by lowercase header."""
+    rows, cols = [], None
+    for ln in text.splitlines():
+        if not ln.strip().startswith("|"):
+            if cols and rows:
+                break
+            continue
+        cells = [c.strip().strip("`") for c in ln.strip().strip("|").split("|")]
+        if cols is None:
+            if any(key in c.lower() for c in cells):
+                cols = [c.lower() for c in cells]
+        elif not all(re.fullmatch(r":?-{2,}:?", c) for c in cells if c):
+            rows.append(dict(zip(cols, cells)))
+    return rows
+
+
+def col(row, *names):
+    for want in names:
+        for k, v in row.items():
+            if want in k:
+                return v
+    return ""
+
+
+# ---------- settings ----------
+
+def setting_lines(path):
+    out = {}
+    for m in re.finditer(r"^- \*\*([^*]+?):\*\*\s*(.*)$", read(path), re.M):
+        v = m.group(2).strip()
+        b = re.match(r"`([^`]+)`", v)
+        v = b.group(1) if b else re.split(r"\.(?:\s|$)", v, 1)[0].strip()
+        out[m.group(1).strip().lower()] = v
+    return out
+
+
+def listing(v, none=("none", "not set", "")):
+    v = (v or "").strip()
+    return [] if v.lower() in none else [x.strip().lower() for x in re.split(r"[,;]", v) if x.strip()]
+
+
+def settings(kit):
+    raw = setting_lines(kit / "memory/context/sharing.md")
+    kid = raw.get("kit id", "")
+    role = raw.get("owner role", "")
+    return {
+        "found": (kit / "memory/context/sharing.md").exists(),
+        "outbox": pathlib.Path(os.path.expanduser(raw.get("outbox") or str(kit / "outbox"))),
+        "kit_id": "" if kid.lower() in ("", "not set") else kid.lower(),
+        "owner_role": "" if role.lower() in ("", "not set") else role,
+        "publish": listing(raw.get("publish", "none")),
+        "include": listing(raw.get("include projects", "all"), none=("all", "")),
+        "exclude": [slug(p) for p in listing(raw.get("exclude projects", "none"))],
+        "classification": "confidential" if raw.get("classification", "").lower().startswith("conf")
+        else "internal",
+        "confidential": [slug(p) for p in listing(raw.get("confidential projects", "none"))],
+        "default_project": slug(raw.get("default project", "")) or "general",
+    }
+
+
+def library_root(kit):
+    v = setting_lines(kit / "memory/context/library.md").get("library root", "")
+    if not v or v.lower().startswith("not set"):
+        return None
+    p = pathlib.Path(os.path.expanduser(v))
+    return p if p.is_dir() else None
+
+
+def knowledge_dir(kit, lib):
+    raw = setting_lines(kit / "memory/context/knowledge.md")
+    private = raw.get("sharing", "private").lower().startswith("private")
+    where = raw.get("knowledge base", "")
+    if where.startswith("~") or where.startswith("/"):
+        d = pathlib.Path(os.path.expanduser(where))
+    else:
+        d = lib / "knowledge" if lib else None
+    return d, private
+
+
+def register_path(kit, lib):
+    v = setting_lines(kit / "memory/context/demands.md").get("register", "")
+    if v.startswith("~") or v.startswith("/"):
+        return pathlib.Path(os.path.expanduser(v))
+    return lib / "demands/REGISTER.md" if lib else None
+
+
+# ---------- collectors: each yields (type, local id, project, source, body, tags) ----------
+
+def personal(path, root):
+    try:
+        return "personal" in path.relative_to(root).parts
+    except ValueError:
+        return False
+
+
+def lib_source(path, lib, anchor=""):
+    try:
+        rel = path.relative_to(lib).as_posix()
+    except ValueError:
+        rel = path.name
+    return f"library:{rel}{anchor}"
+
+
+def from_status(kit, cfg):
+    snaps = {}
+
+    def snap(p):
+        return snaps.setdefault(p, {"as_of": None, "health": "unknown", "headline": "", "in_progress": [],
+                                    "blocked": [], "next": [], "waiting": [], "_src": set()})
+
+    text = read(kit / "STATUS.md")
+    as_of = iso_date((re.search(r"^Updated\s+(.+)$", text, re.M) or [None, ""])[1])
+    section, last = None, None
+    for ln in text.splitlines():
+        if ln.startswith("## "):
+            h = ln[3:].lower()
+            section = "blocked" if "block" in h else "in_progress" if "progress" in h \
+                else "next" if h.startswith("next") else None
+            last = None
+        elif section and re.match(r"- \S", ln):
+            proj, item = project_tag(ln[2:])
+            if re.fullmatch(r"(nothing( yet)?|none)\.?", clean(item, 40).lower()):
+                last = None
+                continue
+            s = snap(proj or cfg["default_project"])
+            s["as_of"], last = as_of, (s, section, len(s[section]))
+            s["_src"].add("kit:STATUS.md")
+            if section == "blocked":
+                w = re.search(r"(?:waiting on|blocked on|on whom:?)\s+([^,.;()]+)", item, re.I)
+                s[section].append({"item": item, "waiting_on": w.group(1).strip() if w else ""})
+            else:
+                s[section].append(item)
+        elif last and ln.startswith("  ") and ln.strip():
+            s, sec, i = last
+            if sec == "blocked":
+                s[sec][i]["item"] += " " + ln.strip()
+            else:
+                s[sec][i] += " " + ln.strip()
+        else:
+            last = None
+    section = None
+    for ln in read(kit / "QUEUE.md").splitlines():
+        if ln.startswith("## "):
+            section = "waiting" in ln.lower()
+        elif section and ln.startswith("- [ ]"):
+            m = re.match(r"- \[ \] (.*)", ln)
+            proj, rest = project_tag(m.group(1))
+            t = re.match(r"\*\*(.+?)\*\*(.*)", rest)
+            title, tail = (t.group(1), t.group(2)) if t else (rest, "")
+            w = re.search(r"waiting on ([^,(]+?)(?:\s+since\b|[,(]|$)", tail + " " + title, re.I)
+            since = iso_date((re.search(r"since ([\w-]+)", tail, re.I) or [None, ""])[1]) or \
+                iso_date((re.search(r"added ([\w-]+)", tail, re.I) or [None, ""])[1])
+            s = snap(proj or cfg["default_project"])
+            s["_src"].add("kit:QUEUE.md")
+            s["waiting"].append({"item": title, "waiting_on": w.group(1).strip() if w else "",
+                                 "since": since,
+                                 "due": iso_date((re.search(r"due ([\w-]+)", tail, re.I) or [None, ""])[1])})
+    for proj, s in snaps.items():
+        src = "kit:STATUS.md" if "kit:STATUS.md" in s.pop("_src") else "kit:QUEUE.md"
+        body = {k: v for k, v in s.items()}
+        body["in_progress"] = [clean(x, 240) for x in body["in_progress"]][:25]
+        body["next"] = [clean(x, 240) for x in body["next"]][:25]
+        body["blocked"] = [{"item": clean(b["item"], 240), "waiting_on": clean(b["waiting_on"], 80)}
+                           for b in body["blocked"]][:25]
+        body["waiting"] = [dict(w, item=clean(w["item"], 240), waiting_on=clean(w["waiting_on"], 80))
+                           for w in body["waiting"]][:50]
+        yield "status-snapshot", proj, proj, src, body, {}
+
+
+def from_reports(lib):
+    latest = {}
+    for f in sorted(lib.glob("artifacts/*/status/status-*.md")):
+        if not personal(f, lib):
+            latest[f.parent.parent.name] = f      # sorted by date, so the last one wins
+    for proj, f in latest.items():
+        text = read(f)
+        m = re.search(r"\b(on|off)[ -]track\b|\bat[ -]risk\b", text, re.I)
+        health = "unknown"
+        headline = ""
+        if m:
+            health = slug(m.group(0).replace(" ", "-"))
+            line = next(ln for ln in text.splitlines() if m.group(0) in ln)
+            line = re.sub(r"^[#>\-*\s]+", "", line)
+            headline = clean(re.sub(r"^headline\W*", "", line, flags=re.I), 280)
+        body = {"as_of": iso_date(f.stem), "health": health, "headline": headline, "in_progress": [],
+                "blocked": [], "next": [], "waiting": []}
+        yield "status-snapshot", f"{slug(proj)}.report", slug(proj), lib_source(f, lib), body, {}
+
+
+def decision_body(title, decided, status, summary, options, why, revisit, sources, origin):
+    st = (status or "current").lower()
+    return {"title": clean(title, 160), "decided": decided,
+            "status": next((s for s in ("superseded", "proposed") if s in st), "current"),
+            "summary": clean(summary, 600), "options": options[:10], "why": clean(why, 600),
+            "revisit": clean(revisit, 120), "sources": [clean(s, 120) for s in sources][:10],
+            "origin": origin}
+
+
+def from_decisions(kit):
+    folder = kit / "memory/decisions"
+    for f in sorted(folder.glob("*.md")) if folder.is_dir() else []:
+        if f.name.upper() == "INDEX.MD" or personal(f, kit):
+            continue
+        tags, text = split_tags(read(f))
+        if tags.get("share") == "private":
+            continue
+        head, parts = labeled(text)
+        title = heading(text) or f.stem
+        summary = parts.get("decision") or " ".join(
+            ln for ln in head.splitlines() if ln.strip() and not ln.startswith("#"))
+        opts = parts.get("options") or parts.get("options weighed") or ""
+        body = decision_body(title, iso_date(f.stem) or iso_date(parts.get("date", "")), parts.get("status"),
+                             summary, bullets(opts) or ([clean(opts, 200)] if opts.strip() else []),
+                             parts.get("why", ""), parts.get("revisit", "") or parts.get("when to revisit", ""),
+                             re.findall(r"\[([A-Z]{2,}-\d+[^\]]*)\]", text), "decision-note")
+        yield "decision", slug(f.stem, 96), tags.get("project"), f"kit:memory/decisions/{f.name}", body, tags
+
+
+def from_knowledge(lib, kdir):
+    f = kdir / "decisions.md"
+    text = read(f)
+    for chunk in re.split(r"^#{2,3}\s+", text, flags=re.M)[1:]:
+        title, _, rest = chunk.partition("\n")
+        head, parts = labeled(rest)
+        summary = parts.get("decided") or parts.get("decision") or parts.get("what") or head
+        body = decision_body(title, iso_date(parts.get("date", "")), parts.get("status"), summary, [],
+                             "", "", re.findall(r"\[(LIB-\d+[^\]]*)\]", chunk), "knowledge-base")
+        proj = slug(parts.get("project", "")) or None
+        yield "decision", "kb-" + slug(title, 90), proj, lib_source(f, lib), body, {}
+
+
+def adr_dir(kit, lib):
+    v = setting_lines(kit / "memory/context/decisions.md").get("folder", "")
+    if v.startswith("~") or v.startswith("/"):
+        return pathlib.Path(os.path.expanduser(v))
+    return lib / "decisions"
+
+
+def from_adrs(lib, folder):
+    for f in sorted(folder.glob("ADR-*.md")):
+        if personal(f, lib):
+            continue
+        text = read(f)
+        head, parts = labeled(text)
+        opts = parts.get("options considered") or parts.get("options") or ""
+        body = decision_body(heading(text) or f.stem, iso_date(parts.get("date decided", "") or parts.get("date", "")),
+                             parts.get("status"), parts.get("decision", ""), bullets(opts)[:10],
+                             parts.get("context", ""), "", re.findall(r"\[(LIB-\d+[^\]]*)\]", text),
+                             "decision-record")
+        proj = slug(parts.get("project", "")) or None
+        yield "decision", slug(f.stem, 96), proj, lib_source(f, lib), body, {}
+
+
+def from_lessons(kit):
+    for f in sorted((kit / "lessons").glob("*.md")):
+        if f.name.upper() == "INDEX.MD" or personal(f, kit):
+            continue
+        tags, text = split_tags(read(f))
+        if tags.get("share") != "team":
+            continue                                   # untagged lessons stay private
+        head, parts = labeled(text)
+        rule = " ".join(ln for ln in head.splitlines() if ln.strip() and not ln.startswith("#"))
+        title = heading(text) or re.split(r"(?<=[.!?])\s", clean(rule, 600), 1)[0]
+        body = {"title": clean(title, 160), "rule": clean(rule, 600), "why": clean(parts.get("why", ""), 600),
+                "how_to_apply": clean(parts.get("how to apply", ""), 800)}
+        yield "lesson", slug(f.stem, 96), tags.get("project"), f"kit:lessons/{f.name}", body, tags
+
+
+def relative_path(loc):
+    loc = (loc or "").strip()
+    if not loc or "://" in loc or loc.startswith(("/", "~", "\\")) or re.match(r"[A-Za-z]:", loc) or ".." in loc:
+        return None
+    return loc[:240]
+
+
+def from_catalog(lib):
+    f = lib / "CATALOG.md"
+    for row in table(read(f), "accession"):
+        acc = col(row, "accession")
+        if not re.fullmatch(r"[A-Za-z]+-\d+", acc):
+            continue
+        status = col(row, "status").lower()
+        body = {"accession": acc, "doc_number": clean(col(row, "document", "doc"), 60),
+                "title": clean(col(row, "title"), 200), "type": clean(col(row, "type"), 60),
+                "status": status if status in ARTIFACT_STATUS else "unknown",
+                "version": clean(col(row, "version"), 30), "last_update": iso_date(col(row, "update", "modified")),
+                "path": relative_path(col(row, "location"))}
+        proj = slug(col(row, "project")) or None
+        yield "artifact-pointer", acc.lower(), proj, lib_source(f, lib, f"#{acc}"), body, {}
+
+
+def from_register(lib, reg):
+    groups = {}
+    for row in table(read(reg), "status"):
+        num = col(row, "number", "id")
+        if not num:
+            continue
+        status = clean(col(row, "status"), 40)
+        g = groups.setdefault(slug(col(row, "project")) or None, {"items": [], "checked": []})
+        g["checked"].append(iso_date(col(row, "checked")) or "")
+        g["items"].append({"number": clean(num, 40), "title": clean(col(row, "title"), 160), "status": status,
+                           "role": clean(col(row, "role"), 60), "due": iso_date(col(row, "due", "date")),
+                           "open": status.lower() not in CLOSED})
+    for proj, g in groups.items():
+        items = sorted(g["items"], key=lambda i: (not i["open"], i["due"] is None, i["due"] or "", i["number"]))
+        by = {}
+        for i in items:
+            by[i["status"] or "unknown"] = by.get(i["status"] or "unknown", 0) + 1
+        body = {"as_of": max(g["checked"]) or None, "total": len(items), "open": sum(i["open"] for i in items),
+                "by_status": by, "items": items[:100]}
+        yield "demand-rollup", proj or "_default", proj, lib_source(reg, lib), body, {}
+
+
+def from_handoffs(lib):
+    for f in sorted(lib.glob("artifacts/*/handoff/handoff-*.md")):
+        if personal(f, lib):
+            continue
+        text = read(f)
+        m = re.search(r"where it stands\**:?\**\s*\n+(.+?)(?:\n\s*\n|\n#|\Z)", text, re.I | re.S) or \
+            re.search(r"where it stands\**[:.]?\**\s*(.+?)(?:\n\s*\n|\n#|\Z)", text, re.I | re.S)
+        proj = slug(f.parent.parent.name)
+        body = {"date": iso_date(f.stem), "title": clean(heading(text) or f.stem, 160),
+                "where_it_stands": clean(m.group(1) if m else "", 400),
+                "sections": [clean(h, 80) for h in re.findall(r"^##\s+(.+)$", text, re.M)][:12],
+                "path": relative_path(f.relative_to(lib).as_posix())}
+        yield "handoff-pointer", f"{proj}.{f.stem}", proj, lib_source(f, lib), body, {}
+
+
+# ---------- assembling and writing ----------
+
+def collect(kit, cfg, types, notes):
+    lib = library_root(kit)
+    if lib is None:
+        notes.append("no library root set in library.md (or it isn't reachable): library records skipped")
+    if "status-snapshot" in types:
+        yield from from_status(kit, cfg)
+        if lib:
+            yield from from_reports(lib)
+    if "decision" in types:
+        yield from from_decisions(kit)
+        if lib:
+            kdir, private = knowledge_dir(kit, lib)
+            if private and kdir and (kdir / "decisions.md").exists():
+                notes.append("knowledge base is private in knowledge.md: its decisions skipped")
+            elif kdir and (kdir / "decisions.md").exists():
+                yield from from_knowledge(lib, kdir)
+            adrs = adr_dir(kit, lib)
+            if adrs.is_dir() and any(adrs.glob("ADR-*.md")):
+                if private:
+                    notes.append("knowledge base is private in knowledge.md: decision records (ADRs) skipped")
+                else:
+                    yield from from_adrs(lib, adrs)
+    if "lesson" in types:
+        yield from from_lessons(kit)
+    if lib and "artifact-pointer" in types and (lib / "CATALOG.md").exists():
+        yield from from_catalog(lib)
+    reg = register_path(kit, lib)
+    if lib and "demand-rollup" in types and reg and reg.exists():
+        yield from from_register(lib, reg)
+    if lib and "handoff-pointer" in types:
+        yield from from_handoffs(lib)
+
+
+def classify(cfg, project, tags):
+    levels = [cfg["classification"], tags.get("classification", "internal"),
+              "confidential" if project in cfg["confidential"] else "internal"]
+    return "confidential" if any(str(v).startswith("conf") for v in levels) else "internal"
+
+
+def wanted(cfg, project):
+    if project in cfg["exclude"]:
+        return False
+    return not cfg["include"] or project in [slug(p) for p in cfg["include"]]
+
+
+def strings(o):
+    if isinstance(o, str):
+        yield o
+    elif isinstance(o, dict):
+        for v in o.values():
+            yield from strings(v)
+    elif isinstance(o, list):
+        for v in o:
+            yield from strings(v)
+
+
+def core(rec):
+    return {k: v for k, v in rec.items() if k not in ("created", "updated")}
+
+
+def write_json(path, rec):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(rec, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
+    os.replace(tmp, path)
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-publish", description=__doc__.split("\n")[0])
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--prune", action="store_true")
+    ap.add_argument("--types", help="comma-separated record types, or 'all'; overrides sharing.md")
+    ap.add_argument("--kit-dir", default=str(pathlib.Path.home() / "Claude/Agents/kit"))
+    ap.add_argument("--outbox")
+    a = ap.parse_args(argv)
+
+    kit = pathlib.Path(a.kit_dir).expanduser()
+    cfg = settings(kit)
+    types = list(kr.TYPES) if a.types == "all" else listing(a.types) if a.types else cfg["publish"]
+    bad = [t for t in types if t not in kr.TYPES]
+    if bad:
+        sys.exit(f"kit-publish: unknown record type {', '.join(bad)} (choose from {', '.join(kr.TYPES)})")
+    kid, role = cfg["kit_id"], cfg["owner_role"]
+    if not a.dry_run and not (kid and role):
+        sys.exit("kit-publish: set Kit id and Owner role in memory/context/sharing.md first")
+    kid, role = kid or "unset", role or "unset"
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{2,39}", kid):
+        sys.exit(f"kit-publish: Kit id {kid!r} must be 3-40 lowercase letters, digits, or hyphens")
+    outbox = pathlib.Path(a.outbox).expanduser() if a.outbox else cfg["outbox"]
+    home = outbox / kid
+    schemas = kr.load_schemas()
+    notes = [] if cfg["found"] else ["no sharing.md: using defaults (publish nothing)"]
+    if not types:
+        notes.append("no record types turned on (Publish in sharing.md, or --types)")
+
+    counts = {"new": 0, "changed": 0, "unchanged": 0, "blocked": 0, "invalid": 0, "skipped": 0}
+    produced, stamp = set(), kr.now_iso()
+    for typ, local, proj, source, body, tags in collect(kit, cfg, types, notes):
+        project = proj or cfg["default_project"]
+        if not wanted(cfg, project):
+            counts["skipped"] += 1
+            continue
+        local = slug(local, 96) or "item"
+        rec = {"schema": typ, "schema_version": VERSION, "id": f"{kid}:{typ}:{local}", "kit_id": kid,
+               "owner_role": role, "project": project, "created": stamp, "updated": stamp,
+               "classification": classify(cfg, project, tags), "source": source, "body": body}
+        path = home / typ / f"{local}.json"
+        hits = kr.secret_hits("\n".join(strings(rec)))
+        if hits:
+            counts["blocked"] += 1
+            produced.add(path)          # keep any earlier clean copy until the source is fixed
+            print(f"  blocked  {rec['id']}: looks like a {', '.join(hits)} (in {source})")
+            continue
+        problems = kr.validate(rec, schemas)
+        if problems:
+            counts["invalid"] += 1
+            print(f"  invalid  {rec['id']}: {'; '.join(problems[:3])}")
+            continue
+        produced.add(path)
+        old = None
+        if path.exists():
+            try:
+                old = json.loads(path.read_text())
+            except (OSError, ValueError):
+                old = None
+        if old and core(old) == core(rec):
+            counts["unchanged"] += 1
+            continue
+        state = "changed" if old else "new"
+        counts[state] += 1
+        if old and old.get("created"):
+            rec["created"] = old["created"]
+        label = body.get("title") or body.get("headline") or project
+        print(f"  {state:<8} {rec['id']}  [{project}] {clean(label, 70)}")
+        if not a.dry_run:
+            write_json(path, rec)
+
+    stale = sorted(p for p in home.rglob("*.json") if p not in produced) if home.is_dir() else []
+    for p in stale:
+        verb = "would prune" if a.dry_run and a.prune else "pruned" if a.prune else "stale"
+        print(f"  {verb:<8} {p.relative_to(outbox)}")
+        if a.prune and not a.dry_run:
+            p.unlink()
+            if not any(p.parent.iterdir()):
+                p.parent.rmdir()
+    for n in notes:
+        print(f"  note     {n}")
+    mode = "dry run, nothing written" if a.dry_run else f"outbox {home}"
+    print(f"kit-publish ({mode}): {counts['new']} new, {counts['changed']} changed, "
+          f"{counts['unchanged']} unchanged, {counts['blocked']} blocked, {counts['invalid']} invalid, "
+          f"{counts['skipped']} excluded by project, {len(stale)} "
+          f"{('would prune' if a.dry_run else 'pruned') if a.prune else 'stale'}")
+    return 1 if counts["blocked"] or counts["invalid"] else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

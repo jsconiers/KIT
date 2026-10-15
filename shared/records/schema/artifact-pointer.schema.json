@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Kit shared record: artifact-pointer",
+  "description": "Points to a holding in the owner's library catalog. Metadata only, never the document's content.",
+  "x-kit-version": "1.0",
+  "allOf": [
+    {
+      "$ref": "envelope.schema.json"
+    }
+  ],
+  "properties": {
+    "schema": {
+      "const": "artifact-pointer"
+    },
+    "body": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "accession",
+        "doc_number",
+        "title",
+        "type",
+        "status",
+        "version",
+        "last_update",
+        "path"
+      ],
+      "properties": {
+        "accession": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "doc_number": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "type": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "draft",
+            "in review",
+            "published",
+            "superseded",
+            "withdrawn",
+            "unknown"
+          ]
+        },
+        "version": {
+          "type": "string",
+          "maxLength": 30
+        },
+        "last_update": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date"
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 240,
+          "pattern": "^(?!.*\\.\\.)(?!(?:.*/)?personal/)[A-Za-z0-9_][^\\n\\\\:]*$"
+        }
+      }
+    }
+  }
+}

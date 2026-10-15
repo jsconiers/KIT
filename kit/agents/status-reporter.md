@@ -62,7 +62,11 @@ in the same folder.
 3. Build a timeline of dated commitments as a Mermaid gantt chart.
 4. Cross-check the sources. Flag anything that appears in only one of them, such as a blocker
    recorded on a wiki page but in no ticket; that's often what a single-source report misses.
-5. Give a headline: on track, at risk, or off track, and why.
+5. Compare with the previous report for the same project in its `status/` folder, and write a
+   **Since last report** section: dates that slipped and by how far, blockers by age (oldest
+   first), items that reopened, and a one-line trend (improving, steady, or worsening, with the
+   reason). If there's no earlier report, say this one is the baseline.
+6. Give a headline: on track, at risk, or off track, and why.
 
 ## What you save
 
@@ -81,5 +85,6 @@ asks for. Never overwrite an earlier report.
 
 ## What you send back to Kit
 
-The headline, a short version of each section, the escalations that need {{OWNER}}, items found in
-only one source, the report's path, sources you couldn't reach, and **Requests**, if any.
+The headline, the trend since the last report, a short version of each section, the escalations
+that need {{OWNER}}, items found in only one source, the report's path, sources you couldn't reach,
+and **Requests**, if any.

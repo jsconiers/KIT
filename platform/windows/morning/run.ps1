@@ -1,9 +1,10 @@
 # run.ps1: Kit's scheduled runs on Windows, started by Task Scheduler.
 #
 #   run.ps1            morning brief (weekdays 7:45, delivered by ~8:00)
-#   run.ps1 open       post-open read (weekdays 9:45)
-#   run.ps1 weekly     weekly review (Saturday 18:00)
-#   run.ps1 journal    trade journal after the close (no delivery unless it fails)
+#   run.ps1 weekly     weekly review (Monday 7:30)
+#   run.ps1 open       post-open read (weekdays 9:45)        optional extra for a trading setup
+#   run.ps1 journal    trade journal after the close         optional extra for a trading setup
+#                      (no delivery unless it fails)
 #
 # UNTESTED on Windows -- validate on a real Windows box before relying on it.
 #
@@ -17,9 +18,12 @@
 #   powershell -ExecutionPolicy Bypass -NoProfile -File run.ps1 morning   (or open, weekly)
 #
 # Settings live in .install\shared\morning\config (shared with the Mac, KEY="value" lines):
-#   OWNER_NAME, SKIP_DAYS, BLOCK_TOOLS, and the Windows delivery keys:
-#   DELIVERY_CHANNEL (toast|file|email|sms), DELIVERY_EMAIL_TO, DELIVERY_EMAIL_FROM,
-#   DELIVERY_SMS_TO, DELIVERY_SMS_API_URL, DELIVERY_SMS_API_KEY_ENV.
+#   OWNER_NAME, SKIP_DAYS, BLOCK_TOOLS, and the delivery keys:
+#   DELIVERY (space-separated: local | outlook-drafts | outlook-review | sms), DELIVERY_EMAIL_TO,
+#   and for the legacy sms hook DELIVERY_SMS_TO, DELIVERY_SMS_API_URL, DELIVERY_SMS_API_KEY_ENV.
+#   Delivery itself is shared/deliver.py, which never sends mail. The older DELIVERY_CHANNEL
+#   (toast|file|email|sms) still works when DELIVERY is unset: toast and file map to local,
+#   email maps to outlook-review, sms to sms.
 
 param(
     [string]$Mode = "morning"
@@ -77,7 +81,18 @@ function Cfg([string]$key, [string]$default = "") {
 $OwnerName  = Cfg "OWNER_NAME" "the owner"
 $SkipDays   = Cfg "SKIP_DAYS" ""
 $BlockTools = Cfg "BLOCK_TOOLS" ""
-$Channel    = (Cfg "DELIVERY_CHANNEL" "toast").ToLower()
+$AllowTools = Cfg "ALLOW_TOOLS" ""
+$AllowToolsWeekly = Cfg "ALLOW_TOOLS_WEEKLY" ""
+# Delivery channels for shared/deliver.py. DELIVERY wins; otherwise map the legacy
+# DELIVERY_CHANNEL (toast -> local, file -> local, email -> outlook-review, sms -> sms).
+$Delivery   = (Cfg "DELIVERY" "").ToLower()
+if ($Delivery.Trim() -eq "") {
+    switch ((Cfg "DELIVERY_CHANNEL" "").ToLower()) {
+        "email" { $Delivery = "outlook-review" }
+        "sms"   { $Delivery = "sms" }
+        default { $Delivery = "local" }   # toast, file, or unset
+    }
+}
 
 # --- Locate Python (prefer the "py -3" launcher; fall back to "python") ----------------------
 function Resolve-Python {
@@ -132,10 +147,12 @@ if (Test-Path -LiteralPath $TestMarker) {
     }
 }
 
-# --- Delivery (pluggable; default Windows toast, file fallback) ------------------------------
-# Writes the brief to the kit briefs folder and the day's log so it is never lost, then returns
-# $true. $false is reserved for a hard failure (even the file fallback couldn't be written), in
-# which case the caller keeps the unsent copy and does NOT mark the day done so it retries.
+# --- Delivery (shared/deliver.py, with a file fallback) --------------------------------------
+# deliver.py handles every channel (see its header): local notification + dashboard, Outlook
+# drafts (saved, or opened for review; never sent), and the legacy sms hook. If it can't run or
+# no channel works, the message is written to a file so it is never lost. Send-Brief returns
+# $false only when even the file fallback failed; the caller then keeps the unsent copy and does
+# NOT mark the day done, so it retries.
 function Invoke-FileFallback([string]$message, [string]$reason) {
     try {
         $stamp = Get-Date -Format "yyyy-MM-dd_HHmm"
@@ -149,95 +166,31 @@ function Invoke-FileFallback([string]$message, [string]$reason) {
     }
 }
 
-function Send-Toast([string]$message) {
-    # BurntToast is an optional module (Install-Module BurntToast). Scheduled tasks often run in
-    # a non-interactive session where no toast can appear, so treat any failure as "fall back".
-    if (-not (Get-Module -ListAvailable -Name BurntToast)) {
-        Write-Log "== delivery: BurntToast module not installed"
-        return $false
-    }
-    try {
-        Import-Module BurntToast -ErrorAction Stop
-        New-BurntToastNotification -Text "Kit", $message | Out-Null
-        Write-Log "== delivery: toast shown"
-        return $true
-    } catch {
-        Write-Log "== delivery: toast FAILED: $($_.Exception.Message)"
-        return $false
-    }
-}
-
-# ---- HOOK: email delivery -------------------------------------------------------------------
-# Reuses the Windows mail tool (platform/windows/mail/kitmail.py) to open a DRAFT addressed to
-# the owner. kitmail never sends on its own, so this opens a draft for manual review/send -- it
-# does not silently email anyone. For a true unattended email you would add an SMTP/Graph send
-# here instead. Configure with DELIVERY_EMAIL_TO (required) and DELIVERY_EMAIL_FROM (optional).
-function Send-Email([string]$message) {
-    $to = Cfg "DELIVERY_EMAIL_TO" ""
-    if ($to -eq "") { Write-Log "== delivery: email channel but DELIVERY_EMAIL_TO is unset"; return $false }
+function Send-Brief([string]$textFile, [bool]$withBrief = $true) {
+    $message = Get-Content -LiteralPath $textFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+    if ($null -eq $message) { $message = "" }
     $py = Resolve-Python
-    if ($null -eq $py) { Write-Log "== delivery: email channel but Python not found"; return $false }
-    $kitmail = Join-Path $KitHome ".install\platform\windows\mail\kitmail.py"
-    if (-not (Test-Path -LiteralPath $kitmail)) { Write-Log "== delivery: kitmail.py not found at $kitmail"; return $false }
-    try {
-        # Pass the body via a temp file so newlines/quoting survive (kitmail supports --body-file).
-        $bodyFile = Join-Path $LogDir "delivery-body-$Mode.txt"
-        Set-Content -LiteralPath $bodyFile -Value $message -Encoding UTF8
-        $args = @($kitmail, "draft", "--to", $to, "--subject", "Kit's $Mode brief", "--body-file", $bodyFile)
-        $from = Cfg "DELIVERY_EMAIL_FROM" ""
-        if ($from -ne "") { $args += @("--from", $from) }
-        & $py.Exe @($py.Args + $args) 2>&1 | ForEach-Object { Write-Log "   kitmail: $_" }
-        if ($LASTEXITCODE -eq 0) { Write-Log "== delivery: email draft opened for $to"; return $true }
-        Write-Log "== delivery: email draft FAILED (exit $LASTEXITCODE)"
-        return $false
-    } catch {
-        Write-Log "== delivery: email FAILED: $($_.Exception.Message)"
-        return $false
+    $deliver = Join-Path $KitHome ".install\shared\deliver.py"
+    if ($null -eq $py -or -not (Test-Path -LiteralPath $deliver)) {
+        return (Invoke-FileFallback "$Test$message" "Python or deliver.py not found")
     }
-}
-
-# ---- HOOK: SMS-API delivery -----------------------------------------------------------------
-# Intentionally a stub: wire your SMS gateway (Twilio, etc.) here. Per work policy the API key is
-# referenced by the NAME of an environment variable (DELIVERY_SMS_API_KEY_ENV), never stored in
-# the config and never written to disk. Fill in the HTTP call for your provider, then return
-# $true on a confirmed send.
-function Send-Sms([string]$message) {
-    $to     = Cfg "DELIVERY_SMS_TO" ""
-    $apiUrl = Cfg "DELIVERY_SMS_API_URL" ""
-    $keyEnv = Cfg "DELIVERY_SMS_API_KEY_ENV" ""
-    if ($to -eq "" -or $apiUrl -eq "" -or $keyEnv -eq "") {
-        Write-Log "== delivery: sms channel not configured (need DELIVERY_SMS_TO, DELIVERY_SMS_API_URL, DELIVERY_SMS_API_KEY_ENV)"
-        return $false
+    $dargs = @($deliver, "--mode", $Mode, "--text", $textFile, "--channels", $Delivery)
+    if ($withBrief) {
+        $briefName = switch ($Mode) {
+            "weekly"  { "weekly-$Today.md" }
+            "journal" { "" }
+            default   { "$Today.md" }      # morning and open share the day's brief
+        }
+        if ($briefName -ne "") {
+            $briefPath = Join-Path $KitHome "briefs\$briefName"
+            if (Test-Path -LiteralPath $briefPath) { $dargs += @("--brief", $briefPath) }
+        }
     }
-    $apiKey = [Environment]::GetEnvironmentVariable($keyEnv)
-    if ([string]::IsNullOrEmpty($apiKey)) {
-        Write-Log "== delivery: sms API key env var '$keyEnv' is not set"
-        return $false
-    }
-    # ----------------------------------------------------------------------------------------
-    # TODO (hook): implement the actual send for your SMS provider, e.g.:
-    #   $body = @{ To = $to; Body = $message }
-    #   Invoke-RestMethod -Method Post -Uri $apiUrl -Body $body `
-    #       -Headers @{ Authorization = "Bearer $apiKey" }
-    # Return $true only on a confirmed send. Until implemented, report "not sent" so the brief
-    # falls back to a file and is not lost.
-    # ----------------------------------------------------------------------------------------
-    Write-Log "== delivery: sms hook present but not implemented; falling back"
-    return $false
-}
-
-function Send-Brief([string]$message) {
-    # Dispatch on the configured channel; on any channel failure, fall back to a file so the
-    # brief is never lost. Returns $true if the brief reached the user or was saved to a file.
-    $ok = $false
-    switch ($Channel) {
-        "file"  { return (Invoke-FileFallback $message "channel=file") }
-        "email" { $ok = Send-Email $message }
-        "sms"   { $ok = Send-Sms $message }
-        default { $Channel = "toast"; $ok = Send-Toast $message }   # default: toast
-    }
-    if ($ok) { return $true }
-    return (Invoke-FileFallback $message "channel=$Channel unavailable")
+    if ($Test -ne "") { $dargs += "--test" }
+    & $py.Exe @($py.Args + $dargs) 2>&1 | ForEach-Object { Write-Log "   $_" }
+    if ($LASTEXITCODE -eq 0) { return $true }
+    Write-Log "== delivery: deliver.py found no working channel (exit $LASTEXITCODE)"
+    return (Invoke-FileFallback "$Test$message" "channels '$Delivery' unavailable")
 }
 
 # --- The run ---------------------------------------------------------------------------------
@@ -251,6 +204,11 @@ if ($Mode -eq "morning" -or $Mode -eq "weekly") {
         if (Test-Path -LiteralPath $doctor) {
             & $py.Exe @($py.Args + @($doctor, "--brief")) *> (Join-Path $KitHome "briefs\health.txt")
         }
+        $audit = Join-Path $KitHome ".install\shared\bin\kit-audit"
+        if (Test-Path -LiteralPath $audit) {
+            $auditMode = if ($Mode -eq "weekly") { "--weekly" } else { "--daily" }
+            & $py.Exe @($py.Args + @($audit, $auditMode)) *> $null
+        }
     }
 }
 
@@ -260,8 +218,13 @@ $promptText = (Get-Content -LiteralPath $Prompt -Raw) -replace '\{\{OWNER\}\}', 
 $kitFwd      = $KitHome -replace '\\', '/'
 $briefGlob   = "Edit($kitFwd/briefs/**)"
 $journalGlob = "Edit($kitFwd/journal/**)"
-$claudeArgs  = @("-p", $promptText, "--output-format", "text",
-                 "--allowedTools", "Bash(date:*)", $briefGlob, $journalGlob)
+# Tools the unattended run may use: the basics plus ALLOW_TOOLS (and ALLOW_TOOLS_WEEKLY for the
+# weekly review) from config, passed as one --allowedTools list.
+$allowed = @("Bash(date:*)", $briefGlob, $journalGlob)
+# Rules are separated by semicolons, since a rule can contain spaces.
+$allowed += @($AllowTools -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
+if ($Mode -eq "weekly") { $allowed += @($AllowToolsWeekly -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }) }
+$claudeArgs  = @("-p", $promptText, "--output-format", "text", "--allowedTools") + $allowed
 if ($BlockTools.Trim() -ne "") {
     $claudeArgs += "--disallowedTools"
     $claudeArgs += ($BlockTools -split '\s+' | Where-Object { $_ -ne "" })
@@ -307,7 +270,7 @@ if ($quietTrim -eq "MARKET CLOSED" -or $quietTrim -eq "NO TEXT") {
     Write-Log "== ${quietTrim}: no delivery"
     if ($Test -eq "") { New-Item -ItemType File -Force -Path $Done | Out-Null }
 } elseif ($quietTrim -ne "") {
-    if (Send-Brief "$Test$quiet") {
+    if (Send-Brief $Text) {
         if ($Test -eq "") { New-Item -ItemType File -Force -Path $Done | Out-Null }
         Remove-Item -LiteralPath (Join-Path $KitHome "briefs\unsent-$Mode.txt") -Force -ErrorAction SilentlyContinue
         Write-Log "== delivered"
@@ -316,7 +279,9 @@ if ($quietTrim -eq "MARKET CLOSED" -or $quietTrim -eq "NO TEXT") {
         Write-Log "== delivery failed; kept unsent copy"
     }
 } else {
-    $null = Send-Brief "${Test}Kit's $Mode run didn't finish (rc=$rc). Log: $Log"
+    $failFile = Join-Path $LogDir "failure-$Mode.txt"
+    Set-Content -LiteralPath $failFile -Value "Kit's $Mode run didn't finish (rc=$rc). Log: $Log" -Encoding UTF8
+    $null = Send-Brief $failFile $false
     Write-Log "== sent failure notice"
 }
 

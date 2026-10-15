@@ -1,0 +1,91 @@
+<!doctype html>
+<!-- Kit team dashboard template (default). Copy it to ~/Claude/Agents/kit/templates/team-dashboard.html
+     to change the look; your copy wins. Placeholders: $$now_iso $$now_text $$record_count $$kit_count
+     $$banner $$project_options $$kit_options $$sources $$projects $$waiting $$decisions $$lessons
+     $$artifacts $$handoffs $$kits $$warning_count $$warnings $$script (keep $$script: it runs the
+     filters). Keep the Content-Security-Policy line and keep it self-contained. -->
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<title>Kit team dashboard</title>
+<style>
+:root { --board: #E3E7EA; --strip: #FFFFFF; --ink: #15202B; --muted: #566573; --line: #C9D0D6;
+  --you: #1F4E79; --kit: #C1121F; --wait: #B7791F; --ok: #2E7D4F;
+  --cond: "Avenir Next Condensed", "Arial Narrow", "Roboto Condensed", sans-serif;
+  --body: system-ui, -apple-system, "Segoe UI", sans-serif; }
+@media (prefers-color-scheme: dark) {
+  :root { --board: #11171D; --strip: #1A222A; --ink: #E4EAEE; --muted: #9AA8B4; --line: #2A353F;
+          --you: #6FA8DC; --kit: #F0464F; --wait: #E3A73C; --ok: #5CC28A; } }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--board); color: var(--ink); font: 16px/1.5 var(--body); }
+.scanner { height: 6px; background: linear-gradient(90deg, var(--strip), var(--kit), var(--strip)); }
+header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 1rem;
+  padding: 1.25rem 2rem 0; }
+header h1 { font: 700 2rem/1 var(--cond); margin: 0; letter-spacing: .02em; }
+header time, .sub { color: var(--muted); font-family: var(--cond); font-size: 1.1rem; }
+.filters { padding: .75rem 2rem 1.25rem; border-bottom: 1px solid var(--line); display: flex; gap: 1rem;
+  flex-wrap: wrap; align-items: center; }
+.filters label { font-weight: 600; font-family: var(--cond); }
+select { font: inherit; padding: .2rem .4rem; background: var(--strip); color: var(--ink); border: 1px solid var(--line); }
+main { padding: 1.5rem 2rem 3rem; display: grid; gap: 1.75rem; }
+h2 { font: 600 1.35rem/1.2 var(--cond); margin: 0 0 .75rem; }
+h3 { font: 600 1.2rem/1.2 var(--cond); margin: 0 0 .5rem; }
+h4 { font: 600 .95rem/1.2 var(--cond); margin: .5rem 0 .1rem; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.panel { background: var(--strip); padding: 1rem 1.2rem 1.2rem; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(22rem, 1fr)); gap: 1.25rem; align-items: start; }
+.card { --lane: var(--you); }
+.strips { list-style: none; margin: 0; padding: 0; display: grid; gap: .5rem; }
+.strip { background: var(--strip); border-left: 6px solid var(--lane, var(--you)); padding: .6rem .8rem .65rem; }
+.strip.demand { --lane: var(--wait); }
+.panel .strip { border: 1px solid var(--line); border-left: 6px solid var(--you); }
+.strip ul { margin: .1rem 0 0; padding-left: 1.1rem; }
+.strip p { margin: .3rem 0 0; }
+.strip-title { margin: 0; font: 600 1.15rem/1.25 var(--cond); }
+.headline { font-weight: 600; }
+.meta { display: flex; flex-wrap: wrap; gap: .4rem .75rem; align-items: center; font-size: .9rem; color: var(--muted); }
+.tag { font-weight: 500; } .tag.soon { color: var(--wait); } .tag.late, td.late { color: var(--kit); font-weight: 600; }
+.tag.ok { color: var(--ok); font-weight: 600; } .tag.muted { color: var(--muted); text-decoration: line-through; }
+.tag.conf { color: var(--kit); border: 1px solid var(--kit); padding: 0 .3rem; font-size: .8rem; }
+.kit-chip { font: 600 .9rem var(--cond); background: var(--board); color: var(--ink); padding: 0 .4rem; }
+.added { color: var(--muted); font-size: .9rem; }
+.empty { color: var(--muted); padding: .6rem 0; list-style: none; margin: 0; }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; align-items: start; }
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: .93rem; }
+th, td { padding: .35rem .5rem; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
+thead th { color: var(--muted); font: 600 .95rem var(--cond); }
+.checks { list-style: none; margin: 0; padding: 0; display: grid; gap: .45rem; }
+.check { display: grid; grid-template-columns: .8rem 1fr; gap: 0 .6rem; align-items: baseline; }
+.light { width: .65rem; height: .65rem; border-radius: 50%; background: var(--ok); }
+.check.warn .light { background: var(--wait); } .check.fail .light { background: var(--kit); }
+.cname { font-weight: 600; overflow-wrap: anywhere; } .cdetail { grid-column: 2; color: var(--muted); font-size: .9rem; }
+.banner { margin: 0; padding: .5rem 2rem; background: var(--kit); color: #fff; font-weight: 600; }
+code { font-size: .85em; overflow-wrap: anywhere; }
+[hidden] { display: none !important; }
+@media (max-width: 900px) { .two { grid-template-columns: 1fr; }
+  header, .filters, main, .banner { padding-left: 1rem; padding-right: 1rem; } }
+</style></head>
+<body>
+<div class="scanner" aria-hidden="true"></div>
+<header><h1>Kit team</h1><span class="sub">$record_count records from $kit_count Kit(s)</span>
+<time datetime="$now_iso">$now_text</time></header>
+$banner
+<div class="filters"><label for="f-project">Project</label><select id="f-project">$project_options</select>
+<label for="f-kit">Kit</label><select id="f-kit">$kit_options</select>
+<span class="added">Read-only. Sources: $sources</span></div>
+<main>
+<section aria-labelledby="h-projects"><h2 id="h-projects">Projects</h2><div class="cards">$projects</div></section>
+<section class="panel" aria-labelledby="h-wait"><h2 id="h-wait">Waiting on others</h2>$waiting</section>
+<div class="two">
+<section class="panel" aria-labelledby="h-dec"><h2 id="h-dec">Recent decisions</h2>$decisions</section>
+<section class="panel" aria-labelledby="h-les"><h2 id="h-les">Shared lessons</h2>$lessons</section>
+</div>
+<section class="panel" aria-labelledby="h-art"><h2 id="h-art">Artifacts</h2>$artifacts</section>
+<section class="panel" aria-labelledby="h-hand"><h2 id="h-hand">Handoff briefs</h2>$handoffs</section>
+<div class="two">
+<section class="panel" aria-labelledby="h-kits"><h2 id="h-kits">Kits</h2>$kits</section>
+<section class="panel" aria-labelledby="h-warn"><h2 id="h-warn">Warnings <span class="added">$warning_count</span></h2>$warnings</section>
+</div>
+</main>
+<script>$script</script>
+</body></html>
