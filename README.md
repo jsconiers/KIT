@@ -66,10 +66,11 @@ KIT_OWNER=Alex bash install.sh
 `KIT_OWNER` is the name Kit calls you; without it, Kit uses your account's first name. Then
 start `claude`, run `/context` to confirm `KIT.md` loaded, and say "Kit, introduce yourself."
 
-The optional scheduled runs (morning brief, post-open market read, weekly review) install as
-launchd jobs from `platform/mac/morning/`; they text you via Messages and the first run asks for
-permission to control Messages. The market reads in the prompts call the author's own MCP
-server — edit or remove those steps to fit your tools.
+The installer asks how you want the morning brief delivered and which app your to-dos sync with
+(see Settings below), and puts `todo` and `kit-settings` in `~/.local/bin`. The optional scheduled
+runs (morning brief, post-open market read, weekly review) install as launchd jobs from
+`platform/mac/morning/`. The market reads in the prompts call the author's own MCP server — edit
+or remove those steps to fit your tools.
 
 ## Install (Windows)
 
@@ -80,6 +81,42 @@ backend. See `platform/windows/PORTING.md` for the roadmap, then:
 ```powershell
 powershell -ExecutionPolicy Bypass -File install.ps1
 ```
+
+## Settings
+
+`kit-settings` chooses how the morning brief and weekly review reach you, and which app your to-dos
+sync with. Run it with no arguments to see the current choices; the installer asks the same
+questions once. Your answers go in `~/Claude/Agents/kit/.install/shared/morning/config`, which stays
+on your computer (`shared/morning/config.example` documents every key).
+
+```bash
+kit-settings                                   # show the current choices
+kit-settings delivery local                    # desktop notification (the default)
+kit-settings delivery imessage                 # text to your phone (macOS)
+kit-settings delivery outlook-drafts           # a draft saved in Outlook, never sent
+kit-settings todos apple                       # Apple Reminders (macOS)
+kit-settings todos outlook                     # Outlook Tasks (reaches your phone via Microsoft To Do)
+kit-settings email you@example.com             # where Outlook drafts are addressed
+kit-settings text +15551234567                 # where iMessage texts go
+```
+
+**Work and personal, separately.** A to-do tagged `[work]` (add one with `todo work Review the GDS
+fri`) is a work item; everything else is personal. Each side can use its own channel and app, so
+work stays inside Microsoft 365 while personal items come to your phone:
+
+```bash
+kit-settings delivery personal imessage
+kit-settings delivery work outlook-drafts      # or local, if Outlook isn't set up on this computer
+kit-settings todos personal apple
+kit-settings todos work outlook
+```
+
+With a split, each run writes a personal-only and a work-only short text, and work channels never
+get the full brief. iMessage, SMS, and Apple Reminders run outside Microsoft 365, so `kit-settings`
+refuses them for work items unless you add `--force`. The Outlook channels need classic Outlook
+running with your work account; Kit never starts Outlook and never sends mail. On Windows, run it as
+`python %USERPROFILE%\Claude\Agents\kit\.install\shared\bin\kit-settings`; Windows uses Outlook
+for to-dos.
 
 ## Kit's staff
 

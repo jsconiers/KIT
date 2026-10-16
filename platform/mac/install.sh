@@ -28,6 +28,15 @@ umask 077
 "$PY" "$ROOT/shared/kit_setup.py" check
 "$PY" "$ROOT/shared/kit_setup.py" scaffold
 "$PY" "$ROOT/shared/kit_setup.py" activate
+# Put the everyday commands on the PATH (~/.local/bin), pointing at Kit's own copy.
+mkdir -p "$HOME/.local/bin"
+for tool in todo kit-settings; do
+  ln -sf "$HOME/Claude/Agents/kit/.install/shared/bin/$tool" "$HOME/.local/bin/$tool"
+done
+case ":$PATH:" in
+  *":$HOME/.local/bin:"*) ;;
+  *) printf 'install: note: add ~/.local/bin to your PATH to run todo and kit-settings by name.\n' ;;
+esac
 # How the brief reaches you and which app your to-dos sync with. Asks only when someone is at the
 # keyboard; change it any time with: kit-settings
 "$PY" "$ROOT/shared/bin/kit-settings" setup || printf 'install: note: settings skipped; run kit-settings setup later.\n'
