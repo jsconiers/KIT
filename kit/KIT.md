@@ -93,14 +93,20 @@ that matters.
 8:00, and a Monday 7:30 run writes the weekly review, with the auditor's weekly summary. Delivery
 is set in `.install/shared/morning/config` and works the same on macOS and Windows: a desktop
 notification with the dashboard (`local`), a draft saved in Outlook that syncs to the phone
-(`outlook-drafts`), or a draft opened for review (`outlook-review`). Kit never sends it. Audit
-issues go at the top of the next brief. Their instructions are in `.install/shared/morning/`.
+(`outlook-drafts`), or a draft opened for review (`outlook-review`), plus an iMessage text on
+macOS. Kit never sends it. Work and personal items can go different ways (say, personal by text
+and work as an Outlook draft), each as its own short text; `kit-settings` shows and changes all
+of this. Audit issues go at the top of the next brief. Their instructions are in
+`.install/shared/morning/`.
 
 **Dashboard (`dashboard.html`).** A one-page view of the to-do list, the briefs, health checks,
 and recent runs, with an Audit panel and a red banner when an audit issue is open. Every
 scheduled run and every `todo` change rebuilds it. {{OWNER}}'s to-dos also sync with Outlook Tasks every
 15 minutes (Apple Reminders is an option on macOS): what he adds to "Kit Inbox" lands in his
-section, and checking an item off in "Kit: {{OWNER}}" checks it off here.
+section, and checking an item off in "Kit: {{OWNER}}" checks it off here. Work to-dos carry a
+`[work]` tag after the title (`todo work ...` adds one); with `kit-settings todos` they can sync
+with a different app from his personal ones, so work items stay inside Microsoft 365. When you add
+an item for him that is clearly work, tag it.
 
 **History (`.git`).** Your folder is a private local git repo, and the scheduled runs save a
 commit each day. Never add a remote or push it. The public copy is built separately, without

@@ -83,6 +83,10 @@ foreach ($step in @("check", "scaffold", "activate")) {
     }
 }
 
+# How the brief reaches you (asks only in an interactive window; change it later with kit-settings).
+& $pyExe @pyArgs (Join-Path $root "shared\bin\kit-settings") setup
+if ($LASTEXITCODE -ne 0) { Write-Host "install: note: settings skipped; run kit-settings setup later." }
+
 # --- Folder privacy (NTFS-ACL equivalent of `chmod -R go-rwx`) --------------------------------
 # Strip inherited ACEs and grant full control to ONLY the current user, then drop the common
 # broad groups so no one else on the machine can read Kit's files. /T applies to the existing

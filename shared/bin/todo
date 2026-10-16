@@ -3,6 +3,8 @@
 
   todo                          show your items, Kit's items, and what's waiting
   todo Call the dentist fri           add an item for you, due Friday (the due date is optional)
+  todo work Review the GDS fri  add a work item for you (tagged [work], so it syncs with your work
+                                to-do app and stays out of personal channels)
   todo kit Draft the agenda     add an item for Kit
   todo done 3                   check off your item 3
   todo kit done 2               check off Kit's item 2
@@ -105,7 +107,7 @@ def show():
     print()
 
 
-def add(section, words):
+def add(section, words, tag=""):
     due = parse_due(words[-1]) if len(words) > 1 else None
     title = " ".join(words[:-1] if due else words).strip()
     if not title:
@@ -116,10 +118,11 @@ def add(section, words):
         sys.exit(f"QUEUE.md has no '## {section}' section.")
     found = items(lines, section)
     at = found[-1][1] if found else h[section] + 1
-    entry = f"- [ ] **{title}**" + (f": due {fmt(due)}" if due else "") + f" (added {fmt(TODAY)})"
+    entry = (f"- [ ] **{title}**" + (f" {tag}" if tag else "") + (f": due {fmt(due)}" if due else "")
+             + f" (added {fmt(TODAY)})")
     lines.insert(at, entry)
     save(lines)
-    print(f"Added for {section}: {title}" + (f", due {fmt(due)}" if due else ""))
+    print(f"Added for {section}: {title}" + (f" {tag}" if tag else "") + (f", due {fmt(due)}" if due else ""))
 
 
 def done(section, number):
@@ -149,8 +152,11 @@ def main(argv):
     if not QUEUE.exists():
         sys.exit(f"Can't find {QUEUE}")
     section = owner()
+    tag = ""
     if argv and argv[0].lower() == "kit":
         section, argv = "Kit", argv[1:]
+    elif argv and argv[0].lower() == "work" and len(argv) > 1:
+        tag, argv = "[work]", argv[1:]
     if not argv:
         return show()
     if argv[0] in ("-h", "--help", "help"):
@@ -159,7 +165,7 @@ def main(argv):
         if len(argv) != 2 or not argv[1].isdigit():
             sys.exit("Usage: todo done <number>")
         return done(section, int(argv[1]))
-    return add(section, argv)
+    return add(section, argv, tag)
 
 
 if __name__ == "__main__":

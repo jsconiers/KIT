@@ -187,6 +187,25 @@ def check_agents():
           + " (run: python3 ~/Claude/Agents/kit/.install/shared/doctor.py --fix-agents)", "warn")
 
 
+def check_delivery():
+    """How briefs and to-dos are routed (kit-settings), and anything that would stop them."""
+    import importlib.machinery, importlib.util
+    path = KIT / ".install/shared/bin/kit-settings"
+    if not path.exists():
+        return
+    loader = importlib.machinery.SourceFileLoader("kit_settings", str(path))
+    spec = importlib.util.spec_from_loader("kit_settings", loader)
+    ks = importlib.util.module_from_spec(spec)
+    loader.exec_module(ks)
+    cfg = ks.read()
+    p, w, split = ks.delivery(cfg)
+    tp, tw, tsplit = ks.todos(cfg)
+    add("ok", "Delivery", f"personal {p}, work {w}" if split else p)
+    add("ok", "To-do sync", f"personal {tp}, work {tw}" if tsplit else tp)
+    for msg in ks.problems(cfg):
+        add("warn", "Settings", msg + " (see: kit-settings)")
+
+
 def fix_agents():
     dest = HOME / ".claude/agents"
     dest.mkdir(parents=True, exist_ok=True)
@@ -281,7 +300,7 @@ def main(argv):
         return 0
     for fn in (check_import, check_settings, check_index, check_jobs, check_runs, check_tokens,
                check_secrets, check_permissions, check_agents, check_git, check_calendar, check_mail,
-               check_guard, check_grammar):
+               check_guard, check_grammar, check_delivery):
         try:
             fn()
         except Exception as e:  # noqa: BLE001

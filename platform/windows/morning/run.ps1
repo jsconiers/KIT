@@ -174,7 +174,11 @@ function Send-Brief([string]$textFile, [bool]$withBrief = $true) {
     if ($null -eq $py -or -not (Test-Path -LiteralPath $deliver)) {
         return (Invoke-FileFallback "$Test$message" "Python or deliver.py not found")
     }
-    $dargs = @($deliver, "--mode", $Mode, "--text", $textFile, "--channels", $Delivery)
+    $dargs = @($deliver, "--mode", $Mode, "--text", $textFile)
+    # With DELIVERY_PERSONAL / DELIVERY_WORK set, deliver.py routes each side itself.
+    if ((Cfg "DELIVERY_PERSONAL" "") -eq "" -and (Cfg "DELIVERY_WORK" "") -eq "") {
+        $dargs += @("--channels", $Delivery)
+    }
     if ($withBrief) {
         $briefName = switch ($Mode) {
             "weekly"  { "weekly-$Today.md" }
@@ -196,6 +200,9 @@ function Send-Brief([string]$textFile, [bool]$withBrief = $true) {
 # --- The run ---------------------------------------------------------------------------------
 Set-Location -LiteralPath $KitHome
 Remove-Item -LiteralPath $Text -Force -ErrorAction SilentlyContinue
+foreach ($side in @("work", "personal")) {   # the split texts, so an old one is never resent
+    Remove-Item -LiteralPath ($Text -replace '\.txt$', "-$side.txt") -Force -ErrorAction SilentlyContinue
+}
 
 if ($Mode -eq "morning" -or $Mode -eq "weekly") {
     $py = Resolve-Python

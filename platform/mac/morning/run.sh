@@ -9,8 +9,9 @@
 #   touch ~/Claude/Agents/kit/.install/platform/mac/morning/test-run
 #   launchctl kickstart gui/$(id -u)/com.$USER.kit.morning      (or .open, .weekly)
 # Settings live in .install/shared/morning/config: OWNER_NAME, SKIP_DAYS, BLOCK_TOOLS, and the
-# delivery keys DELIVERY (local | outlook-drafts | outlook-review | imessage), DELIVERY_EMAIL_TO,
-# IMESSAGE_TO, IMESSAGE_TO_ALT. Delivery itself is shared/deliver.py; it never sends mail.
+# delivery keys DELIVERY (local | outlook-drafts | outlook-review | imessage), or DELIVERY_PERSONAL
+# and DELIVERY_WORK to split them, DELIVERY_EMAIL_TO, IMESSAGE_TO, IMESSAGE_TO_ALT. Change them
+# with kit-settings. Delivery itself is shared/deliver.py; it never sends mail.
 MODE="${1:-morning}"
 KIT="$HOME/Claude/Agents/kit"
 MACDIR="$KIT/.install/platform/mac/morning"   # mac runner assets (test-run marker)
@@ -69,7 +70,7 @@ deliver() {
 }
 
 cd "$KIT" || exit 1
-rm -f "$TEXT"
+rm -f "$TEXT" "${TEXT%.txt}-work.txt" "${TEXT%.txt}-personal.txt"   # never resend an old text
 if [ "$MODE" = "morning" ] || [ "$MODE" = "weekly" ]; then
   python3 "$KIT/.install/shared/doctor.py" --brief > briefs/health.txt 2>&1
   [ "$MODE" = "weekly" ] && AUDIT=--weekly || AUDIT=--daily

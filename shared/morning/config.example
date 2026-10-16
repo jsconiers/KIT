@@ -12,7 +12,14 @@ OWNER_NAME="Alex"
 #   sms             LEGACY, Windows only: SMS gateway hook (a stub). Leaves Microsoft 365, so never
 #                   use it for work content.
 # Kit never sends mail: the Outlook channels only save or open a draft.
+# Change these with kit-settings (run it with no arguments to see the current choices).
 DELIVERY="local"
+# Optional: deliver work and personal items differently. When either is set, it replaces DELIVERY:
+# personal items (untagged to-dos, pastoral care, trading) go to DELIVERY_PERSONAL and work items
+# (to-dos tagged [work], work meetings and mail) to DELIVERY_WORK, each as its own short text.
+#   kit-settings delivery personal imessage     kit-settings delivery work outlook-drafts
+#DELIVERY_PERSONAL="imessage"
+#DELIVERY_WORK="outlook-drafts"
 # Address the Outlook drafts are made out to (usually your own work address).
 DELIVERY_EMAIL_TO="you@example.com"
 
@@ -23,6 +30,11 @@ IMESSAGE_TO_ALT="you@example.com"
 # To-do sync backend: outlook (Outlook Tasks, the default on macOS and Windows) or apple
 # (Apple Reminders, macOS only; syncs through iCloud, so keep work items out of it).
 REMINDERS_BACKEND="outlook"
+# Optional: keep work and personal to-dos in different apps (macOS). Work to-dos are the ones tagged
+# [work] (todo work ...); each app gets its own "Kit Inbox" and "Kit: <name>" lists.
+#   kit-settings todos personal apple     kit-settings todos work outlook
+#TODOS_PERSONAL="apple"
+#TODOS_WORK="outlook"
 
 # Days with no morning or open run (date +%u: 1 = Monday ... 7 = Sunday), space-separated.
 SKIP_DAYS=""

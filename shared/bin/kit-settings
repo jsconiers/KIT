@@ -1,0 +1,328 @@
+#!/usr/bin/env python3
+"""kit-settings: choose how the morning brief reaches you and which app your to-dos sync with.
+
+  kit-settings                              show the current choices
+  kit-settings delivery CHANNEL...          one setting for everything (e.g. imessage, or local)
+  kit-settings delivery personal CHANNEL... personal items only
+  kit-settings delivery work CHANNEL...     work items only
+  kit-settings todos apple|outlook          one to-do app for everything
+  kit-settings todos personal apple|outlook personal to-dos only
+  kit-settings todos work apple|outlook     work to-dos only
+  kit-settings email ADDRESS                where Outlook drafts are addressed (usually your own)
+  kit-settings text NUMBER-OR-ADDRESS       where iMessage texts go (macOS)
+  kit-settings setup                        answer a few questions (the installer runs this)
+
+Delivery channels: local (desktop notification and dashboard), imessage (macOS text),
+outlook-drafts (a draft saved in Outlook, never sent), outlook-review (the same draft, opened for
+review), sms (Windows, a stub). Separate channels are useful for several: "imessage local".
+
+Work items are the to-dos tagged [work] (add one with `todo work ...`) and work meetings and mail.
+iMessage, SMS, and Apple Reminders run outside Microsoft 365, so they're refused for work items
+unless you add --force. Settings live in ~/Claude/Agents/kit/.install/shared/morning/config.
+"""
+import os
+import pathlib
+import re
+import shutil
+import sys
+
+HOME = pathlib.Path.home()
+KIT = HOME / "Claude/Agents/kit"
+CONFIG = KIT / ".install/shared/morning/config"
+EXAMPLE_CANDIDATES = (KIT / ".install/shared/morning/config.example",
+                      pathlib.Path(__file__).resolve().parent.parent / "morning/config.example")
+IS_MAC = sys.platform == "darwin"
+IS_WIN = os.name == "nt"
+
+CHANNELS = {
+    "local": "desktop notification and dashboard",
+    "imessage": "iMessage text (macOS)",
+    "outlook-drafts": "Outlook draft, saved and never sent",
+    "outlook-review": "Outlook draft, opened for review and never sent",
+    "sms": "SMS gateway (Windows, a stub)",
+}
+TODO_APPS = {"apple": "Apple Reminders (macOS)", "outlook": "Outlook Tasks"}
+OUTSIDE_M365 = {"imessage", "sms", "apple"}
+PLACEHOLDERS = {"you@example.com", "+15555550123", ""}
+
+
+# --- config file ------------------------------------------------------------------------------
+
+def read():
+    cfg = {}
+    if CONFIG.exists():
+        for line in CONFIG.read_text(encoding="utf-8").splitlines():
+            m = re.match(r'\s*([A-Z_][A-Z0-9_]*)=(.*)$', line)
+            if m:
+                v = m.group(2).strip()
+                if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+                    v = v[1:-1]
+                cfg[m.group(1)] = v
+    return cfg
+
+
+def ensure_config():
+    if CONFIG.exists():
+        return
+    CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    for ex in EXAMPLE_CANDIDATES:
+        if ex.exists():
+            shutil.copy2(str(ex), str(CONFIG))
+            break
+    else:
+        CONFIG.write_text("# Kit's run settings.\n", encoding="utf-8")
+    if not IS_WIN:
+        os.chmod(CONFIG, 0o600)
+    print(f"Created {CONFIG}")
+
+
+def write(changes):
+    """changes: {KEY: value or None}. Replaces a key's line in place, appends new keys, and
+    removes keys set to None. Comments and everything else are kept."""
+    ensure_config()
+    lines = CONFIG.read_text(encoding="utf-8").splitlines()
+    done = set()
+    out = []
+    for line in lines:
+        m = re.match(r'\s*([A-Z_][A-Z0-9_]*)=', line)
+        key = m.group(1) if m else None
+        if key in changes:
+            if changes[key] is None or key in done:
+                continue
+            out.append(f'{key}="{changes[key]}"')
+            done.add(key)
+        else:
+            out.append(line)
+    new = [k for k, v in changes.items() if v is not None and k not in done]
+    if new:
+        out += [f'{k}="{changes[k]}"' for k in new]
+    CONFIG.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+
+# --- effective choices ------------------------------------------------------------------------
+
+def delivery(cfg):
+    base = cfg.get("DELIVERY", "") or "local"
+    split = "DELIVERY_PERSONAL" in cfg or "DELIVERY_WORK" in cfg
+    if not split:
+        return base, base, False
+    return (cfg.get("DELIVERY_PERSONAL") or "local", cfg.get("DELIVERY_WORK") or "local", True)
+
+
+def todos(cfg):
+    base = (cfg.get("REMINDERS_BACKEND", "") or "outlook").lower()
+    p = (cfg.get("TODOS_PERSONAL") or base).lower()
+    w = (cfg.get("TODOS_WORK") or base).lower()
+    if IS_WIN:
+        p = w = "outlook"
+    return p, w, p != w
+
+
+def show():
+    cfg = read()
+    if not CONFIG.exists():
+        print(f"No settings file yet ({CONFIG}). Run: kit-settings setup")
+    p, w, split = delivery(cfg)
+    print("Morning brief and weekly review")
+    if split:
+        print(f"  personal items: {p}")
+        print(f"  work items:     {w}")
+    else:
+        print(f"  everything:     {p}")
+    uses = set((p + " " + w).split())
+    if uses & {"outlook-drafts", "outlook-review"}:
+        print(f"  Outlook drafts addressed to: {cfg.get('DELIVERY_EMAIL_TO') or '(not set)'}")
+    if "imessage" in uses:
+        print(f"  texts go to: {cfg.get('IMESSAGE_TO') or '(not set)'}"
+              + (f", then {cfg['IMESSAGE_TO_ALT']}" if cfg.get("IMESSAGE_TO_ALT") else ""))
+    tp, tw, tsplit = todos(cfg)
+    print("To-do sync")
+    if tsplit:
+        print(f"  personal to-dos: {TODO_APPS.get(tp, tp)}")
+        print(f"  work to-dos:     {TODO_APPS.get(tw, tw)} (items tagged [work])")
+    else:
+        print(f"  all to-dos:      {TODO_APPS.get(tp, tp)}")
+    for msg in problems(cfg):
+        print("note: " + msg)
+    return 0
+
+
+def problems(cfg):
+    out = []
+    p, w, _ = delivery(cfg)
+    for side, chans in (("personal", p), ("work", w)):
+        for c in chans.split():
+            if c not in CHANNELS:
+                out.append(f"{side} delivery: unknown channel {c!r}")
+            elif c == "imessage" and not IS_MAC:
+                out.append(f"{side} delivery: imessage works on macOS only")
+            elif c == "sms" and not IS_WIN:
+                out.append(f"{side} delivery: sms works on Windows only")
+    uses = set((p + " " + w).split())
+    if uses & {"outlook-drafts", "outlook-review"} and cfg.get("DELIVERY_EMAIL_TO", "") in PLACEHOLDERS:
+        out.append("Outlook delivery needs an address: kit-settings email you@example.com")
+    if "imessage" in uses and cfg.get("IMESSAGE_TO", "") in PLACEHOLDERS:
+        out.append("iMessage delivery needs a number: kit-settings text +15551234567")
+    tp, tw, _ = todos(cfg)
+    for side, app in (("personal", tp), ("work", tw)):
+        if app not in TODO_APPS:
+            out.append(f"{side} to-dos: unknown app {app!r} (use apple or outlook)")
+        elif app == "apple" and not IS_MAC:
+            out.append(f"{side} to-dos: Apple Reminders works on macOS only")
+    return out
+
+
+# --- commands ---------------------------------------------------------------------------------
+
+def check_channels(chans, side, force):
+    if not chans:
+        sys.exit("Name at least one channel: " + ", ".join(CHANNELS))
+    for c in chans:
+        if c not in CHANNELS:
+            sys.exit(f"Unknown channel {c!r}. Choose from: " + ", ".join(CHANNELS))
+        if c == "imessage" and not IS_MAC:
+            sys.exit("imessage works on macOS only.")
+        if c == "sms" and not IS_WIN:
+            sys.exit("sms works on Windows only.")
+    if side in ("work", "all") and set(chans) & OUTSIDE_M365 and not force:
+        sys.exit(f"{', '.join(sorted(set(chans) & OUTSIDE_M365))} runs outside Microsoft 365, so it's "
+                 "not used for work items. Split them instead (kit-settings delivery personal "
+                 "imessage, then kit-settings delivery work outlook-drafts), or add --force.")
+
+
+def cmd_delivery(args, force):
+    side = "all"
+    if args and args[0] in ("personal", "work"):
+        side, args = args[0], args[1:]
+    chans = [a.lower() for a in args]
+    check_channels(chans, side, force)
+    value = " ".join(dict.fromkeys(chans))
+    cfg = read()
+    if side == "all":
+        write({"DELIVERY": value, "DELIVERY_PERSONAL": None, "DELIVERY_WORK": None})
+    else:
+        p, w, split = delivery(cfg)
+        other = "DELIVERY_WORK" if side == "personal" else "DELIVERY_PERSONAL"
+        keep = (w if side == "personal" else p)
+        if not split and side == "personal" and set(keep.split()) & OUTSIDE_M365:
+            keep = "local"   # don't let work items inherit a channel outside Microsoft 365
+        write({f"DELIVERY_{side.upper()}": value, other: cfg.get(other) or keep})
+    return show()
+
+
+def cmd_todos(args, force):
+    side = "all"
+    if args and args[0] in ("personal", "work"):
+        side, args = args[0], args[1:]
+    if len(args) != 1 or args[0].lower() not in TODO_APPS:
+        sys.exit("Choose apple or outlook.")
+    app = args[0].lower()
+    if app == "apple" and not IS_MAC:
+        sys.exit("Apple Reminders works on macOS only.")
+    if side in ("work", "all") and app in OUTSIDE_M365 and not force:
+        sys.exit("Apple Reminders syncs through iCloud, outside Microsoft 365, so it's not used for "
+                 "work to-dos. Split them instead (kit-settings todos personal apple, then "
+                 "kit-settings todos work outlook), or add --force.")
+    cfg = read()
+    if side == "all":
+        write({"REMINDERS_BACKEND": app, "TODOS_PERSONAL": None, "TODOS_WORK": None})
+    else:
+        p, w, _ = todos(cfg)
+        other = "TODOS_WORK" if side == "personal" else "TODOS_PERSONAL"
+        keep = w if side == "personal" else p
+        if side == "personal" and keep in OUTSIDE_M365:
+            keep = "outlook"
+        write({f"TODOS_{side.upper()}": app, other: cfg.get(other) or keep})
+    if app == "outlook":
+        print("Outlook must be running for the sync; it never starts Outlook itself.")
+    return show()
+
+
+def ask(prompt, options, default):
+    """options: list of (key, label). Returns the chosen key; Enter keeps the default."""
+    print(prompt)
+    for n, (_, text) in enumerate(options, 1):
+        print(f"  {n}. {text}")
+    keys = [k for k, _ in options]
+    while True:
+        a = input(f"Choose 1-{len(options)} [Enter keeps {default}]: ").strip()
+        if not a:
+            return default
+        if a.isdigit() and 1 <= int(a) <= len(options):
+            return keys[int(a) - 1]
+        print("Please type one of the numbers.")
+
+
+def cmd_setup():
+    ensure_config()
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        print("kit-settings setup: no one at the keyboard, so the current settings stay. "
+              "Run kit-settings setup later to choose.")
+        return 0
+    cfg = read()
+    p, w, split = delivery(cfg)
+    current = f"personal {p}, work {w}" if split else p
+    opts = [("local", "Desktop notification on this computer")]
+    if IS_MAC:
+        opts.append(("imessage", "iMessage text to your phone (personal items only)"))
+    opts += [("outlook-drafts", "Outlook draft, saved in Drafts and never sent")]
+    if IS_MAC:
+        opts.append(("split", "Split: personal items by iMessage, work items as an Outlook draft"))
+    choice = ask("\nHow should the morning brief reach you?", opts, current)
+    if choice == "split":
+        write({"DELIVERY_PERSONAL": "imessage", "DELIVERY_WORK": "outlook-drafts"})
+    elif choice in CHANNELS:
+        write({"DELIVERY": choice, "DELIVERY_PERSONAL": None, "DELIVERY_WORK": None})
+    cfg = read()
+    p, w, _ = delivery(cfg)
+    uses = set((p + " " + w).split())
+    if "imessage" in uses and cfg.get("IMESSAGE_TO", "") in PLACEHOLDERS:
+        num = input("Phone number or Apple ID for the texts (e.g. +15551234567): ").strip()
+        if num:
+            write({"IMESSAGE_TO": num})
+    if uses & {"outlook-drafts", "outlook-review"} and cfg.get("DELIVERY_EMAIL_TO", "") in PLACEHOLDERS:
+        addr = input("Address for the Outlook drafts (usually your own work address): ").strip()
+        if addr:
+            write({"DELIVERY_EMAIL_TO": addr})
+    if IS_MAC:
+        tp, tw, tsplit = todos(read())
+        current = f"personal {tp}, work {tw}" if tsplit else tp
+        choice = ask("\nWhich app should your to-dos sync with?",
+                     [("apple", "Apple Reminders (personal items only; syncs through iCloud)"),
+                      ("outlook", "Outlook Tasks (reaches your phone through Microsoft To Do)"),
+                      ("split", "Split: personal to-dos in Apple Reminders, work to-dos in Outlook Tasks")],
+                     current)
+        if choice == "split":
+            write({"TODOS_PERSONAL": "apple", "TODOS_WORK": "outlook"})
+        elif choice in TODO_APPS:
+            write({"REMINDERS_BACKEND": choice, "TODOS_PERSONAL": None, "TODOS_WORK": None})
+    print()
+    return show()
+
+
+def main(argv):
+    force = "--force" in argv
+    argv = [a for a in argv if a != "--force"]
+    if not argv:
+        return show()
+    cmd, rest = argv[0].lower(), argv[1:]
+    if cmd in ("-h", "--help", "help"):
+        print(__doc__)
+        return 0
+    if cmd == "delivery":
+        return cmd_delivery(rest, force)
+    if cmd in ("todos", "todo", "reminders"):
+        return cmd_todos(rest, force)
+    if cmd == "email" and len(rest) == 1 and "@" in rest[0]:
+        write({"DELIVERY_EMAIL_TO": rest[0]})
+        return show()
+    if cmd == "text" and len(rest) == 1:
+        write({"IMESSAGE_TO": rest[0]})
+        return show()
+    if cmd == "setup":
+        return cmd_setup()
+    sys.exit("Unknown command. Run: kit-settings --help")
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

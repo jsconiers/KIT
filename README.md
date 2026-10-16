@@ -19,6 +19,7 @@ kit/                 The agent "brain" — 100% shared, no platform code:
 shared/              Cross-platform Python + assets:
   kit_setup.py         install/activate/deactivate logic
   bin/todo             command-line to-do that shares QUEUE.md
+  bin/kit-settings     how briefs reach you and which app to-dos sync with, work and personal
   bin/connector-guard  read-only guard and audit log for agents that reach outside systems
   bin/vsdx-finish      fills in title blocks and builds legends in Visio diagrams
   bin/kit-grammar      optional offline spelling and grammar pass (LanguageTool), skipped if absent

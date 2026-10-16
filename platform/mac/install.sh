@@ -28,6 +28,9 @@ umask 077
 "$PY" "$ROOT/shared/kit_setup.py" check
 "$PY" "$ROOT/shared/kit_setup.py" scaffold
 "$PY" "$ROOT/shared/kit_setup.py" activate
+# How the brief reaches you and which app your to-dos sync with. Asks only when someone is at the
+# keyboard; change it any time with: kit-settings
+"$PY" "$ROOT/shared/bin/kit-settings" setup || printf 'install: note: settings skipped; run kit-settings setup later.\n'
 chmod -R go-rwx "$HOME/Claude/Agents/kit"
 
 cat <<MSG

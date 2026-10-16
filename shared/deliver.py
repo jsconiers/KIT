@@ -19,6 +19,12 @@ the agent has written its files. The channels come from DELIVERY in the shared c
   sms             LEGACY, Windows, opt-in: SMS gateway hook (a stub until you wire a provider).
                   Leaves Microsoft 365; not for work content.
 
+Work and personal items can go different ways: set DELIVERY_PERSONAL and DELIVERY_WORK (the
+`kit-settings delivery personal|work ...` command does this) and the run's personal-only text
+(<text>-personal.txt) goes to the personal channels, its work-only text (<text>-work.txt) to the
+work channels. Work channels never get the full brief, so personal details stay out of work mail;
+if a split text is missing, that side gets the main text (counts and pointers only).
+
 Kit never sends mail: the Outlook channels only ever save or open a draft. Outlook must already
 be running; this script never launches it. Each channel's result goes to stdout. Exit 0 if at
 least one channel worked, 1 otherwise. --test prefixes "[Test]" to the notification and
@@ -197,7 +203,8 @@ def rebuild_dashboard():
 def ch_local(ctx):
     lines = [ln.strip() for ln in ctx["text"].splitlines() if ln.strip()]
     body = " ".join(lines[:2])[:220] or f"Kit's {ctx['mode']} run finished."
-    title = ("[Test] " if ctx["test"] else "") + f"Kit {ctx['mode']}"
+    title = (("[Test] " if ctx["test"] else "") + f"Kit {ctx['mode']}"
+             + (f" ({ctx['side']})" if ctx.get("side") else ""))
     shown = notify(title, body)
     if shown:
         say("local: notification shown")
@@ -250,7 +257,8 @@ def outlook_draft(ctx, open_window):
     if not to:
         say(f"{label}: DELIVERY_EMAIL_TO is not set")
         return False
-    subject = ("Kit TEST " if ctx["test"] else "Kit ") + f"{ctx['mode']} brief {ctx['date']}"
+    subject = (("Kit TEST " if ctx["test"] else "Kit ") + ("work " if ctx.get("side") == "work" else "")
+               + f"{ctx['mode']} brief {ctx['date']}")
     source = ctx["brief"] if ctx["brief"].strip() else ctx["text"]
     body = md_to_html(source)
     fd, body_path = tempfile.mkstemp(prefix="kit-deliver-", suffix=".html")
@@ -358,6 +366,37 @@ CHANNELS = {
 }
 
 
+def split_text(text_path, side):
+    """briefs/latest-text.txt -> briefs/latest-text-work.txt (or -personal)."""
+    if not text_path:
+        return None
+    p = pathlib.Path(text_path)
+    return p.with_name(f"{p.stem}-{side}{p.suffix}")
+
+
+def deliver_group(names, ctx, label=""):
+    """Run each channel once; an Outlook channel that fails falls back to local."""
+    results, fallback = {}, False
+    for name in dict.fromkeys(names):  # de-duplicate, keep order
+        key = label + name
+        fn = CHANNELS.get(name)
+        if fn is None:
+            say(f"{key}: unknown channel (known: {', '.join(KNOWN)})")
+            results[key] = False
+            continue
+        try:
+            results[key] = bool(fn(ctx))
+        except Exception as ex:  # noqa: BLE001 - one bad channel must not stop the others
+            say(f"{key}: error: {ex}")
+            results[key] = False
+        if name.startswith("outlook-") and not results[key]:
+            fallback = True
+    if fallback and "local" not in names:
+        say(f"{label}falling back to local")
+        results[label + "local (fallback)"] = bool(ch_local(ctx))
+    return results
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Deliver a finished Kit run.")
     ap.add_argument("--mode", default="morning", help="morning, open, weekly, journal, ...")
@@ -374,29 +413,24 @@ def main(argv=None):
         return ""
 
     cfg = read_config(pathlib.Path(a.config)) if a.config else read_config()
-    wanted = (a.channels or cfg.get("DELIVERY", "") or "local").lower().split()
     ctx = {"mode": a.mode, "text": slurp(a.text).strip(), "brief": slurp(a.brief),
            "test": a.test, "cfg": cfg, "date": dt.date.today().strftime("%d-%b-%Y")}
     if not ctx["text"] and ctx["brief"]:
         ctx["text"] = ctx["brief"].strip()
 
-    results, fallback = {}, False
-    for name in dict.fromkeys(wanted):  # de-duplicate, keep order
-        fn = CHANNELS.get(name)
-        if fn is None:
-            say(f"{name}: unknown channel (known: {', '.join(KNOWN)})")
-            results[name] = False
-            continue
-        try:
-            results[name] = bool(fn(ctx))
-        except Exception as ex:  # noqa: BLE001 - one bad channel must not stop the others
-            say(f"{name}: error: {ex}")
-            results[name] = False
-        if name.startswith("outlook-") and not results[name]:
-            fallback = True
-    if fallback and "local" not in results:
-        say("falling back to local")
-        results["local (fallback)"] = bool(ch_local(ctx))
+    split = not a.channels and ("DELIVERY_PERSONAL" in cfg or "DELIVERY_WORK" in cfg)
+    if not split:
+        wanted = (a.channels or cfg.get("DELIVERY", "") or "local").lower().split()
+        results = deliver_group(wanted, ctx)
+    else:
+        results = {}
+        for side in ("personal", "work"):
+            names = (cfg.get(f"DELIVERY_{side.upper()}", "") or "local").lower().split()
+            text = slurp(split_text(a.text, side)).strip() or ctx["text"]
+            # Work channels never carry the full brief, which has personal sections.
+            side_ctx = dict(ctx, text=text, brief="" if side == "work" else ctx["brief"],
+                            side=side)
+            results.update(deliver_group(names, side_ctx, label=f"{side}/"))
 
     for name, ok in results.items():
         say(f"result {name}: {'ok' if ok else 'FAILED'}")

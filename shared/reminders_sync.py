@@ -10,6 +10,12 @@ REMINDERS_BACKEND in .install/shared/morning/config picks the device:
   apple    Apple Reminders (the JXA below). Syncs through iCloud, so keep work items out of it.
 Windows has its own entry point, platform/windows/reminders/reminders_sync_win.py (Outlook only).
 
+Work and personal to-dos can live in different apps: TODOS_PERSONAL and TODOS_WORK (set with
+`kit-settings todos personal|work ...`) override REMINDERS_BACKEND for each side. Work to-dos are
+the ones tagged [work] after the title (`todo work ...` adds one). When the two sides use
+different apps, each app gets its own "Kit Inbox" and "Kit: <your name>" lists; what you add to the
+work app's inbox comes in tagged [work].
+
 - "Kit Inbox": anything you add there becomes one of your to-dos at the next sync. Start it with
   "Kit:" to give it to Kit instead.
 - "Kit: <your name>": your open to-dos, with alerts at 9:00 on their due dates. Check one off on
@@ -119,12 +125,29 @@ class AppleRemindersBackend:
         return jxa(JS_MIRROR, json.dumps(desired_items), list_name)
 
 
-def backend_name():
+WORK_TAG = "[work]"
+
+
+def is_work(line):
+    return WORK_TAG in line.split("(added", 1)[0].lower()
+
+
+def setting(key):
     if CONFIG.exists():
-        m = re.search(r"^REMINDERS_BACKEND=[\"']?(\w+)", CONFIG.read_text(), re.M)
+        m = re.search(rf"^{key}=[\"']?(\w+)", CONFIG.read_text(), re.M)
         if m:
             return m.group(1).lower()
-    return "outlook"
+    return None
+
+
+def backend_name():
+    return setting("REMINDERS_BACKEND") or "outlook"
+
+
+def backend_names():
+    """(personal, work) to-do apps."""
+    base = backend_name()
+    return setting("TODOS_PERSONAL") or base, setting("TODOS_WORK") or base
 
 
 def make_backend(name):
@@ -140,10 +163,14 @@ def make_backend(name):
     return mod.OutlookTasksMacBackend()
 
 
-def reconcile(backend, me, inbox_name, mirror_name):
+def reconcile(backend, me, inbox_name, mirror_name, side=None):
     """OS-independent reconciliation: inbox list -> QUEUE.md, then QUEUE.md -> mirror list, with
-    completions on the device checked off. Returns a list of what changed."""
+    completions on the device checked off. Returns a list of what changed. side=None syncs every
+    item; "work" syncs only [work] items (and tags what arrives in the inbox), "personal" the rest."""
     changed = []
+
+    def wanted(line):
+        return side is None or (is_work(line) == (side == "work"))
 
     # 1) Inbox list -> QUEUE.md
     for r in backend.pull_open(inbox_name):
@@ -160,7 +187,8 @@ def reconcile(backend, me, inbox_name, mirror_name):
             continue
         found = todo.items(lines, section)
         at = found[-1][1] if found else h[section] + 1
-        entry = (f"- [ ] **{title}**" + (f": due {todo.fmt(due)}" if due else "")
+        entry = (f"- [ ] **{title}**" + (f" {WORK_TAG}" if side == "work" else "")
+                 + (f": due {todo.fmt(due)}" if due else "")
                  + f" (added {todo.fmt(todo.TODAY)}, from phone)")
         lines.insert(at, entry)
         todo.save(lines)
@@ -171,7 +199,7 @@ def reconcile(backend, me, inbox_name, mirror_name):
     want = []
     for i, _ in todo.items(lines, me):
         m = re.match(r"- \[ \] \*\*(.+?)\*\*(.*)", lines[i])
-        if not m:
+        if not m or not wanted(lines[i]):
             continue
         due = re.search(r"due (\d{2}-\w{3}-\d{4})", m.group(2))
         want.append({"title": m.group(1),
@@ -180,7 +208,7 @@ def reconcile(backend, me, inbox_name, mirror_name):
     for title in backend.mirror(want, mirror_name):
         lines = todo.QUEUE.read_text().splitlines()
         for n, (i, _) in enumerate(todo.items(lines, me), 1):
-            if f"**{title}**" in lines[i]:
+            if f"**{title}**" in lines[i] and wanted(lines[i]):
                 todo.done(me, n)
                 changed.append(f"checked off on phone: {title}")
                 break
@@ -189,10 +217,26 @@ def reconcile(backend, me, inbox_name, mirror_name):
 
 def main():
     me = todo.owner()
-    changed = reconcile(make_backend(backend_name()), me, INBOX, f"Kit: {me}")
+    personal, work = backend_names()
+    if personal == work:
+        plan = [(personal, None)]
+    else:
+        plan = [(personal, "personal"), (work, "work")]
+    changed, failed = [], []
+    for name, side in plan:
+        try:   # one app being unavailable (Outlook closed, say) must not stop the other
+            got = reconcile(make_backend(name), me, INBOX, f"Kit: {me}", side)
+            changed += [f"{side}: {c}" if side else c for c in got]
+        except Exception as ex:  # noqa: BLE001
+            failed.append(f"{side or 'sync'} ({name}): {ex}")
     if changed:
         log("; ".join(changed))
+    for f in failed:
+        log(f"sync failed: {f}")
     print("\n".join(changed) or "in sync")
+    if failed:
+        print("\n".join("sync failed: " + f for f in failed), file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

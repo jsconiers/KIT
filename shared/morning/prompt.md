@@ -11,8 +11,9 @@ isn't there, and say in one line which steps you skipped.
    line. If briefs/audit-weekly.md is from the last seven days, add its headline under "Audit".
 2. Read QUEUE.md, STATUS.md, and memory/personal/INDEX.md.
    - **To-dos.** From {{OWNER}}'s section, list what's overdue and what's due within three days,
-     work and personal items alike, then the rest of his open items in priority order. Mark
-     personal items "(personal)". Don't check off {{OWNER}}'s items; only he can.
+     work and personal items alike, then the rest of his open items in priority order. Items
+     tagged [work] are work; mark the others "(personal)". Don't check off {{OWNER}}'s items;
+     only he can.
    - From your section, say what you'll take on in today's sessions and what you need from {{OWNER}}.
    - From Waiting on others, list who owes what, and suggest a nudge for anything waiting five
      days or more.
@@ -49,4 +50,9 @@ isn't there, and say in one line which steps you skipped.
    meeting time and how many meetings, how many emails need him, what's waiting on whom, and,
    when those steps ran, pastoral follow-ups due (count only) and a one-line trading read. Last
    line: "Full brief: briefs/YYYY-MM-DD.md".
+   Then write the same kind of short text twice more, split by kind, because work and personal
+   items can be delivered different ways: briefs/latest-text-work.txt with only work items (to-dos
+   tagged [work], work meetings, work mail, audit issues) and briefs/latest-text-personal.txt with
+   everything else (personal to-dos, pastoral follow-ups, the trading read). Same first and last
+   lines; if one side has nothing, write "Nothing today." under the first line.
 6. Finish with one line: "done", or what went wrong.
