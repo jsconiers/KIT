@@ -206,6 +206,61 @@ def check_delivery():
         add("warn", "Settings", msg + " (see: kit-settings)")
 
 
+def check_paused():
+    marker = KIT / ".install/PAUSED"
+    if marker.exists():
+        why = (marker.read_text(errors="ignore").splitlines() or ["no reason given"])[0]
+        add("warn", "Kit paused", f"{why}; scheduled runs and connector calls are stopped (kit-pause resume)")
+
+
+def check_outlook():
+    """The result of the last Outlook check a run made (kit-outlook writes briefs/outlook.txt)."""
+    f = KIT / "briefs/outlook.txt"
+    if not f.exists():
+        return
+    parts = f.read_text(errors="ignore").strip().split(" ", 3)
+    if len(parts) < 4:
+        return
+    status, day, msg = parts[0], parts[1], parts[3]
+    if day != dt.date.today().isoformat():
+        return   # only today's check counts
+    if status in ("ok", "skipped", "not-running"):
+        add("ok", "Outlook", msg)
+    else:
+        add("warn", "Outlook", msg)
+
+
+def check_holds():
+    f = KIT / "memory/context/legal-holds.json"
+    try:
+        holds = json.loads(f.read_text()) if f.exists() else {}
+    except Exception:  # noqa: BLE001
+        add("warn", "Legal holds", f"{f} can't be read; treat every project as held until it's fixed")
+        return
+    if holds:
+        add("ok", "Legal holds", "active: " + ", ".join(sorted(holds)) + " (kit-retention holds)")
+
+
+def check_cost():
+    """Scheduled-run spend this month against the budget (kit-cost reads .install/logs/cost.jsonl)."""
+    tool = KIT / ".install/shared/bin/kit-cost"
+    if not tool.exists():
+        return
+    try:
+        r = subprocess.run([sys.executable, str(tool), "check", "--json"], capture_output=True, text=True, timeout=30)
+        st = json.loads(r.stdout)
+    except Exception:  # noqa: BLE001
+        add("warn", "Cost", "kit-cost check didn't run")
+        return
+    spend = f"${st['spend_usd']:.2f} this month over {st['runs']} scheduled run(s), projected ${st['projection_usd']:.2f}"
+    if st.get("budget_usd"):
+        level = "ok" if st["level"] == "ok" else "warn"
+        extra = " (non-essential runs are skipping)" if st["level"] == "stop" else ""
+        add(level, "Cost", f"{spend}; {st['pct_used']}% of ${st['budget_usd']:.0f} budget{extra} (kit-cost)")
+    else:
+        add("ok", "Cost", f"{spend}; no budget set (kit-cost)")
+
+
 def fix_agents():
     dest = HOME / ".claude/agents"
     dest.mkdir(parents=True, exist_ok=True)
@@ -300,7 +355,8 @@ def main(argv):
         return 0
     for fn in (check_import, check_settings, check_index, check_jobs, check_runs, check_tokens,
                check_secrets, check_permissions, check_agents, check_git, check_calendar, check_mail,
-               check_guard, check_grammar, check_delivery):
+               check_guard, check_grammar, check_delivery, check_paused, check_outlook, check_holds,
+               check_cost):
         try:
             fn()
         except Exception as e:  # noqa: BLE001

@@ -37,6 +37,9 @@ Read these, and only read them:
   is current.
 - **The knowledge base:** `knowledge/decisions.md`, to check whether a decision is already recorded
   or contradicts one that is.
+- **Build, buy, or partner analyses:** `<library root>/artifacts/<project>/` files made from the
+  template `decisions.md` names. Take the options, scores, and recommendation from them; take the
+  decision only from its **Decision** table or another source showing who decided.
 - **Kit's brief:** decisions Kit or {{OWNER}} pasted in.
 
 Read Word and PowerPoint files with the document skills. If you need a document you can't find or

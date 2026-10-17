@@ -1,0 +1,35 @@
+{
+  "body": {
+    "as_of": "2026-10-02",
+    "blocked": [
+      {
+        "item": "Firewall change: waiting on the network team",
+        "waiting_on": "the network team"
+      }
+    ],
+    "headline": "",
+    "health": "unknown",
+    "in_progress": [
+      "Draft the IA for the payments upgrade"
+    ],
+    "next": [
+      "Book the design review"
+    ],
+    "waiting": [
+      {
+        "due": null,
+        "item": "Change window",
+        "since": "2026-10-01",
+        "waiting_on": "the network team"
+      }
+    ]
+  },
+  "classification": "internal",
+  "id": "kit-fixture:status-snapshot:payments-upgrade",
+  "kit_id": "kit-fixture",
+  "owner_role": "solutions architect",
+  "project": "payments-upgrade",
+  "schema": "status-snapshot",
+  "schema_version": "1.0",
+  "source": "kit:STATUS.md"
+}

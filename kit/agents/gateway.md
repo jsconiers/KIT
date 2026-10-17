@@ -14,6 +14,11 @@ hooks:
       hooks:
         - type: command
           command: 'python3 "$HOME/Claude/Agents/kit/.install/shared/bin/connector-guard" post gateway'
+  PostToolUseFailure:
+    - matcher: "mcp__.*"
+      hooks:
+        - type: command
+          command: 'python3 "$HOME/Claude/Agents/kit/.install/shared/bin/connector-guard" fail gateway'
   Stop:
     - hooks:
         - type: command

@@ -1,0 +1,16 @@
+{
+  "body": {
+    "how_to_apply": "look at the version table first.",
+    "rule": "Check the document's date before citing it.",
+    "title": "Check the document's date before citing it.",
+    "why": "an old version was cited as current."
+  },
+  "classification": "internal",
+  "id": "kit-fixture:lesson:check-dates-first",
+  "kit_id": "kit-fixture",
+  "owner_role": "solutions architect",
+  "project": "general",
+  "schema": "lesson",
+  "schema_version": "1.0",
+  "source": "kit:lessons/check-dates-first.md"
+}

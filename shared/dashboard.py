@@ -21,6 +21,7 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import kit_template  # noqa: E402  (shared/kit_template.py)
+import kit_queue  # noqa: E402  (shared/kit_queue.py)
 
 # strftime no-pad hour: glibc/BSD use %-I, the Windows CRT uses %#I.
 HOUR = "%#I" if os.name == "nt" else "%-I"
@@ -43,7 +44,7 @@ FALLBACK = """<!doctype html>
 $audit_banner<div>$hero</div>$lane_you $lane_kit $lane_wait
 <section><h2>Today</h2>$schedule</section><section><h2>Briefs</h2>$briefs</section>
 <section><h2>Health</h2><ul>$health_checks</ul><table><thead><tr><th></th>$runs_head</tr></thead><tbody>$runs_rows</tbody></table></section>
-<section><h2>Audit</h2>$audit</section><section><h2>Kit's staff</h2><ul>$staff</ul></section>
+<section><h2>Sprint</h2>$sprint</section><section><h2>Audit</h2>$audit</section><section><h2>Kit's staff</h2><ul>$staff</ul></section>
 </body></html>
 """
 
@@ -215,6 +216,36 @@ def staff():
     return "".join(rows) or '<li class="empty">No staff yet.</li>'
 
 
+def state_banners():
+    """Banners for a paused Kit (kit-pause) and active legal holds (kit-retention)."""
+    out = ""
+    marker = KIT / ".install/PAUSED"
+    if marker.exists():
+        why = (marker.read_text(errors="ignore").splitlines() or ["no reason given"])[0]
+        out += (f'<div class="banner" role="alert"><strong>Kit is paused</strong> {e(why)}. Scheduled runs and '
+                'connector calls are stopped; run kit-pause resume to restart.</div>')
+    holds_file = KIT / "memory/context/legal-holds.json"
+    try:
+        holds = json.loads(holds_file.read_text()) if holds_file.exists() else {}
+    except Exception:  # noqa: BLE001
+        holds = {"(unreadable holds file)": {}}
+    if holds:
+        names = ", ".join(f"{p} (since {h.get('since', '?')})" if isinstance(h, dict) else p
+                          for p, h in sorted(holds.items()))
+        out += (f'<div class="banner" role="alert"><strong>Legal hold</strong> {e(names)}. Nothing in these '
+                'projects may be deleted, moved, or rewritten.</div>')
+    try:
+        r = subprocess.run([sys.executable, str(KIT / ".install/shared/bin/kit-cost"), "check", "--json"],
+                           capture_output=True, text=True, timeout=30)
+        st = json.loads(r.stdout)
+        if st.get("level") == "stop":
+            out += (f'<div class="banner" role="alert"><strong>Budget</strong> {e(str(st.get("pct_used")))}% of this '
+                    "month's budget for scheduled runs is used; only the essential runs go ahead (kit-cost).</div>")
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
 def audit():
     """The banner and the Audit panel, from briefs/audit-status.json (written by kit-audit)."""
     path = KIT / "briefs" / "audit-status.json"
@@ -270,6 +301,75 @@ def audit():
     return banner, "".join(parts) or '<p class="empty">No audit status yet.</p>'
 
 
+def burndown_svg(sp, total, hist):
+    """Ideal line from all points at the start to none at the end, and the remaining points on
+    each day a snapshot was saved."""
+    days = max((sp["end"] - sp["start"]).days, 1)
+    w, h, pad = 300, 110, 22
+    def xy(day, pts):
+        x = pad + (w - 2 * pad) * min(max(day, 0), days) / days
+        y = pad / 2 + (h - pad * 1.5) * (1 - (pts / total if total else 0))
+        return f"{x:.1f},{y:.1f}"
+    actual = []
+    for d, rem in sorted(hist.items()):
+        day = (dt.datetime.strptime(d, "%Y-%m-%d").date() - sp["start"]).days
+        if 0 <= day <= days:
+            actual.append(xy(day, rem))
+    pts = " ".join(actual)
+    return (f'<svg viewBox="0 0 {w} {h}" width="{w}" height="{h}" role="img" '
+            f'aria-label="Burndown: points left each day against the ideal line">'
+            f'<line x1="{pad}" y1="{h - pad}" x2="{w - pad}" y2="{h - pad}" stroke="currentColor" stroke-opacity=".3"/>'
+            f'<polyline points="{xy(0, total)} {xy(days, 0)}" fill="none" stroke="currentColor" '
+            f'stroke-dasharray="4 3" stroke-opacity=".5"/>'
+            + (f'<polyline points="{pts}" fill="none" stroke="currentColor" stroke-width="2.5"/>' if pts else "")
+            + f'<text x="{pad}" y="{h - 4}" font-size="10" fill="currentColor">{sp["start"]:%d-%b}</text>'
+            f'<text x="{w - pad}" y="{h - 4}" font-size="10" fill="currentColor" text-anchor="end">'
+            f'{sp["end"]:%d-%b}</text></svg>')
+
+
+def sprint_panel():
+    """The Sprint panel; also saves today's points-left snapshot for the burndown."""
+    path = KIT / "QUEUE.md"
+    sp = kit_queue.sprint(path.read_text().splitlines()) if path.exists() else None
+    if not sp or not sp["name"]:
+        carry = (f'<p class="meta">Carried over: {e("; ".join(c["title"] for c in sp["carry"]))}</p>'
+                 if sp and sp["carry"] else "")
+        return ('<p class="empty">No sprint running. Start one with '
+                '<code>todo sprint start &lt;name&gt; &lt;start&gt; &lt;end&gt;</code>.</p>' + carry)
+    total, done_pts = kit_queue.sprint_points(sp)
+    hist_file = KIT / ".install/cache/sprint-history.json"
+    try:
+        hist_all = json.loads(hist_file.read_text())
+    except (OSError, ValueError):
+        hist_all = {}
+    key = f'{sp["name"]}|{sp["start"]:%Y-%m-%d}'
+    hist = hist_all.setdefault(key, {})
+    if sp["start"] <= TODAY <= sp["end"] + dt.timedelta(days=1):
+        hist[f"{TODAY:%Y-%m-%d}"] = total - done_pts
+        try:
+            hist_file.parent.mkdir(parents=True, exist_ok=True)
+            hist_file.write_text(json.dumps(hist_all, indent=1))
+        except OSError:
+            pass
+    left = (sp["end"] - TODAY).days
+    days_text = (f"{left} day{'s' if left != 1 else ''} left" if left > 0 else
+                 "ends today" if left == 0 else f"ended {abs(left)} day{'s' if left != -1 else ''} ago")
+    by = {}
+    for it in sp["items"]:
+        st = "done" if it["done"] else it["status"]
+        by.setdefault(st, []).append(it)
+    rows = "".join(
+        f'<li class="strip"><p class="strip-title">{"&#10003; " if it["done"] else ""}{e(it["title"])}</p>'
+        f'<div class="meta"><span class="tag">{e(it["size"])}</span>'
+        f'<span class="tag{" late" if it["status"] == "blocked" else ""}">{e("done" if it["done"] else it["status"])}</span></div></li>'
+        for it in sp["items"]) or '<li class="empty">No items yet. Add one with <code>todo sprint add</code>.</li>'
+    counts = ", ".join(f"{len(v)} {k}" for k, v in sorted(by.items()))
+    return (f'<p class="next-label">Sprint {e(sp["name"])}</p>'
+            f'<p class="meta">{sp["start"]:%d-%b} to {sp["end"]:%d-%b-%Y} &middot; {days_text} &middot; '
+            f'{done_pts}/{total} points done' + (f" &middot; {e(counts)}" if counts else "") + '</p>'
+            + burndown_svg(sp, total, hist) + f'<ul class="strips">{rows}</ul>')
+
+
 def main(argv):
     template_arg, argv = kit_template.args_template(argv)
     me = owner()
@@ -287,6 +387,7 @@ def main(argv):
         f'<span class="cname">{e(c[1])}</span><span class="cdetail">{e(c[2])}</span></li>'
         for c in (bad + [c for c in checks if c[0] == "ok"]))
     audit_banner, audit_html = audit()
+    audit_banner = state_banners() + audit_banner
     grid = runs()
     head = "".join(f"<th scope=col>{d:%a}<br>{d:%d}</th>" for d in grid)
     rows = ""
@@ -308,6 +409,7 @@ def main(argv):
                           "Nobody owes you anything."),
         "schedule": schedule(), "briefs": brief_text(), "health_checks": health_html,
         "runs_head": head, "runs_rows": rows, "audit": audit_html, "staff": staff(),
+        "sprint": sprint_panel(),
     }
     tpl = kit_template.find("dashboard.html", template_arg, "KIT_DASHBOARD_TEMPLATE")
     page = kit_template.render(tpl.read_text(encoding="utf-8") if tpl else FALLBACK, values,

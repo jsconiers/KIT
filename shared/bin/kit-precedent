@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+"""kit-precedent: search the library's indexes and registers for precedent, fast.
+
+  kit-precedent TERM...              ranked lines that mention the terms, with file and line
+  kit-precedent "exact phrase" TERM  quoted words count as one phrase
+  kit-precedent --limit 40 TERM...   show more hits (default 25)
+  kit-precedent --json TERM...       the same hits as JSON, for scripts
+  kit-precedent --sources            list the sources it would search, and which are missing
+  kit-precedent --root DIR TERM...   search a library root other than the one in library.md
+
+It reads the sources listed in memory/context/precedent.md (files, and the markdown and text files
+directly inside listed folders), under the library root that memory/context/library.md names. It
+reads indexes and registers, never whole document stores, and never changes anything. A missing
+source is reported and skipped. Matching ignores case; a line scores higher for more distinct
+terms, for a phrase match, and when it comes from a decision record, a published index, or a POC
+register.
+"""
+import argparse
+import json
+import os
+import pathlib
+import re
+import sys
+
+KIT = pathlib.Path(os.path.expanduser(os.environ.get("KIT_DIR", "~/Claude/Agents/kit")))
+CONTEXT = KIT / "memory/context"
+TEXT_SUFFIXES = {".md", ".txt", ".csv", ".tsv"}
+MAX_BYTES = 5 * 1024 * 1024
+DEFAULT_SOURCES = ["CATALOG.md", "LOG.md", "knowledge/", "decisions/INDEX.md", "poc/INDEX.md",
+                   "labs/REGISTER.md", "radar/", "published/"]
+WEIGHTS = (("decisions", 3), ("published", 2), ("poc", 2), ("knowledge", 2), ("radar", 1),
+           ("labs", 1), ("catalog", 1))
+
+
+def expand(p):
+    return pathlib.Path(os.path.expanduser(p.strip().strip("`")))
+
+
+def library_root():
+    f = CONTEXT / "library.md"
+    if not f.exists():
+        return None
+    m = re.search(r"\*\*Library root:\*\*\s*`([^`]+)`", f.read_text(errors="ignore"))
+    return expand(m.group(1)) if m else None
+
+
+def listed(text, label):
+    """The indented `path` items under a '- **label:**' bullet in precedent.md."""
+    m = re.search(r"^- \*\*" + re.escape(label) + r":\*\*(.*?)(?=^- \*\*|\Z)", text, re.S | re.M)
+    if not m:
+        return []
+    return re.findall(r"^\s+- `([^`]+)`", m.group(1), re.M)
+
+
+def sources(root):
+    f = CONTEXT / "precedent.md"
+    text = f.read_text(errors="ignore") if f.exists() else ""
+    rel = listed(text, "Sources") or DEFAULT_SOURCES
+    out = [(s, (root / s) if root else None) for s in rel]
+    out += [(s, expand(s)) for s in listed(text, "Extra sources")]
+    return out
+
+
+def files_in(path):
+    if path is None or not path.exists():
+        return []
+    if path.is_file():
+        return [path]
+    return sorted(p for p in path.iterdir() if p.is_file() and p.suffix.lower() in TEXT_SUFFIXES)
+
+
+def parse_terms(raw):
+    phrases, words = [], []
+    for t in raw:
+        t = t.strip()
+        if not t:
+            continue
+        (phrases if " " in t else words).append(t.lower())
+    return phrases, words
+
+
+def weight(path):
+    s = str(path).lower()
+    return max((w for key, w in WEIGHTS if key in s), default=0)
+
+
+def search(paths, phrases, words):
+    terms = words + [w for p in phrases for w in p.split()]
+    hits = []
+    for path in paths:
+        try:
+            if path.stat().st_size > MAX_BYTES:
+                continue
+            lines = path.read_text(errors="ignore").splitlines()
+        except OSError:
+            continue
+        bonus = weight(path)
+        for n, line in enumerate(lines, 1):
+            low = line.lower()
+            found = {t for t in set(terms) if t in low}
+            phrase = [p for p in phrases if p in low]
+            if not found and not phrase:
+                continue
+            score = 3 * len(found) + 5 * len(phrase) + bonus
+            if found == set(terms) and len(terms) > 1:
+                score += 4
+            hits.append({"score": score, "file": str(path), "line": n, "text": line.strip()[:240]})
+    hits.sort(key=lambda h: (-h["score"], h["file"], h["line"]))
+    return hits
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-precedent", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("terms", nargs="*")
+    ap.add_argument("--limit", type=int, default=25)
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--sources", action="store_true")
+    ap.add_argument("--root")
+    a = ap.parse_args(argv)
+
+    root = expand(a.root) if a.root else library_root()
+    if root is None:
+        print("kit-precedent: no library root set in memory/context/library.md (or use --root)",
+              file=sys.stderr)
+    srcs = sources(root)
+    missing = [s for s, p in srcs if p is None or not p.exists()]
+    if a.sources:
+        for s, p in srcs:
+            print(f"{'ok     ' if p is not None and p.exists() else 'missing'} {s}  ({p})")
+        return 0
+    if not a.terms:
+        ap.error("give one or more search terms")
+    phrases, words = parse_terms(a.terms)
+    paths = [f for _, p in srcs for f in files_in(p)]
+    hits = search(paths, phrases, words)
+    if a.json:
+        print(json.dumps({"root": str(root) if root else None, "missing": missing,
+                          "searched": [str(p) for p in paths], "hits": hits[:a.limit]}, indent=2))
+        return 0
+    for h in hits[:a.limit]:
+        rel = h["file"]
+        if root and rel.startswith(str(root)):
+            rel = rel[len(str(root)):].lstrip("/")
+        print(f"{h['score']:>3}  {rel}:{h['line']}  {h['text']}")
+    print(f"\nkit-precedent: {len(hits)} hit(s) in {len(paths)} file(s)"
+          + (f"; showing {min(len(hits), a.limit)}" if hits else "; no precedent found in the indexes"))
+    if missing:
+        print("kit-precedent: missing sources, skipped: " + ", ".join(missing))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

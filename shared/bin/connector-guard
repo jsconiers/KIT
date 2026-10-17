@@ -10,16 +10,25 @@ stdin. In an agent's frontmatter:
         hooks:
           - type: command
             command: 'python3 "$HOME/Claude/Agents/kit/.install/shared/bin/connector-guard" pre <agent>'
-    PostToolUse:   (the same, with "post")
-    Stop:          (the same, with "stop" and no matcher)
+    PostToolUse:          (the same, with "post")
+    PostToolUseFailure:   (the same, with "fail")
+    Stop:                 (the same, with "stop" and no matcher)
 
 pre   Allows a call only when its connector (MCP server) is in allowed_servers and its tool name reads
       as read-only (get, list, search, query, read, fetch, find, describe, view, show, lookup,
       count, retrieve, browse). Anything that looks like a write is denied, and so is any name it
       doesn't recognize. It fails closed: if it can't read its config or write the audit log, the
       call is denied. It never auto-approves; allowed calls still go through normal permissions.
+      While Kit is paused (kit-pause), every connector call is denied.
 post  Logs the size of the result and whether it was an error. Result contents are never logged.
+fail  Logs a failed call. Claude Code runs PostToolUse only when a call succeeds; a failed call (an
+      auth error, a timeout, a server that's down) runs PostToolUseFailure instead. Without this
+      hook, failed calls leave a "pre" record with no result. Logged as a "post" record with
+      is_error true, plus a short error summary with anything credential-like removed.
 stop  Logs the end of the agent's session.
+
+Every record carries the call's tool_use_id when Claude Code supplies one, so kit-audit can pair a
+call with its result exactly.
 
 Each event becomes one line in <audit_dir>/connectors-YYYY-MM.jsonl. Inputs are logged with any
 field that looks like a credential redacted.
@@ -44,6 +53,14 @@ WRITE_WORDS = {"create", "update", "delete", "remove", "add", "upload", "post", 
                "edit", "write", "send", "insert", "modify", "archive", "restore", "link", "attach",
                "submit", "cancel", "merge", "import", "run", "execute", "trigger", "start", "stop"}
 SECRET = re.compile(r"pass|token|secret|key|auth|cookie|credential|session", re.I)
+KIT_DIR = os.path.expanduser(os.environ.get("KIT_DIR", "~/Claude/Agents/kit"))
+PAUSED = os.path.join(KIT_DIR, ".install", "PAUSED")
+SCRUB = [
+    (re.compile(r"(?i)\b(bearer|basic|token)\s+[A-Za-z0-9._~+/=-]{8,}"), r"\1 <redacted>"),
+    (re.compile(r"(?i)\b([\w-]*(?:pass|token|secret|key|auth|cookie|credential|session)[\w-]*)\s*[=:]\s*\S+"),
+     r"\1=<redacted>"),
+    (re.compile(r"[A-Za-z0-9+/_=-]{32,}"), "<redacted>"),
+]
 
 
 def load_config():
@@ -109,6 +126,26 @@ def write_log(cfg, entry):
         pass
 
 
+def scrub(text, limit=300):
+    """A short, credential-free summary of an error message."""
+    text = " ".join(str(text or "").split())
+    for pat, sub in SCRUB:
+        text = pat.sub(sub, text)
+    return text[:limit] + ("...(truncated)" if len(text) > limit else "")
+
+
+def paused():
+    """The reason Kit is paused, or None."""
+    if not os.path.exists(PAUSED):
+        return None
+    try:
+        with open(PAUSED, encoding="utf-8") as f:
+            first = f.readline().strip()
+    except OSError:
+        first = ""
+    return first or "no reason given"
+
+
 def deny(reason):
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                              "permissionDecisionReason": f"connector-guard: {reason}"}}))
@@ -120,9 +157,14 @@ def main(event, agent, raw):
     entry = {"time": datetime.datetime.now().astimezone().isoformat(timespec="seconds"), "event": event,
              "agent": agent, "session": data.get("session_id"), "transcript": data.get("transcript_path"),
              "tool": tool}
+    if data.get("tool_use_id"):
+        entry["tool_use_id"] = data["tool_use_id"]
     if event == "pre":
         cfg = load_config()
         decision, reason = decide(cfg, tool)
+        why = paused() if decision == "allow" and split(tool)[0] else None
+        if why:
+            decision, reason = "deny", f"Kit is paused ({why}); run kit-pause resume to allow calls again"
         entry.update(decision=decision, reason=reason, input=redact(data.get("tool_input")))
         write_log(cfg, entry)
         if decision == "deny":
@@ -131,6 +173,12 @@ def main(event, agent, raw):
         resp = data.get("tool_response")
         entry.update(result_bytes=len(json.dumps(resp, ensure_ascii=False, default=str)) if resp is not None else 0,
                      is_error=bool(isinstance(resp, dict) and (resp.get("isError") or resp.get("is_error"))))
+        write_log(load_config(), entry)
+    elif event == "fail":
+        entry.update(event="post", hook="failure", result_bytes=0, is_error=True, error=scrub(data.get("error")),
+                     is_interrupt=bool(data.get("is_interrupt")))
+        if data.get("duration_ms") is not None:
+            entry["duration_ms"] = data.get("duration_ms")
         write_log(load_config(), entry)
     elif event == "stop":
         entry.pop("tool")

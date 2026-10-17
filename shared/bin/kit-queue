@@ -1,0 +1,257 @@
+#!/usr/bin/env python3
+"""kit-queue: keep QUEUE.md from piling up: stale items, likely duplicates, and the weekly trend.
+
+  kit-queue hygiene             show stale items (untouched 7+ days), likely duplicates, the trend,
+                                and the queue's size, numbered H1, H2, ...
+  kit-queue hygiene --json      the same as JSON, also saved to briefs/hygiene.json, so the numbers
+                                the brief shows are the numbers `apply` uses
+  kit-queue apply "H1 keep, H2 drop, H3 merge into H5, H4 rewrite"
+  kit-queue apply --dry-run ... show what would change, change nothing
+
+Verdicts for a stale item: keep (stamps it as updated today), drop (moves it to Done as dropped),
+rewrite (adds a "needs rewrite" note and stamps it), merge into H<n> or merge into "<exact title>"
+(moves it, with its sub-items, under the other item). For a duplicate pair: merge (the first into
+the second), drop (drops the first), keep (both stay; the pair isn't flagged again).
+
+`apply` works only from the saved briefs/hygiene.json, only on the H numbers you name, and finds each
+item by its title, so edits made since the brief don't misdirect it. It backs up QUEUE.md to
+.install/backups first and prints every change. Undo: copy the backup over QUEUE.md.
+"""
+import argparse
+import datetime as dt
+import json
+import pathlib
+import re
+import shutil
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import kit_queue as q  # noqa: E402  (shared/kit_queue.py)
+
+SAVED = q.KIT / "briefs/hygiene.json"
+IGNORE = q.KIT / ".install/cache/queue-ignore.json"
+BACKUPS = q.KIT / ".install/backups"
+
+
+def ignored():
+    try:
+        return set(json.loads(IGNORE.read_text()))
+    except (OSError, ValueError):
+        return set()
+
+
+def show(h):
+    print(f"Queue hygiene, {h['date']}: {h['open_items']} open items, {h['open_sub_items']} sub-items")
+    stale = [e for e in h["entries"] if e["kind"] == "stale"]
+    dups = [e for e in h["entries"] if e["kind"] == "duplicate"]
+    print(f"\nStale (untouched {h['stale_days']}+ days): {len(stale) or 'none'}")
+    for e in stale:
+        print(f"  {e['id']}  {short(e['item']['title'])}  [{e['item']['section']}; {e['days']} days, "
+              f"last touched {e['last_touched']}]")
+    print(f"\nLikely duplicates or overlaps: {len(dups) or 'none'}")
+    for e in dups:
+        print(f"  {e['id']}  \"{label(e['a'])}\"  ~  \"{label(e['b'])}\"  (shared: {', '.join(e['common'])})")
+    t = h["trend"]
+    print("\nTrend (week of: added / closed): "
+          + "; ".join(f"{w['week'][:6]}: {w['added']}/{w['closed']}" for w in t if w["added"] or w["closed"])
+          or "\nTrend: no dated items in the last weeks")
+    print("\nReply with verdicts, for example: kit-queue apply \"H1 keep, H2 merge\"")
+
+
+def short(text, n=70):
+    return text if len(text) <= n else text[:n - 1].rstrip() + "…"
+
+
+def label(r):
+    return short(r["title"]) + (f" (in {short(r['parent'], 30)})" if r.get("parent") else f" ({r['section']})")
+
+
+def parse_verdicts(text):
+    out = []
+    for part in re.split(r"[,;\n]+", text):
+        part = part.strip()
+        if not part:
+            continue
+        m = re.match(r"(H\d+)\s*[:=]?\s*(keep|drop|rewrite|merge)(?:\s+into\s+(.+))?$", part, re.I)
+        if not m:
+            sys.exit(f"kit-queue: can't read \"{part}\". Use: H1 keep, H2 drop, H3 merge into H5, H4 rewrite")
+        out.append((m.group(1).upper(), m.group(2).lower(), (m.group(3) or "").strip().strip('"')))
+    if not out:
+        sys.exit("kit-queue: no verdicts given; nothing changed")
+    return out
+
+
+def target_ref(spec, entries):
+    """The item a 'merge into' names: H<n> (a stale item, or a pair's second) or an exact title."""
+    if re.fullmatch(r"H\d+", spec, re.I):
+        e = entries.get(spec.upper())
+        if not e:
+            sys.exit(f"kit-queue: {spec} isn't in the saved hygiene list")
+        return e["item"] if e["kind"] == "stale" else e["b"]
+    return {"title": spec, "section": None, "parent": None}
+
+
+def locate(lines, r):
+    if r.get("section"):
+        return q.find(lines, r)
+    for it in q.open_items(lines):  # title only
+        if it["title"] == r["title"]:
+            return it
+    return None
+
+
+def merge(lines, src, dst, log):
+    a, b = locate(lines, src), locate(lines, dst)
+    if not a or not b:
+        log.append(f"skipped merge: {'source' if not a else 'target'} not found "
+                   f"(\"{(src if not a else dst)['title']}\")")
+        return
+    i, j = q.block_of(lines, a)
+    moved = lines[i:j]
+    note_from = a["title"] + (f" (from {a['parent']})" if a["parent"] else f" (from {a['section']})")
+    extra = [ln if ln.startswith("  ") else "  " + ln for ln in moved[1:]]
+    del lines[i:j]
+    b = locate(lines, dst)
+    d = q.fmt(q.today())
+    if b["parent"]:
+        lines[b["line"]] = lines[b["line"]] + f" (merged: {a['title']}, {d})"
+        p = q.parent_line(lines, b)
+        lines[p] = q.stamp(lines[p])
+    else:
+        bi, bj = q.block_of(lines, b)
+        lines[bj:bj] = [f"  - Merged {d}: {note_from}"] + extra
+        lines[bi] = q.stamp(lines[bi])
+    log.append(f"merged \"{a['title']}\" into \"{b['title']}\"")
+
+
+def drop(lines, r, log):
+    it = locate(lines, r)
+    if not it:
+        log.append(f"skipped drop: not found (\"{r['title']}\")")
+        return
+    i, j = q.block_of(lines, it)
+    block = lines[i:j]
+    d = q.fmt(q.today())
+    if it["parent"]:
+        p = q.parent_line(lines, it)
+        del lines[i:j]
+        lines[p] = q.stamp(lines[p])
+        q.to_done(lines, it["title"], f"dropped {d} (from {it['parent']})")
+    else:
+        added = re.search(r"added (" + q.DATE + ")", block[0])
+        del lines[i:j]
+        q.to_done(lines, it["title"], f"{it['section']}, dropped {d}" + (f" (added {added.group(1)})" if added else ""),
+                  block[1:])
+    log.append(f"dropped \"{it['title']}\" (moved to Done)")
+
+
+def touch(lines, r, log, note=None):
+    it = locate(lines, r)
+    if not it:
+        log.append(f"skipped: not found (\"{r['title']}\")")
+        return
+    if it["parent"]:
+        if note:
+            lines[it["line"]] += f" ({note.lower()})"
+        p = q.parent_line(lines, it)
+        lines[p] = q.stamp(lines[p])
+    else:
+        lines[it["line"]] = q.stamp(lines[it["line"]])
+        if note:
+            _, j = q.block_of(lines, locate(lines, r))
+            lines[j:j] = [f"  - {note}"]
+    log.append(f"marked \"{it['title']}\": {note}" if note
+               else f"kept \"{it['title']}\" (stamped updated {q.fmt(q.today())})")
+
+
+def apply(args):
+    try:
+        saved = json.loads(SAVED.read_text())
+    except (OSError, ValueError):
+        sys.exit("kit-queue: no saved hygiene list (briefs/hygiene.json); run: kit-queue hygiene --json")
+    entries = {e["id"]: e for e in saved.get("entries", [])}
+    verdicts = parse_verdicts(" ".join(args.verdicts))
+    lines = q.load()
+    before = list(lines)
+    log, ign = [], ignored()
+    for hid, verdict, into in verdicts:
+        e = entries.get(hid)
+        if not e:
+            log.append(f"skipped {hid}: not in the saved list from {saved.get('date', '?')}")
+            continue
+        if e["kind"] == "stale":
+            r = e["item"]
+            if verdict == "keep":
+                touch(lines, r, log)
+            elif verdict == "drop":
+                drop(lines, r, log)
+            elif verdict == "rewrite":
+                touch(lines, r, log, note=f"Needs rewrite ({q.fmt(q.today())})")
+            elif verdict == "merge":
+                if not into:
+                    sys.exit(f"kit-queue: {hid} merge needs a target: merge into H<n> or \"<title>\"")
+                merge(lines, r, target_ref(into, entries), log)
+        else:
+            if verdict == "merge":
+                merge(lines, e["a"], target_ref(into, entries) if into else e["b"], log)
+            elif verdict == "drop":
+                drop(lines, e["a"], log)
+            elif verdict == "keep":
+                ign.add("||".join(sorted([e["a"]["title"], e["b"]["title"]])))
+                log.append(f"kept both \"{e['a']['title']}\" and \"{e['b']['title']}\"; not flagged again")
+            else:
+                log.append(f"skipped {hid}: rewrite applies to stale items, not duplicate pairs")
+    for ln in log:
+        print(("  would: " if args.dry_run else "  ") + ln)
+    changed = lines != before
+    if args.dry_run:
+        print("kit-queue: dry run; nothing changed")
+        return 0
+    if changed:
+        BACKUPS.mkdir(parents=True, exist_ok=True)
+        backup = BACKUPS / f"QUEUE-{dt.datetime.now():%Y%m%d-%H%M%S}.md"
+        shutil.copy2(q.QUEUE, backup)
+        q.write(lines)
+        print(f"kit-queue: QUEUE.md updated; backup at {backup}")
+        print(f"  undo: cp \"{backup}\" \"{q.QUEUE}\"")
+    if ign != ignored():
+        IGNORE.parent.mkdir(parents=True, exist_ok=True)
+        IGNORE.write_text(json.dumps(sorted(ign), indent=1))
+    if not changed and ign == ignored():
+        print("kit-queue: nothing changed")
+    return 0
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-queue", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd")
+    hp = sub.add_parser("hygiene")
+    hp.add_argument("--json", action="store_true")
+    hp.add_argument("--no-save", action="store_true", help="with --json, don't write briefs/hygiene.json")
+    hp.add_argument("--days", type=int, default=7)
+    apx = sub.add_parser("apply")
+    apx.add_argument("--dry-run", action="store_true")
+    apx.add_argument("verdicts", nargs="+")
+    args = ap.parse_args(argv)
+    if not q.QUEUE.exists():
+        sys.exit(f"kit-queue: can't find {q.QUEUE}")
+    if args.cmd == "hygiene":
+        h = q.hygiene(q.load(), args.days, ignored())
+        if args.json:
+            text = json.dumps(h, indent=1)
+            if not args.no_save:
+                SAVED.parent.mkdir(parents=True, exist_ok=True)
+                SAVED.write_text(text + "\n")
+            print(text)
+        else:
+            show(h)
+        return 0
+    if args.cmd == "apply":
+        return apply(args)
+    ap.print_help()
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

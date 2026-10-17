@@ -4,6 +4,7 @@
   load_schemas()            {type: {major: (version, schema)}} from shared/records/schema/
   validate(record, schemas) list of problems; empty means valid
   secret_hits(text)         names of credential patterns found in text
+  accept(record, schemas)   (ok, warning) with the version rules readers use (current and previous major)
 
 The validator covers the JSON Schema subset the record schemas use: type, enum, const, pattern,
 minLength, maxLength, minimum, maxItems, items, properties, required, additionalProperties
@@ -167,3 +168,28 @@ def validate(record, schemas, lenient=False, folder=SCHEMA_DIR):
     if isinstance(rid, str) and not rid.startswith(f"{kit}:{t}:"):
         problems.append("id: must start with <kit_id>:<schema>:")
     return problems
+
+
+def accept(rec, schemas):
+    """(ok, warning or ''). Current and previous majors are accepted; a newer minor is read leniently."""
+    t, ver = rec.get("schema"), split_version(rec.get("schema_version", ""))
+    if t not in schemas or not ver:
+        return False, f"unknown record type or version ({t!r} {rec.get('schema_version')!r})"
+    current = max(schemas[t])
+    (cmaj, cmin), _ = schemas[t][current]
+    if ver[0] > cmaj:
+        return False, f"{t} {ver[0]}.{ver[1]} is newer than this dashboard ({cmaj}.{cmin}); update it"
+    if ver[0] < cmaj - 1:
+        return False, f"{t} {ver[0]}.{ver[1]} is too old (this dashboard reads {cmaj - 1}.x and {cmaj}.x)"
+    if ver[0] not in schemas[t]:
+        return False, f"{t} {ver[0]}.{ver[1]}: no schema kept for that major version"
+    known_minor = schemas[t][ver[0]][0][1]
+    lenient = ver[1] > known_minor
+    problems = validate(rec, schemas, lenient=lenient)
+    if problems:
+        return False, "invalid: " + "; ".join(problems[:3])
+    if lenient:
+        return True, f"{t} {ver[0]}.{ver[1]} is newer than {ver[0]}.{known_minor}; extra fields ignored"
+    if ver[0] < cmaj:
+        return True, f"{t} {ver[0]}.{ver[1]} is the previous major version; ask its Kit to update"
+    return True, ""

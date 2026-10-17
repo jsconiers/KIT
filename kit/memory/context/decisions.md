@@ -8,6 +8,9 @@ What the decision recorder uses. It reads this before every job, so keep it curr
 - **Template:** `~/Claude/Agents/kit/templates/adr-template.md`, an example to adapt. Point here
   to your team's own template if it has one. The recorder fills in every field and keeps the
   section order.
+- **Build, buy, or partner:** `~/Claude/Agents/kit/templates/build-buy-partner-template.md`, the
+  analysis behind a sourcing decision. When a completed one is a source, the ADR's options and
+  consequences come from it, cited by section.
 - **Sources to scan:** meeting minutes, reviews, and IA and GDS drafts in the library's project
   folders, plus Kit's briefs, unless you set others here.
 - **Who can accept a decision:** optional. The roles whose decisions count as accepted, such as an

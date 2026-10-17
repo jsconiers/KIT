@@ -17,7 +17,7 @@ Agents not named in a pair can't start or message other agents at all.
 
 The gateway is the agent meant to reach outside systems. It's read-only and least privilege, and
 the connector guard (`~/Claude/Agents/kit/.install/shared/bin/connector-guard`) enforces that with
-hooks and records every request in an audit log. The guard also runs on the three agents that call
+hooks and records every request in an audit log. Failed calls are logged too, through a PostToolUseFailure hook. The guard also runs on the three agents that call
 the gateway. Connectors aren't locked to the gateway yet: other agents can still use them directly.
 
 Each agent reads its setup file in `memory/context/` before every job. Delegate with a brief: the
@@ -262,3 +262,85 @@ what Kit gives them, never personal notes, and all run for {{OWNER}} on this com
   the weekly review and whenever audit.txt shows a critical or warning finding; put its Requests
   in the queue.
 - **Setup:** `memory/context/audit.md`.
+
+## poc-lead
+
+- **Does:** runs a proof of concept from charter to recommendation, internal or with a vendor:
+  charter (hypothesis, measurable criteria, roles, timebox, exit, teardown), test plan from the
+  approved charter with every criterion covered, evidence log, scorecard, and findings with a go,
+  no-go, or pivot recommendation and, for go, an IA starter. Gates vendor POCs on an NDA the NDA
+  owner confirmed, and keeps to synthetic, masked, or public data. Never decides a verdict,
+  approves a charter, contacts a vendor, or touches a lab. Writes in the project's `poc/` folder.
+- **Reach it:** the problem, the technology or product, the sponsor and build lead by role, the
+  vendor (or "internal"), the timebox, and the stage ("draft the charter", "build the test plan",
+  "log these results", "score it", "write the findings").
+- **Routine:** pass on approvals and NDA confirmations by role and date. Send vendor meeting claims
+  marked "verify in POC" to it. After findings, have the librarian catalog them, the curator
+  record the outcome as precedent, and the decision recorder write the ADR once the sponsor
+  decides; on go, brief the IA writer with the IA starter. After every POC's findings, whatever the
+  verdict, brief the training lead for a knowledge-transfer outline and one-pager.
+- **Setup:** `memory/context/poc.md`.
+
+## training-lead
+
+- **Does:** learning plans for {{OWNER}} and for the team: skills gap against a target role or
+  technology, a sequence of reading, hands-on labs (reusing lab runbooks), and checkpoints, with
+  progress tracked in the library. Builds a team skills matrix by role (never an individual's gaps
+  in shared output) and outlines learning material from POC outputs. Assumes no learning platform.
+  Writes in the library's `training/` folder.
+- **Reach it:** who the plan is for ({{OWNER}} or a role), the target role or technology, the
+  deadline, and the weekly time available; or "team skills matrix", or "learning outline from
+  <POC>".
+- **Routine:** get outside courses and documentation from the researcher and lab steps from the lab
+  planner when it asks, then brief it again. Send its outlines to the deck builder and its study
+  blocks to the scheduler. Pass on progress as {{OWNER}} reports it. Brief it with each POC's
+  findings, test plan, and runbook once the findings are written.
+- **Setup:** `memory/context/training.md`.
+
+## future-tech-planner
+
+- **Does:** the technology radar (adopt, trial, assess, hold) with views for the architecture team,
+  engineering and development, and strategy; lifecycle reviews of existing technologies (versions,
+  end of support, licensing, skills risk, with an invest, maintain, migrate, or retire
+  recommendation); and the quarterly strategy brief. Radar placements are decided by vote: it
+  prepares ballots and records results, and never places anything itself. Writes in the library's
+  `radar/` folder.
+- **Reach it:** the job ("ballot for <technology>", "record the vote on <technology>",
+  "lifecycle review of <technology>", "radar refresh", or "strategy brief for <quarter>") and the
+  audience.
+- **Routine:** answer its Requests: configuration data from the gateway, outside research from the
+  researcher, skills coverage from the training lead. Pass on vote results with date, forum by
+  role, and ring decided. Put its 12- and 24-month end-of-support warnings in the weekly review.
+  Send the strategy brief to the deck builder, standards impacts to {{OWNER}}, and decided votes to
+  the curator and, where they're architecture decisions, the decision recorder.
+- **Setup:** `memory/context/future-tech.md`.
+
+## lab-planner
+
+- **Does:** lab runbooks for on-premises and cloud labs from a brief or POC charter: setup, tests,
+  teardown, and a delete-or-return checklist. Applies the data rule (synthetic, masked, or public
+  only), checks the security baseline, keeps a lab register with each lab's owner and teardown
+  date, and lists labs overdue for teardown. Never builds, changes, or tears down a lab. Writes in
+  the library's `labs/` folder.
+- **Reach it:** the purpose, owner by role, on-premises or cloud, components, timebox, and budget;
+  or the POC id ("runbook for POC-0003"); or "overdue labs".
+- **Routine:** for POC labs, give it the charter and test plan. Put its overdue-labs list in the
+  weekly review. Raise any waiver it lists with {{OWNER}}.
+- **Setup:** `memory/context/labs.md`.
+
+## precedent-finder
+
+- **Does:** answers "has this been solved, decided, or tested before?" from the library catalog,
+  published document indexes, the knowledge base, ADRs, the POC and lab registers, the radar, and
+  the demand register. Returns ranked precedents (exact match, same system, same pattern, related),
+  each cited, with the outcome, the date, and whether it's current; flags conflicts with recorded
+  decisions; says "No precedent found" with what it searched. Read-only; never decides anything or
+  treats a precedent as a standard. Writes a precedent note in the project's `precedent/` folder
+  only when asked.
+- **Reach it:** the systems, products, or pattern, the problem in a sentence, and why (intake, a
+  POC, or an IA or GDS draft).
+- **Routine:** run it before briefing the intake triager on a new demand and before the POC lead
+  drafts a charter, and pass its precedents on in the brief. When the IA or GDS writer starts a
+  draft, send them its exact and same-system matches. Have the librarian catalog any note it
+  writes.
+- **Setup:** `memory/context/precedent.md`.

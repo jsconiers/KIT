@@ -20,3 +20,5 @@ it current.
   cutover checklists, for the implementation planner.
 - **Decks:** optional. The slide template, the IA and GDS deck templates with their slide order, the
   brand and slide skills, and slide counts by audience, for the deck builder.
+- **Research briefs:** optional. `~/Claude/Agents/kit/templates/research-brief-template.md` is the
+  layout for research briefs filed in the library, in the order the researcher reports.

@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+"""kit-pause: stop Kit's scheduled runs and outside-system calls with one command, and start them again.
+
+  kit-pause REASON...          pause: no scheduled run starts, and every connector call is denied
+  kit-pause status             say whether Kit is paused, why, and since when
+  kit-pause resume             undo the pause
+  kit-pause REASON... --hard   also unload Kit's launchd jobs; shows the launchctl commands and
+                               runs nothing unless you add --yes
+  kit-pause resume --hard      also load those jobs again (with --yes to run the commands)
+
+The pause is one file, ~/Claude/Agents/kit/.install/PAUSED, holding the reason and the time. While
+it exists, run.sh skips every scheduled run (morning brief, weekly review, work list, and the
+rest) with a line in the day's log, connector-guard denies calls to outside systems, and the
+health check and the dashboard say Kit is paused. Your own Claude Code sessions still work: the
+pause stops what Kit does on its own, not you.
+
+Use it during an incident, an audit, when credits run out, or before changing Kit's setup. A soft
+pause is enough most of the time; --hard is for when launchd shouldn't even start the jobs.
+
+To undo: kit-pause resume (or delete the PAUSED file). After --hard, kit-pause resume --hard --yes
+loads the jobs again; the commands it runs are printed first.
+"""
+import datetime
+import getpass
+import os
+import pathlib
+import subprocess
+import sys
+
+KIT = pathlib.Path(os.path.expanduser(os.environ.get("KIT_DIR", "~/Claude/Agents/kit")))
+MARKER = KIT / ".install/PAUSED"
+AGENTS_DIR = pathlib.Path(os.path.expanduser(os.environ.get("KIT_LAUNCHAGENTS", "~/Library/LaunchAgents")))
+IS_MAC = sys.platform == "darwin"
+
+
+def jobs():
+    """Kit's launchd job files, by label."""
+    user = os.environ.get("USER") or getpass.getuser()
+    return sorted(AGENTS_DIR.glob(f"com.{user}.kit.*.plist"))
+
+
+def launchctl(verb, plists):
+    uid = os.getuid() if hasattr(os, "getuid") else 0
+    return [["launchctl", verb, f"gui/{uid}", str(p)] for p in plists]
+
+
+def run_or_show(cmds, yes):
+    if not cmds:
+        print("kit-pause: no Kit launchd jobs found")
+        return 0
+    print("Commands:" if yes else "These commands would run (add --yes to run them):")
+    for c in cmds:
+        print("  " + " ".join(c))
+    if not yes:
+        return 0
+    for c in cmds:
+        r = subprocess.run(c, capture_output=True, text=True)
+        if r.returncode != 0:
+            # bootout of a job that isn't loaded, or bootstrap of one that is, isn't a problem
+            print(f"  note: {' '.join(c[:2])} {c[-1].rsplit('/', 1)[-1]}: {r.stderr.strip() or r.returncode}")
+    return 0
+
+
+def status():
+    if not MARKER.exists():
+        print("kit-pause: Kit is running (not paused)")
+        return 0
+    lines = MARKER.read_text().splitlines()
+    print(f"kit-pause: Kit is PAUSED: {lines[0] if lines else 'no reason given'}")
+    for ln in lines[1:]:
+        print("  " + ln)
+    print("To resume: kit-pause resume")
+    return 0
+
+
+def pause(reason, hard, yes):
+    if MARKER.exists():
+        print("kit-pause: already paused; updating the reason")
+    MARKER.parent.mkdir(parents=True, exist_ok=True)
+    now = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+    body = [reason, f"since {now}"]
+    if hard and yes:
+        body.append("hard: launchd jobs unloaded")
+    MARKER.write_text("\n".join(body) + "\n")
+    if os.name != "nt":
+        os.chmod(MARKER, 0o600)
+    print(f"kit-pause: Kit is paused ({reason}). Scheduled runs and connector calls stop until "
+          "kit-pause resume.")
+    if hard:
+        if not IS_MAC:
+            print("kit-pause: --hard is for macOS launchd; on Windows, disable the Kit tasks in Task Scheduler")
+            return 0
+        return run_or_show(launchctl("bootout", jobs()), yes)
+    return 0
+
+
+def resume(hard, yes):
+    if MARKER.exists():
+        MARKER.unlink()
+        print("kit-pause: resumed; scheduled runs and connector calls work again")
+    else:
+        print("kit-pause: Kit wasn't paused")
+    if hard and IS_MAC:
+        return run_or_show(launchctl("bootstrap", jobs()), yes)
+    return 0
+
+
+def main(argv):
+    args = [a for a in argv if a not in ("--hard", "--yes")]
+    hard, yes = "--hard" in argv, "--yes" in argv
+    if not args or args[0] in ("-h", "--help", "help"):
+        print(__doc__)
+        return 0
+    if args[0] == "status":
+        return status()
+    if args[0] == "resume":
+        return resume(hard, yes)
+    return pause(" ".join(args), hard, yes)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

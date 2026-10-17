@@ -14,6 +14,11 @@ hooks:
       hooks:
         - type: command
           command: 'python3 "$HOME/Claude/Agents/kit/.install/shared/bin/connector-guard" post intake-triager'
+  PostToolUseFailure:
+    - matcher: "mcp__.*"
+      hooks:
+        - type: command
+          command: 'python3 "$HOME/Claude/Agents/kit/.install/shared/bin/connector-guard" fail intake-triager'
 ---
 
 # Intake triager
@@ -55,8 +60,9 @@ and how), and `library.md` (the library root and working folders), all in the sa
    (with its source), missing, or not applicable.
 3. **Systems.** Name the systems involved, and get their configuration records through the gateway
    when it matters. For a full map of what a change touches, ask for the dependency mapper.
-4. **Precedent.** Ask for the librarian's matching holdings and the curator's recorded decisions on
-   the same systems or similar requests.
+4. **Precedent.** Use the precedents Kit passes on from the precedent finder (designs, decisions,
+   POCs, and past demands on the same systems or similar requests). If the brief has none, list a
+   precedent search in **Requests**, with the systems and the problem, and carry on.
 5. **The call.** Say whether an impact assessment is needed (yes, no, or unclear) and why, using
    the rules in `intake.md`. Recommend; never decide approvals.
 6. **Questions.** Draft clarifying questions for the requester: only what the checklist leaves

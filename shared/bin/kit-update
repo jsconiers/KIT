@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+"""kit-update: bring Kit up to date from the public repo, showing what changes before anything does.
+
+  kit-update            fetch, then show what's new: commits, files, and what would happen
+  kit-update --apply    move the repo clone onto GitHub's main and rerun the installer
+  kit-update --yes      with --apply, skip the confirmation question
+
+It works on the repo clone (~/KIT, or KIT_REPO if set) and never pushes. It stops, changing
+nothing, when the clone has uncommitted changes, or has commits GitHub doesn't (send those first
+with kit-patch). The one exception is a patch GitHub has already applied: if one of GitHub's
+commits has exactly the clone's files, the clone moves onto GitHub's main anyway, as
+`kit-patch --sync` would.
+
+Before moving, it saves the clone's current commit on a backup branch, backup/pre-update-<time>.
+The installer then copies the new version into ~/Claude/Agents/kit/.install and keeps your memory,
+queue, status, lessons, and preferences. If the packaged KIT.md changed, the installer leaves it as
+KIT.md.new for you to compare; kit-update shows the difference.
+
+To undo: git -C ~/KIT reset --hard backup/pre-update-<time>, then rerun the installer
+(bash ~/KIT/platform/mac/install.sh, or install.ps1 on Windows).
+"""
+import argparse
+import datetime
+import os
+import pathlib
+import subprocess
+import sys
+
+HOME = pathlib.Path.home()
+REPO = pathlib.Path(os.environ.get("KIT_REPO", HOME / "KIT")).expanduser()
+KIT = HOME / "Claude/Agents/kit"
+IS_WIN = os.name == "nt"
+
+
+def git(*args, check=True, timeout=60):
+    r = subprocess.run(["git", "-C", str(REPO), *args], capture_output=True, text=True, timeout=timeout)
+    if check and r.returncode != 0:
+        sys.exit(f"kit-update: git {' '.join(args)} failed: {r.stderr.strip()}")
+    return r.stdout.strip()
+
+
+def landed_patch(behind):
+    """GitHub's commit that has exactly the clone's files, if any (a patch GitHub applied)."""
+    tree = git("rev-parse", "HEAD^{tree}")
+    for sha in behind:
+        if git("rev-parse", f"{sha}^{{tree}}") == tree:
+            return sha
+    return None
+
+
+def plan():
+    """Work out what an update would do. Returns (action, detail); action is one of
+    'current', 'fast-forward', 'landed', 'stop'."""
+    if not (REPO / ".git").exists():
+        return "stop", f"{REPO} isn't a git repo (set KIT_REPO to your clone)"
+    if git("status", "--porcelain"):
+        return "stop", f"{REPO} has uncommitted changes; commit or stash them first"
+    git("fetch", "--quiet", "origin", timeout=120)
+    ahead = git("rev-list", "origin/main..HEAD").split()
+    behind = git("rev-list", "--reverse", "HEAD..origin/main").split()
+    if not ahead and not behind:
+        return "current", "already up to date with GitHub"
+    if not ahead:
+        return "fast-forward", f"{len(behind)} new commit(s) on GitHub"
+    sha = landed_patch(behind)
+    if sha:
+        return "landed", (f"your {len(ahead)} local commit(s) landed on GitHub as {sha[:7]}; "
+                          f"{len(behind)} GitHub commit(s) to take")
+    return "stop", (f"{REPO} has {len(ahead)} commit(s) GitHub doesn't; send them with kit-patch "
+                    "first, then run kit-update again")
+
+
+def show_incoming():
+    print("\nNew on GitHub:")
+    print(git("log", "--format=  %h %ad %s", "--date=short", "HEAD..origin/main") or "  (nothing)")
+    stat = git("diff", "--stat", "HEAD", "origin/main")
+    if stat:
+        print("\nFiles:")
+        print("\n".join("  " + ln for ln in stat.splitlines()))
+
+
+def installer():
+    if IS_WIN:
+        return ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                str(REPO / "platform/windows/install.ps1")]
+    return ["bash", str(REPO / "platform/mac/install.sh")]
+
+
+def show_kit_md():
+    new = KIT / "KIT.md.new"
+    if not new.exists():
+        return
+    print(f"\nThe packaged KIT.md changed; yours is unchanged, and the new one is {new}.")
+    r = subprocess.run(["git", "diff", "--no-index", "--stat", str(KIT / "KIT.md"), str(new)],
+                       capture_output=True, text=True)
+    print(r.stdout.strip() or "(no difference)")
+    print("Compare them, then keep yours or replace it with the new one (and delete KIT.md.new).")
+
+
+def main(argv):
+    sys.stdout.reconfigure(line_buffering=True)
+    ap = argparse.ArgumentParser(prog="kit-update", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--apply", action="store_true", help="move the clone onto GitHub's main and install")
+    ap.add_argument("--yes", action="store_true", help="with --apply, don't ask for confirmation")
+    args = ap.parse_args(argv)
+
+    action, detail = plan()
+    print(f"kit-update: {detail}")
+    if action == "stop":
+        return 1
+    if action == "current":
+        return 0
+    show_incoming()
+    if not args.apply:
+        print("\nNothing changed. To update: kit-update --apply")
+        return 0
+    if not args.yes:
+        if not sys.stdin.isatty():
+            print("kit-update: no one at the keyboard to confirm; use --apply --yes")
+            return 1
+        if input("\nUpdate and rerun the installer? [y/N] ").strip().lower() not in ("y", "yes"):
+            print("Nothing changed.")
+            return 0
+
+    backup = f"backup/pre-update-{datetime.datetime.now():%Y%m%d-%H%M%S}"
+    git("branch", backup, "HEAD")
+    if action == "landed":
+        git("reset", "--quiet", "--hard", landed_patch(git("rev-list", "--reverse", "HEAD..origin/main").split()))
+    git("merge", "--ff-only", "--quiet", "origin/main")
+    print(f"\nkit-update: {REPO} is now at {git('log', '-1', '--format=%h %s')}; "
+          f"the earlier commit is on {backup}")
+
+    print("kit-update: running the installer\n")
+    rc = subprocess.run(installer(), stdin=subprocess.DEVNULL).returncode
+    if rc != 0:
+        print(f"\nkit-update: the installer failed (exit {rc}). To undo: "
+              f"git -C {REPO} reset --hard {backup}, then rerun the installer.")
+        return rc
+    show_kit_md()
+    print(f"\nkit-update: done. To undo: git -C {REPO} reset --hard {backup}, then rerun the installer.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

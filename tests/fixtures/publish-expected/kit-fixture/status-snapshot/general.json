@@ -1,0 +1,21 @@
+{
+  "body": {
+    "as_of": "2026-10-02",
+    "blocked": [],
+    "headline": "",
+    "health": "unknown",
+    "in_progress": [
+      "Review the team dashboard layout"
+    ],
+    "next": [],
+    "waiting": []
+  },
+  "classification": "internal",
+  "id": "kit-fixture:status-snapshot:general",
+  "kit_id": "kit-fixture",
+  "owner_role": "solutions architect",
+  "project": "general",
+  "schema": "status-snapshot",
+  "schema_version": "1.0",
+  "source": "kit:STATUS.md"
+}

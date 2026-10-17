@@ -245,6 +245,7 @@ class Audit:
             agents[name] = {"tools": field("tools"), "disallowed": field("disallowedTools") or [],
                             "pre": bool(re.search(r"connector-guard\S*\"?\s+pre\b", fm)),
                             "stop": bool(re.search(r"connector-guard\S*\"?\s+stop\b", fm)),
+                            "fail": bool(re.search(r"connector-guard\S*\"?\s+fail\b", fm)),
                             "body": body}
         return agents
 
@@ -468,17 +469,28 @@ class Audit:
                      len(missing))
         # Allowed calls with no result record: the PostToolUse hook didn't run, or the call failed in a
         # way the guard can't see.
+        # Pair by tool_use_id when both records have one; older records fall back to session and tool.
         noresult = []
+        posts = [p for p in self.events if p["event"] == "post"]
+        by_id = {p["tool_use_id"] for p in posts if p.get("tool_use_id")}
         for e in pre:
             if e.get("decision") != "allow" or e["_t"] >= open_cut:
                 continue
-            if not any(p["event"] == "post" and p.get("session") == e.get("session") and p.get("tool") == e.get("tool")
-                       and e["_t"] <= p["_t"] for p in self.events):
-                noresult.append(e)
+            if e.get("tool_use_id"):
+                if e["tool_use_id"] in by_id:
+                    continue
+            elif any(p.get("session") == e.get("session") and p.get("tool") == e.get("tool") and e["_t"] <= p["_t"]
+                     for p in posts):
+                continue
+            noresult.append(e)
         if noresult:
+            nofail = [n for n, a in self.agents.items() if a["pre"] and not a["fail"]]
+            hint = (" Their agents have no PostToolUseFailure hook, so these were most likely failed calls "
+                    "(Claude Code runs PostToolUse only on success)." if any(e.get("agent") in nofail for e in noresult)
+                    else " The result hooks didn't run, or the session ended mid-call.")
             self.add("warning", "no-result", "Allowed calls with no result record",
-                     self.describe(noresult) + ". The PostToolUse hook didn't log them, so result sizes and "
-                     "failures for these calls are unknown.", len(noresult))
+                     self.describe(noresult) + "." + hint + " Result sizes and failures for these calls are unknown.",
+                     len(noresult))
         nosess = [e for e in evs if not e.get("session")]
         if nosess:
             self.add("warning", "malformed", "Records with no session id", self.describe(nosess), len(nosess))
@@ -505,7 +517,7 @@ class Audit:
             self.add("info", "structure", "No agent files found",
                      f"{os.path.join(self.kit, 'agents')} has no agents, so the structural checks didn't run.")
             return
-        unguarded, direct, nostop, fanout = [], [], [], []
+        unguarded, direct, nostop, nofail, fanout = [], [], [], [], []
         for name, a in sorted(self.agents.items()):
             tools, dis = a["tools"], a["disallowed"]
             holds = any(t.startswith("mcp__") for t in tools) if tools is not None else \
@@ -518,6 +530,8 @@ class Audit:
                     direct.append(name)
             if a["pre"] and not a["stop"]:
                 nostop.append(name)
+            if a["pre"] and not a["fail"]:
+                nofail.append(name)
             for t in ("Agent", "SendMessage"):
                 if tools is not None:
                     unlimited = t in tools
@@ -538,6 +552,12 @@ class Audit:
             self.add("info", "known-gap", "Guarded agents with no Stop hook",
                      f"{', '.join(nostop)}. Their sessions never log a session end, so missing ends can't be "
                      "checked for them.", len(nostop))
+        if nofail:
+            self.add("info", "known-gap", "Guarded agents with no PostToolUseFailure hook",
+                     f"{', '.join(nofail)}. Claude Code runs PostToolUse only for calls that succeed, so their "
+                     "failed calls (auth errors, timeouts) leave no result record and show up as "
+                     "'Allowed calls with no result record'. Add a PostToolUseFailure hook running "
+                     "connector-guard fail.", len(nofail))
         if fanout:
             self.add("info", "known-gap", "Agents with unrestricted Agent or SendMessage",
                      f"{', '.join(fanout)}. They can start or message any agent, including ones that "

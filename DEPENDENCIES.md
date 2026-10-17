@@ -21,7 +21,20 @@ Support levels used below:
 | Claude Code (`claude` on the PATH) | Kit and its staff run inside it; subagents, hooks, skills, and MCP connectors are Claude Code features | The installer warns but continues if `claude` isn't on the PATH yet |
 | Python 3.8 or newer | The installer (`kit_setup.py`), every shared tool, and the connector guard hook | Standard library only, except the optional extras in section 4 |
 | git | Kit's private local history (`~/Claude/Agents/kit/.git`), `protect_folder.py` (adds its file to a repo's ignore list), the health check's history age | Kit's own repo must never get a remote |
-| A Claude Code account with subagent support | The 24 agents in `kit/agents/` | Copy them into `~/.claude/agents/` with `doctor.py --fix-agents` |
+| A Claude Code account with subagent support | The 30 agents in `kit/agents/` | Copy them into `~/.claude/agents/` with `doctor.py --fix-agents` |
+
+### Kit's command-line tools
+
+| Tool | Needs | Platforms | If missing or failing |
+|---|---|---|---|
+| `kit-pause` | Python 3.8 | Same code; `--hard` is macOS launchd only (Windows: disable the tasks in Task Scheduler) | No kill switch; stop jobs by hand |
+| `kit-backup` | Python 3.8, git | Same code; permissions set on macOS only | No backups; BACKUP_DIR unset means a folder next to Kit, which doesn't survive a lost computer |
+| `kit-retention` | Python 3.8 | Same code | Everything is kept (the default anyway) |
+| `kit-outlook` | `osascript`, `pgrep`, classic Outlook | macOS; reports "skipped" elsewhere | run.sh skips the check; calendar and mail fail the old way |
+| `kit-team` | Python 3.8 (sqlite3 is in the standard library) | Same code; owner-only permissions on macOS only | No team view; kit-publish still writes records |
+| `kit-precedent` | Python 3.8 | Same code | The precedent finder searches the indexes by hand |
+| `kit-cost` | Python 3.8; Claude Code with `--output-format json` | Same code; run.sh guard is macOS (the Windows runner doesn't record cost yet) | No ledger or budget guard; runs go ahead as before |
+| `kit-queue` | Python 3.8 | Same code | No hygiene report; the brief falls back to listing items untouched for seven days |
 
 ### macOS
 
@@ -342,6 +355,61 @@ session, including MCP connectors, minus the ones listed.
 | Other agents | None; reports to Kit, and the weekly review asks it for the weekly audit |
 | If missing | No audit log: reports "no audit logs" as a warning. Guard settings missing: a critical finding. `kit-audit` missing: says so and reviews the log by hand |
 
+### poc-lead
+
+| | |
+|---|---|
+| Setup | `poc.md`, `library.md`; `standards.md` for the security baseline |
+| Tools | All except WebSearch, WebFetch, Agent, SendMessage |
+| Skills | docx, pptx, xlsx, pdf (to read sources and vendor material) |
+| Templates | `templates/poc-charter-template.md`, `poc-test-plan-template.md`, `poc-scorecard-template.md` |
+| Other agents | Meeting scribe (vendor claims to verify), librarian, curator, decision recorder, IA writer, all through Kit |
+| If missing | `poc.md` missing or approvers and NDA owner "not set": drafts only, marked "approvers not set". No templates: uses its default layout. Vendor POC without a confirmed NDA: stops before the test plan |
+
+### training-lead
+
+| | |
+|---|---|
+| Setup | `training.md`, `library.md`; `labs.md` when a plan uses labs |
+| Tools | All except WebSearch, WebFetch, Agent, SendMessage |
+| Skills | docx, pptx, xlsx, pdf (to read sources) |
+| Other agents | Researcher (outside material), lab planner (lab steps), deck builder (slides), scheduler (study blocks), librarian, all through Kit |
+| If missing | `training.md` missing: plans for {{OWNER}} only, no team view. No learning platform: plans kept in the library |
+
+### future-tech-planner
+
+| | |
+|---|---|
+| Setup | `future-tech.md`, `library.md`; `standards.md` for standards impact |
+| Tools | All except WebSearch, WebFetch, Agent, SendMessage |
+| Skills | docx, pptx, xlsx, pdf (to read sources) |
+| Templates | `templates/radar-ballot-template.md`, `tech-lifecycle-review-template.md`, `strategy-brief-template.md` |
+| Outside systems | None directly. Configuration-management data comes from the gateway through Kit |
+| Other agents | Gateway, researcher, training lead, deck builder, curator, decision recorder, librarian, all through Kit |
+| If missing | `future-tech.md` missing or voting rule "not set": drafts ballots and reviews marked "voting rule not set", records no placements. No templates: uses its default layout |
+
+### lab-planner
+
+| | |
+|---|---|
+| Setup | `labs.md`, `library.md`; `standards.md` for the security baseline |
+| Tools | All except WebSearch, WebFetch, Agent, SendMessage |
+| Skills | docx, pptx, xlsx, pdf (to read sources) |
+| Templates | `templates/lab-runbook-template.md` |
+| Other agents | Researcher (vendor steps), POC lead (charter and test plan), librarian, all through Kit |
+| If missing | `labs.md` missing or approver "not set": drafts runbooks marked "approver not set". No template: uses its default layout |
+
+### precedent-finder
+
+| | |
+|---|---|
+| Setup | `precedent.md`, `library.md`; `standards.md` for what counts as a standard |
+| Tools | All except WebSearch, WebFetch, Agent, SendMessage |
+| Skills | docx, pptx, xlsx, pdf (to confirm a hit in a document) |
+| Commands | `python3` with `shared/bin/kit-precedent` |
+| Other agents | Intake triager and POC lead (precedents through Kit), librarian, curator, writers, all through Kit |
+| If missing | No library root: stops. `precedent.md` missing: `kit-precedent` uses its default sources. A source missing: reported and skipped. `kit-precedent` missing: searches the indexes by hand |
+
 ## 4. Optional components
 
 Install with a package manager already on the machine, pinned to a version with no known
@@ -362,6 +430,12 @@ manager is allowed.
 | Node.js + `pptxgenjs` / `docx` | The document skills' from-scratch builders | `brew install node`, then a pinned `npm install` | `winget install OpenJS.NodeJS.LTS`, then a pinned `npm install` |
 | `pywin32` | Windows mail, calendar, reminders adapters | n/a | `py -3 -m pip install pywin32==<pinned>` |
 | BurntToast | Windows toast delivery | n/a | `Install-Module BurntToast -Scope CurrentUser -RequiredVersion <pinned>` |
+
+### Shared folder for team sharing (optional)
+
+| Requirement | Used by | Notes |
+|---|---|---|
+| A shared folder every Kit can reach | kit-publish, kit-team, team dashboard | Synced SharePoint/OneDrive library, network share, or synced Dropbox/Google Drive where policy allows. Each Kit needs write access to its own `kits/<kit id>/` folder and read access to the rest |
 
 ## 5. Credentials and access (names only)
 
@@ -400,6 +474,11 @@ server, `--brief` for problems only).
 - LanguageTool and Java for `kit-grammar` (informational; absence is never a problem).
 - With `--servers`: every MCP server connects.
 - Author-specific checks (a trading token, a trading guard) that are skipped when absent.
+- Kit paused (warn while `kit-pause` is on).
+- Outlook: today's result from `kit-outlook` (warn if not responding, blocked, or an error).
+- Legal holds: lists active holds (ok; warn if the holds file can't be read).
+- Cost: this month's scheduled-run spend and projection, and the share of the budget used (warn
+  at the warning level or above).
 
 ### Gaps it doesn't check
 
@@ -427,3 +506,15 @@ The connector guard blocks the call if it hits an internal error. If the hook co
 start (for example `python3` isn't on the PATH), Claude Code treats that as a non-blocking hook
 error, so the call likely proceeds unguarded and unlogged. Check `python3` resolves in the shell
 Claude Code uses for hooks, on every machine.
+
+- connector-guard while paused: closed (every connector call denied).
+- kit-retention: closed (no rules, an unreadable file, or a held project means nothing is eligible;
+  an unreadable text file counts as held).
+- kit-backup: an archive that fails its check is kept, but older backups aren't pruned.
+- kit-team and the team dashboard: closed per record (a record that fails its schema, names the
+  wrong Kit, sits under the wrong name, or doesn't match its Kit's manifest is skipped and listed
+  in `kit-team warnings`); open per Kit with no manifest yet (shown, marked unverified).
+- Budget guard: open (no budget, an unreadable ledger, or kit-cost missing means every run goes
+  ahead; output that isn't JSON is logged as is and no cost is recorded).
+- kit-queue apply: closed (only H numbers from the saved briefs/hygiene.json, matched by title; a
+  missing item is skipped and reported; QUEUE.md is backed up before any change).

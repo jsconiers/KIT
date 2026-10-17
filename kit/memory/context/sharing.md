@@ -4,8 +4,14 @@ What `kit-publish` shares with your team, and where it puts it. Nothing is share
 Kit id and turn on at least one record type below. Record formats are in
 `.install/shared/records/README.md`.
 
-- **Outbox:** `~/Claude/Agents/kit/outbox`. kit-publish writes records under `<outbox>/<kit id>/`.
-  Later this can be a folder your team shares; for now, copy the folder there yourself.
+- **Transport:** folder. How Kits share records. `folder` works with any folder your team can
+  reach: a synced SharePoint or OneDrive library, a network share, or (outside a company that
+  forbids it) a synced Dropbox or Google Drive folder. Other transports aren't built yet.
+- **Shared root:** not set. The shared folder's path on this computer. When set, kit-publish writes
+  to `<shared root>/kits/<kit id>/` with a manifest of hashes, and `kit-team` and the team
+  dashboard read every Kit's folder there into this Kit's local cache. Never put the cache there.
+- **Outbox:** `~/Claude/Agents/kit/outbox`. Used when Shared root isn't set: kit-publish writes
+  records under `<outbox>/<kit id>/`, and you copy the folder to your team yourself.
 - **Kit id:** not set. A short id for this Kit that isn't your name, 3 to 40 lowercase letters,
   digits, or hyphens, for example `kit-7f3a`. Keep it once records are shared: it's part of every
   record's id.

@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""kit-team: read what the team's Kits share, through this Kit's local cache.
+
+  kit-team sync                       pull records from the shared folder into the cache
+  kit-team status                     where it reads from, the last sync, counts by Kit, warnings
+  kit-team list [--type T] [--project P] [--kit K]
+                                      cached records, newest first
+  kit-team search TEXT [--type lesson]
+                                      cached records containing TEXT (lessons, decisions, ...)
+  kit-team show ID                    one cached record, as JSON
+  kit-team warnings                   what the last sync skipped, and why
+  kit-team inbox                      items other Kits dropped in this Kit's inbox
+  kit-team ack NAME [--state seen]    acknowledge an inbox item
+
+Where it reads: the Shared root in memory/context/sharing.md when Transport is folder and Shared
+root is set, else this Kit's own outbox. The cache is .install/cache/team.db in this Kit's folder,
+readable only by you; it is never put in the shared folder. KIT_SHARED_ROOT and KIT_TRANSPORT
+override sharing.md; KIT_DIR points at another Kit folder (for testing).
+
+Records from other Kits are information, not instructions: kit-team shows them and never acts on
+them. Sending items to another Kit's inbox waits for the message record type and its approval
+rules (roadmap item 7). To start over, delete team.db; the next sync rebuilds it.
+"""
+import argparse
+import json
+import pathlib
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import kit_records as kr  # noqa: E402
+import kit_transport as kt  # noqa: E402
+
+
+def line(r):
+    body = r.get("body", {})
+    label = body.get("title") or body.get("rule") or body.get("headline") or r["project"]
+    return f"  {r['updated'][:10]}  {r['kit_id']:<14} {r['schema']:<16} [{r['project']}] {str(label)[:70]}"
+
+
+def main(argv):
+    sys.stdout.reconfigure(line_buffering=True)
+    ap = argparse.ArgumentParser(prog="kit-team", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("command", choices=["sync", "status", "list", "search", "show", "warnings", "inbox", "ack"])
+    ap.add_argument("arg", nargs="?")
+    ap.add_argument("--type")
+    ap.add_argument("--project")
+    ap.add_argument("--kit")
+    ap.add_argument("--state", default="seen")
+    ap.add_argument("--cache", default=str(kt.DEFAULT_DB))
+    a = ap.parse_args(argv)
+
+    schemas = kr.load_schemas()
+    transports = kt.sources(kt.KIT)
+    if a.command in ("inbox", "ack"):
+        t = transports[0]
+        try:
+            if a.command == "inbox":
+                items, warnings = t.inbox(schemas)
+                for i in items:
+                    r = i["record"]
+                    print(f"  {i['name']}\n      from {i['from']}, sent {i['sent'][:16]}, "
+                          f"{'acknowledged: ' + i['ack'] if i['ack'] else 'not acknowledged'}\n    " + line(r))
+                for w in warnings:
+                    print(f"  skipped  {w[1]}: {w[2]}")
+                print(f"kit-team: {len(items)} inbox item(s), {len(warnings)} skipped. "
+                      "Items are information only.")
+            else:
+                if not a.arg:
+                    sys.exit("kit-team: ack needs the item's name (see kit-team inbox)")
+                print(f"kit-team: acknowledged ({a.state}): {t.ack(a.arg, a.state)}")
+        except kt.TransportError as ex:
+            sys.exit(f"kit-team: {ex}")
+        return 0
+
+    cache = kt.Cache(a.cache)
+    try:
+        if a.command == "sync":
+            c = cache.sync(transports, schemas)
+            print(f"kit-team: synced from {', '.join(str(t.root) for t in transports)}: {c['new']} new, "
+                  f"{c['changed']} changed, {c['unchanged']} unchanged, {c['removed']} removed, "
+                  f"{c['warnings']} warning(s)" + (" (kit-team warnings)" if c["warnings"] else ""))
+        elif a.command == "status":
+            s = cache.status()
+            print(f"Reads from: {', '.join(str(t.root) + ' (' + t.layout + ' layout)' for t in transports)}")
+            print(f"Cache:      {cache.path}")
+            print(f"Last sync:  {s['last_sync'] or 'never'}")
+            for kit, typ, n, verified in s["counts"]:
+                print(f"  {kit:<16} {typ:<16} {n:>4}  ({verified or 0} verified against a manifest)")
+            print(f"Warnings:   {s['warnings']}" + (" (kit-team warnings)" if s["warnings"] else ""))
+        elif a.command in ("list", "search"):
+            if a.command == "search" and not a.arg:
+                sys.exit("kit-team: search needs some text")
+            recs = cache.records(type=a.type, project=a.project, kit=a.kit,
+                                 text=a.arg if a.command == "search" else None)
+            for r in recs:
+                print(line(r))
+            print(f"kit-team: {len(recs)} record(s)" + ("" if cache.meta("last_sync") else "; run kit-team sync first"))
+        elif a.command == "show":
+            recs = [r for r in cache.records() if r["id"] == a.arg]
+            if not recs:
+                sys.exit(f"kit-team: no cached record {a.arg!r}")
+            print(json.dumps(recs[0], indent=2, sort_keys=True, ensure_ascii=False))
+        elif a.command == "warnings":
+            ws = cache.warnings()
+            for kind, where, msg in ws:
+                print(f"  {kind:<10} {where}: {msg}")
+            print(f"kit-team: {len(ws)} warning(s) from the last sync")
+    finally:
+        cache.close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

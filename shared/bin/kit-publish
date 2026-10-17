@@ -7,6 +7,7 @@
   kit-publish --types lesson,decision   publish these types this run ("all" for every type)
   kit-publish --kit-dir DIR        read another Kit folder (for testing)
   kit-publish --outbox DIR         write somewhere other than the outbox in sharing.md
+  kit-publish --shared-root DIR    write to a shared folder (shared layout) instead of the outbox
 
 Settings are in <kit>/memory/context/sharing.md: outbox, Kit id, owner role, which record types
 to publish (none until you turn them on), projects to include or exclude, and classification.
@@ -15,13 +16,14 @@ memory/decisions/, and, when they exist at the library root named in library.md,
 decision records (ADRs), the knowledge base's decisions, the demand register, status reports, and
 handoff briefs. It never reads memory/personal/, and it blocks any record holding credential-shaped text.
 
-Records are validated against shared/records/schema/ and written one per file to
-<outbox>/<kit id>/<type>/<local id>.json. Unchanged records aren't rewritten, so a second run
+Records are validated against shared/records/schema/ and written one per file through
+shared/kit_transport.py: to <outbox>/<kit id>/<type>/<local id>.json, or, when Transport is folder
+and Shared root is set in sharing.md, to <shared root>/kits/<kit id>/records/<type>/<local id>.json
+with a manifest of hashes beside them. Unchanged records aren't rewritten, so a second run
 with the same input changes nothing. Exits 1 when a record was blocked or failed validation.
 """
 import argparse
 import datetime as dt
-import json
 import os
 import pathlib
 import re
@@ -29,6 +31,7 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import kit_records as kr  # noqa: E402
+import kit_transport as kt  # noqa: E402
 
 VERSION = "1.0"
 CLOSED = {"closed", "resolved", "cancelled", "canceled", "done", "complete", "completed",
@@ -526,13 +529,6 @@ def core(rec):
     return {k: v for k, v in rec.items() if k not in ("created", "updated")}
 
 
-def write_json(path, rec):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(rec, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
-    os.replace(tmp, path)
-
-
 def main(argv):
     ap = argparse.ArgumentParser(prog="kit-publish", description=__doc__.split("\n")[0])
     ap.add_argument("--dry-run", action="store_true")
@@ -540,6 +536,7 @@ def main(argv):
     ap.add_argument("--types", help="comma-separated record types, or 'all'; overrides sharing.md")
     ap.add_argument("--kit-dir", default=str(pathlib.Path.home() / "Claude/Agents/kit"))
     ap.add_argument("--outbox")
+    ap.add_argument("--shared-root")
     a = ap.parse_args(argv)
 
     kit = pathlib.Path(a.kit_dir).expanduser()
@@ -554,8 +551,15 @@ def main(argv):
     kid, role = kid or "unset", role or "unset"
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{2,39}", kid):
         sys.exit(f"kit-publish: Kit id {kid!r} must be 3-40 lowercase letters, digits, or hyphens")
-    outbox = pathlib.Path(a.outbox).expanduser() if a.outbox else cfg["outbox"]
-    home = outbox / kid
+    try:
+        shared = a.shared_root or kt.sharing_settings(kit)["shared_root"]
+        # An explicit --outbox wins; with no shared root, keep the outbox sharing.md has always named.
+        out = pathlib.Path(a.outbox).expanduser() if a.outbox else None if shared else cfg["outbox"]
+        transport = kt.for_publishing(kit, kit_id=kid, outbox=out, shared_root=a.shared_root)
+    except kt.TransportError as ex:
+        sys.exit(f"kit-publish: {ex}")
+    outbox = transport.root
+    home = transport.records_dir(kid)
     schemas = kr.load_schemas()
     notes = [] if cfg["found"] else ["no sharing.md: using defaults (publish nothing)"]
     if not types:
@@ -572,7 +576,7 @@ def main(argv):
         rec = {"schema": typ, "schema_version": VERSION, "id": f"{kid}:{typ}:{local}", "kit_id": kid,
                "owner_role": role, "project": project, "created": stamp, "updated": stamp,
                "classification": classify(cfg, project, tags), "source": source, "body": body}
-        path = home / typ / f"{local}.json"
+        path = home / typ / f"{local}.json"     # the same place transport.publish writes
         hits = kr.secret_hits("\n".join(strings(rec)))
         if hits:
             counts["blocked"] += 1
@@ -585,12 +589,7 @@ def main(argv):
             print(f"  invalid  {rec['id']}: {'; '.join(problems[:3])}")
             continue
         produced.add(path)
-        old = None
-        if path.exists():
-            try:
-                old = json.loads(path.read_text())
-            except (OSError, ValueError):
-                old = None
+        old = transport.read_path(path) if path.exists() else None
         if old and core(old) == core(rec):
             counts["unchanged"] += 1
             continue
@@ -601,19 +600,24 @@ def main(argv):
         label = body.get("title") or body.get("headline") or project
         print(f"  {state:<8} {rec['id']}  [{project}] {clean(label, 70)}")
         if not a.dry_run:
-            write_json(path, rec)
+            try:
+                transport.publish(rec)
+            except kt.TransportError as ex:
+                counts["blocked"] += 1
+                print(f"  blocked  {rec['id']}: {ex}")
 
-    stale = sorted(p for p in home.rglob("*.json") if p not in produced) if home.is_dir() else []
+    stale = sorted(p for p in transport.own_record_files() if p not in produced)
     for p in stale:
         verb = "would prune" if a.dry_run and a.prune else "pruned" if a.prune else "stale"
         print(f"  {verb:<8} {p.relative_to(outbox)}")
         if a.prune and not a.dry_run:
-            p.unlink()
-            if not any(p.parent.iterdir()):
-                p.parent.rmdir()
+            transport.remove(p)
+    if not a.dry_run and transport.finish():
+        print(f"  manifest {transport.manifest_path(kid).relative_to(outbox)}")
     for n in notes:
         print(f"  note     {n}")
-    mode = "dry run, nothing written" if a.dry_run else f"outbox {home}"
+    mode = "dry run, nothing written" if a.dry_run else \
+        f"outbox {home}" if transport.layout == "outbox" else f"shared folder {transport.kit_dir(kid)}"
     print(f"kit-publish ({mode}): {counts['new']} new, {counts['changed']} changed, "
           f"{counts['unchanged']} unchanged, {counts['blocked']} blocked, {counts['invalid']} invalid, "
           f"{counts['skipped']} excluded by project, {len(stale)} "

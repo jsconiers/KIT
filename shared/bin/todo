@@ -8,6 +8,17 @@
   todo kit Draft the agenda     add an item for Kit
   todo done 3                   check off your item 3
   todo kit done 2               check off Kit's item 2
+  todo touch 3                  mark your item 3 as looked at today (stamps "updated")
+  todo edit 3 New wording       reword your item 3 (keeps its dates and sub-items; stamps "updated")
+
+  todo sprint                   show the sprint
+  todo sprint start <name> <start> <end>   start a sprint (dates like 19-Oct or 19-Oct-2026)
+  todo sprint add <n or text> <S|M|L>      add roadmap item n (as `todo kit` numbers the roadmap's
+                                           sub-items), or any text, sized S=1, M=3, or L=5 points
+  todo sprint mark <n> <status>  set item n's status (open, in progress, blocked)
+  todo sprint done <n>          finish sprint item n (and close the roadmap item it came from)
+  todo sprint close             end the sprint: unfinished items carry over, and a summary goes
+                                to briefs/sprint-<name>.md
 
 Due dates: today, tomorrow, mon through sun, 12-Oct, 12-Oct-2026, or 2026-10-12.
 """
@@ -18,8 +29,11 @@ import re
 import subprocess
 import sys
 
-KIT = pathlib.Path.home() / "Claude/Agents/kit"
-QUEUE = KIT / "QUEUE.md"
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import kit_queue as kq  # noqa: E402  (shared/kit_queue.py)
+
+KIT = kq.KIT
+QUEUE = kq.QUEUE
 CONFIG = KIT / ".install/shared/morning/config"
 DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 FULL = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
@@ -148,6 +162,146 @@ def done(section, number):
     print(f"Done: {title}")
 
 
+def pick(section, number):
+    lines = QUEUE.read_text().splitlines()
+    found = items(lines, section)
+    if not 1 <= number <= len(found):
+        sys.exit(f"No item {number}. Run `todo` to see the numbers.")
+    return lines, found[number - 1]
+
+
+def touch(section, number):
+    lines, (i, _) = pick(section, number)
+    lines[i] = kq.stamp(lines[i], TODAY)
+    save(lines)
+    print(f"Touched: {kq.split_item(lines[i])[0]}")
+
+
+def edit(section, number, words):
+    text = " ".join(words).strip()
+    if not text:
+        sys.exit("Usage: todo edit <number> <new wording>")
+    lines, (i, _) = pick(section, number)
+    m = re.match(r"(- \[ \] )\*\*(.+?)\*\*(.*)", lines[i])
+    if m:
+        lines[i] = f"{m.group(1)}**{text}**{m.group(3)}"
+    else:
+        lines[i] = f"- [ ] **{text}**"
+    lines[i] = kq.stamp(lines[i], TODAY)
+    save(lines)
+    print(f"Edited: {text}")
+
+
+# ------------------------------------------------------------------ sprint
+
+def sprint_cmd(argv):
+    lines = QUEUE.read_text().splitlines()
+    lines = kq.ensure_sprint_section(lines)
+    sp = kq.sprint(lines)
+    cmd = argv[0].lower() if argv else "show"
+    if cmd == "show":
+        return sprint_show(sp)
+    if cmd == "start":
+        if len(argv) != 4:
+            sys.exit("Usage: todo sprint start <name> <start> <end>")
+        if sp["name"]:
+            sys.exit(f"Sprint {sp['name']} is still open; close it first: todo sprint close")
+        start, end = parse_due(argv[2]), parse_due(argv[3])
+        if not start or not end or end < start:
+            sys.exit("Give a start and an end date, end on or after start (for example 19-Oct 30-Oct).")
+        r = sp["range"]
+        carried = [kq.sprint_line(c["title"], c["size"], "open") for c in sp["carry"]]
+        body = [f"Sprint {argv[1]}: {fmt(start)} to {fmt(end)}", ""] + carried + ([""] if carried else [])
+        lines[r[0] + 1:r[1]] = [""] + body
+        save(lines)
+        return print(f"Started sprint {argv[1]}, {fmt(start)} to {fmt(end)}"
+                     + (f", with {len(carried)} carried-over item(s)" if carried else ""))
+    if not sp["name"]:
+        sys.exit("No sprint running. Start one: todo sprint start <name> <start> <end>")
+    if cmd == "add":
+        if len(argv) < 3 or argv[-1].upper() not in kq.POINTS:
+            sys.exit("Usage: todo sprint add <roadmap number or text> <S|M|L>")
+        size, what = argv[-1].upper(), " ".join(argv[1:-1])
+        tail = ""
+        if what.isdigit():
+            road = kq.roadmap_subitems(lines)
+            n = int(what)
+            if not 1 <= n <= len(road):
+                sys.exit(f"No roadmap item {n} (the roadmap has {len(road)} open items).")
+            what, tail = road[n - 1]["title"], " (roadmap)"
+        last = max([i["line"] for i in sp["items"]] or [next(i for i in range(sp["range"][0], sp["range"][1])
+                                                              if lines[i].startswith("Sprint "))])
+        lines.insert(last + 1, kq.sprint_line(what, size, "open", tail=tail))
+        save(lines)
+        return print(f"Added to sprint {sp['name']}: {what} ({size})")
+    if cmd in ("done", "mark"):
+        if len(argv) < 2 or not argv[1].isdigit():
+            sys.exit(f"Usage: todo sprint {cmd} <number>" + (" <status>" if cmd == "mark" else ""))
+        n = int(argv[1])
+        if not 1 <= n <= len(sp["items"]):
+            sys.exit(f"No sprint item {n}. Run `todo sprint` to see the numbers.")
+        it = sp["items"][n - 1]
+        if cmd == "mark":
+            status = " ".join(argv[2:]).strip().lower()
+            if status not in ("open", "in progress", "blocked"):
+                sys.exit("Status: open, in progress, or blocked (finish with: todo sprint done <n>)")
+            lines[it["line"]] = kq.sprint_line(it["title"], it["size"], status, tail=it["tail"])
+            save(lines)
+            return print(f"Sprint item {n}: {status}")
+        lines[it["line"]] = kq.sprint_line(it["title"], it["size"], f"done {fmt(TODAY)}", True, it["tail"])
+        closed = ""
+        if "(roadmap)" in it["tail"]:
+            for road in kq.roadmap_subitems(lines):
+                if road["title"] == it["title"]:
+                    p = kq.parent_line(lines, road)
+                    del lines[road["line"]]
+                    lines[p] = kq.stamp(lines[p], TODAY)
+                    kq.to_done(lines, it["title"], f"Kit, done {fmt(TODAY)} (sprint {sp['name']})")
+                    closed = "; closed it on the roadmap"
+                    break
+        save(lines)
+        return print(f"Done: {it['title']}{closed}")
+    if cmd == "close":
+        total, done_pts = kq.sprint_points(sp)
+        done_items = [i for i in sp["items"] if i["done"]]
+        left = [i for i in sp["items"] if not i["done"]]
+        summary = [f"# Sprint {sp['name']}: {fmt(sp['start'])} to {fmt(sp['end'])}", "",
+                   f"Closed {fmt(TODAY)}. Points done: {done_pts} of {total}. "
+                   f"Items done: {len(done_items)} of {len(sp['items'])}.", "", "## Done", ""]
+        summary += [f"- {i['title']} ({i['size']})" for i in done_items] or ["- none"]
+        summary += ["", "## Carried over", ""] + ([f"- {i['title']} ({i['size']}, {i['status']})" for i in left]
+                                                 or ["- none"])
+        slug = re.sub(r"[^a-z0-9]+", "-", sp["name"].lower()).strip("-") or "sprint"
+        out = KIT / "briefs" / f"sprint-{slug}.md"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text("\n".join(summary) + "\n")
+        r = sp["range"]
+        body = ["", kq.EMPTY_SPRINT, ""]
+        if left:
+            body += [f"Carry-over from {sp['name']}:"] + [
+                kq.sprint_line(i["title"], i["size"], "carried over", tail=i["tail"]) for i in left] + [""]
+        lines[r[0] + 1:r[1]] = body
+        save(lines)
+        return print(f"Closed sprint {sp['name']}: {done_pts}/{total} points, {len(left)} item(s) carried over. "
+                     f"Summary: {out}")
+    sys.exit("Usage: todo sprint [start|add|mark|done|close] ... (see todo --help)")
+
+
+def sprint_show(sp):
+    if not sp or not sp["name"]:
+        print(kq.EMPTY_SPRINT)
+        if sp and sp["carry"]:
+            print("Carried over: " + "; ".join(c["title"] for c in sp["carry"]))
+        return
+    total, done_pts = kq.sprint_points(sp)
+    left = max((sp["end"] - TODAY).days, 0)
+    print(f"\nSprint {sp['name']}: {fmt(sp['start'])} to {fmt(sp['end'])}, {left} day(s) left, "
+          f"{done_pts}/{total} points")
+    for n, it in enumerate(sp["items"], 1):
+        print(f"  {n}. [{'x' if it['done'] else ' '}] {it['title']} ({it['size']}) [{it['status']}]")
+    print()
+
+
 def main(argv):
     if not QUEUE.exists():
         sys.exit(f"Can't find {QUEUE}")
@@ -161,6 +315,14 @@ def main(argv):
         return show()
     if argv[0] in ("-h", "--help", "help"):
         return print(__doc__)
+    if argv[0].lower() == "sprint":
+        return sprint_cmd(argv[1:])
+    if argv[0].lower() == "touch":
+        if len(argv) != 2 or not argv[1].isdigit():
+            sys.exit("Usage: todo touch <number>")
+        return touch(section, int(argv[1]))
+    if argv[0].lower() == "edit" and len(argv) > 2 and argv[1].isdigit():
+        return edit(section, int(argv[1]), argv[2:])
     if argv[0].lower() == "done":
         if len(argv) != 2 or not argv[1].isdigit():
             sys.exit("Usage: todo done <number>")

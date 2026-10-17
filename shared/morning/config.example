@@ -49,3 +49,22 @@ ALLOW_TOOLS_WEEKLY=""
 # Optional: a command that prints today's events as a JSON list, for the dashboard's Today panel
 # (fields start, end, all_day, title or subject, calendar). Empty uses the macOS kitcal tool.
 CALENDAR_JSON_CMD=""
+
+# Backups (kit-backup): where archives go and how many to keep. Choose an approved location;
+# the default folder sits next to Kit on the same disk, which doesn't survive a lost computer.
+BACKUP_DIR=""
+BACKUP_KEEP="14"
+
+# Outlook check before the morning brief and weekly review (kit-outlook): seconds to wait between
+# retries, and "off" to skip it on setups without Outlook.
+OUTLOOK_RETRY_WAITS="30 90"
+OUTLOOK_CHECK="on"
+
+# Cost (kit-cost): every scheduled run records its estimated cost in .install/logs/cost.jsonl.
+# COST_BUDGET_MONTHLY is the monthly budget for scheduled runs in US dollars (empty: no budget, no
+# run is ever skipped). From COST_WARN_PCT the brief says how much is used; from COST_STOP_PCT only
+# the run kinds in COST_ESSENTIAL_MODES go ahead. Interactive sessions aren't counted.
+COST_BUDGET_MONTHLY=""
+COST_WARN_PCT="80"
+COST_STOP_PCT="95"
+COST_ESSENTIAL_MODES="morning"

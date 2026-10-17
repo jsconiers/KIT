@@ -9,6 +9,8 @@ isn't there, and say in one line which steps you skipped.
    at the very top of the brief, above everything else, with each finding and its severity, and
    make "Audit issue: " plus a one-line summary the first line of the text, before the "Kit ·"
    line. If briefs/audit-weekly.md is from the last seven days, add its headline under "Audit".
+   If this prompt ends with a "Budget:" instruction, follow it: put the budget line in the brief's
+   health section and in every short text.
 2. Read QUEUE.md, STATUS.md, and memory/personal/INDEX.md.
    - **To-dos.** From {{OWNER}}'s section, list what's overdue and what's due within three days,
      work and personal items alike, then the rest of his open items in priority order. Items
@@ -28,8 +30,16 @@ isn't there, and say in one line which steps you skipped.
    - **Pastoral care,** only if care/care-list.md exists. Read it, but don't change it. List
      follow-ups that are overdue or due today: first name, church, and the action only, with no
      diagnoses.
-   - For items untouched for seven days or more, propose a verdict (keep, drop, merge, or
-     rewrite), but don't apply it.
+   - **Queue hygiene.** Run `python3 ~/Claude/Agents/kit/.install/shared/bin/kit-queue hygiene --json`
+     (it also saves briefs/hygiene.json, which fixes the numbers). Add a "Queue hygiene" section
+     with its entries under their own numbers (H1, H2, ...): for each stale item, a proposed verdict
+     (keep, drop, rewrite, or merge into another H number or item) and a one-line reason; for each
+     likely duplicate pair, merge (first into second), drop (the first), or keep both, and why. End
+     with the trend line (added and closed per week, last few weeks) and the open-item count, and
+     the line: "To act on these, tell Kit in a session: apply verdicts H1 keep, H2 drop, H3 merge
+     into H5." Don't apply anything; Kit applies verdicts with kit-queue only in a session with
+     {{OWNER}}. If kit-queue isn't available, list items untouched for seven days or more with a
+     proposed verdict instead.
    - Refresh STATUS.md: today's date, in progress, blocked and on whom, and next. In STATUS.md,
      list anything personal (family, health, money, trading, pastoral care) only as "personal
      item," with no topic; the detail belongs in the brief and the queue.

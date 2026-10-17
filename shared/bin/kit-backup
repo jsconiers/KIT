@@ -1,0 +1,289 @@
+#!/usr/bin/env python3
+"""kit-backup: back up Kit's folder to one archive, check it, and restore it on this or a new computer.
+
+  kit-backup                         make a backup now, check it, and keep the newest BACKUP_KEEP
+  kit-backup list                    the backups in the backup folder, newest first
+  kit-backup verify [ARCHIVE]        check an archive (default: the newest): every file's checksum,
+                                     and that Kit's history restores
+  kit-backup restore ARCHIVE [--to DIR]
+                                     restore into DIR (default ~/Claude/Agents/kit), which must be
+                                     empty or not exist yet; it never overwrites anything
+
+Each backup is kit-backup-YYYYMMDD-HHMMSS.tar.gz, readable only by you, holding:
+  files/          every file in Kit's folder, committed or not (logs and caches left out)
+  repo.bundle     Kit's private git history, all branches, as a git bundle
+  MANIFEST.json   when it was made, the commit it was at, and a SHA-256 for every file
+
+Where backups go: BACKUP_DIR in .install/shared/morning/config, else ~/Claude/Agents/kit-backups.
+Point BACKUP_DIR at a location your organization approves for this data (Kit's folder holds your
+notes, briefs, and queue); a folder on the same disk only protects against mistakes, not a lost or
+broken computer. BACKUP_KEEP (default 14) sets how many backups to keep; older ones are deleted
+after a new backup checks out.
+
+To restore on a new computer: install Kit's tools, run kit-backup restore ARCHIVE --to an empty
+folder (or move the old one aside first), then rerun the installer so Claude Code finds Kit again.
+The restored history has no remote, like the original.
+"""
+import datetime
+import hashlib
+import io
+import json
+import os
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+
+KIT = pathlib.Path(os.path.expanduser(os.environ.get("KIT_DIR", "~/Claude/Agents/kit")))
+CONFIG = KIT / ".install/shared/morning/config"
+SKIP_DIRS = {".git", "__pycache__", ".install/logs"}
+SKIP_NAMES = {".DS_Store"}
+SKIP_SUFFIXES = (".pyc",)
+PATTERN = re.compile(r"^kit-backup-\d{8}-\d{6}\.tar\.gz$")
+
+
+def setting(key, default):
+    if os.environ.get(key):
+        return os.environ[key]
+    if CONFIG.exists():
+        m = re.search(rf'^{key}="([^"]*)"', CONFIG.read_text(errors="ignore"), re.M)
+        if m and m.group(1).strip():
+            return m.group(1).strip()
+    return default
+
+
+def backup_dir():
+    return pathlib.Path(os.path.expanduser(setting("BACKUP_DIR", "~/Claude/Agents/kit-backups")))
+
+
+def sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def git(*args, cwd=None, check=True):
+    r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+    if check and r.returncode != 0:
+        raise RuntimeError(f"git {' '.join(args)}: {r.stderr.strip()}")
+    return r.stdout.strip()
+
+
+def walk(root, skip_under=None):
+    """Kit's files to back up, as paths relative to root."""
+    out = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        rel_dir = pathlib.Path(dirpath).relative_to(root)
+        keep = []
+        for d in dirnames:
+            rel = (rel_dir / d).as_posix()
+            full = pathlib.Path(dirpath, d)
+            if d in SKIP_DIRS or rel in SKIP_DIRS or (skip_under and full.resolve() == skip_under):
+                continue
+            keep.append(d)
+        dirnames[:] = keep
+        for f in filenames:
+            if f in SKIP_NAMES or f.endswith(SKIP_SUFFIXES):
+                continue
+            p = pathlib.Path(dirpath, f)
+            if p.is_symlink() or not p.is_file():
+                continue
+            out.append((rel_dir / f).as_posix())
+    return sorted(out)
+
+
+def archives():
+    d = backup_dir()
+    return sorted((p for p in d.glob("kit-backup-*.tar.gz") if PATTERN.match(p.name)), reverse=True) if d.is_dir() else []
+
+
+def safe_members(tar):
+    for m in tar.getmembers():
+        name = m.name
+        if name.startswith("/") or ".." in pathlib.PurePosixPath(name).parts or not (m.isfile() or m.isdir()):
+            raise RuntimeError(f"unsafe entry in archive: {name}")
+    return tar.getmembers()
+
+
+def extract(archive, dest):
+    with tarfile.open(archive, "r:gz") as tar:
+        members = safe_members(tar)
+        if hasattr(tarfile, "data_filter"):
+            tar.extractall(dest, members=members, filter="data")
+        else:
+            tar.extractall(dest, members=members)
+
+
+def make():
+    if not KIT.is_dir():
+        sys.exit(f"kit-backup: {KIT} doesn't exist")
+    dest = backup_dir()
+    dest.mkdir(parents=True, exist_ok=True)
+    if os.name != "nt":
+        os.chmod(dest, 0o700)
+    stamp = datetime.datetime.now()
+    name = f"kit-backup-{stamp:%Y%m%d-%H%M%S}.tar.gz"
+    files = walk(KIT, skip_under=dest.resolve())
+    manifest = {"made": stamp.astimezone().isoformat(timespec="seconds"), "kit": str(KIT),
+                "files": {f: sha256(KIT / f) for f in files}, "git": None}
+    with tempfile.TemporaryDirectory() as tmp:
+        bundle = pathlib.Path(tmp, "repo.bundle")
+        if (KIT / ".git").exists() and git("rev-parse", "--verify", "-q", "HEAD", cwd=KIT, check=False):
+            git("bundle", "create", str(bundle), "--all", cwd=KIT)
+            manifest["git"] = {"head": git("rev-parse", "HEAD", cwd=KIT),
+                               "branch": git("symbolic-ref", "--short", "-q", "HEAD", cwd=KIT, check=False) or None,
+                               "bundle_sha256": sha256(bundle)}
+        part = dest / (name + ".part")
+        old = os.umask(0o077)
+        try:
+            with tarfile.open(part, "w:gz") as tar:
+                data = json.dumps(manifest, indent=1).encode()
+                info = tarfile.TarInfo("MANIFEST.json")
+                info.size, info.mode, info.mtime = len(data), 0o600, int(stamp.timestamp())
+                tar.addfile(info, io.BytesIO(data))
+                if manifest["git"]:
+                    tar.add(bundle, arcname="repo.bundle")
+                for f in files:
+                    tar.add(KIT / f, arcname=f"files/{f}", recursive=False)
+        finally:
+            os.umask(old)
+        archive = dest / name
+        part.rename(archive)
+    if os.name != "nt":
+        os.chmod(archive, 0o600)
+    problems = check(archive)
+    if problems:
+        print(f"kit-backup: made {archive}, but it didn't check out:")
+        for p in problems:
+            print("  " + p)
+        print("Older backups were kept.")
+        return 1
+    size = archive.stat().st_size
+    print(f"kit-backup: {archive} ({len(files)} files, {size / 1e6:.1f} MB), checked")
+    keep = int(setting("BACKUP_KEEP", "14") or 14)
+    for old_archive in archives()[max(keep, 1):]:
+        old_archive.unlink()
+        print(f"kit-backup: removed the old backup {old_archive.name} (keeping {keep})")
+    return 0
+
+
+def check(archive):
+    """Problems found in an archive; empty means it checks out."""
+    problems = []
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            extract(archive, tmp)
+        except (tarfile.TarError, OSError, RuntimeError) as e:
+            return [f"can't open the archive: {e}"]
+        mpath = pathlib.Path(tmp, "MANIFEST.json")
+        if not mpath.exists():
+            return ["no MANIFEST.json"]
+        manifest = json.loads(mpath.read_text())
+        for rel, digest in manifest["files"].items():
+            p = pathlib.Path(tmp, "files", rel)
+            if not p.exists():
+                problems.append(f"missing: {rel}")
+            elif sha256(p) != digest:
+                problems.append(f"checksum differs: {rel}")
+        g = manifest.get("git")
+        if g:
+            bundle = pathlib.Path(tmp, "repo.bundle")
+            if not bundle.exists() or sha256(bundle) != g["bundle_sha256"]:
+                problems.append("repo.bundle missing or changed")
+            else:
+                try:
+                    probe = pathlib.Path(tmp, "probe")
+                    git("init", "-q", "--bare", str(probe))
+                    git("fetch", "-q", str(bundle), "+refs/*:refs/*", cwd=probe)
+                    if git("cat-file", "-t", g["head"], cwd=probe) != "commit":
+                        problems.append("the bundle doesn't hold the backed-up commit")
+                except RuntimeError as e:
+                    problems.append(f"history doesn't restore: {e}")
+    return problems
+
+
+def verify(arg):
+    archive = pathlib.Path(arg).expanduser() if arg else (archives() or [None])[0]
+    if not archive or not archive.exists():
+        sys.exit("kit-backup: no backup to check")
+    problems = check(archive)
+    if problems:
+        print(f"kit-backup: {archive} has problems:")
+        for p in problems:
+            print("  " + p)
+        return 1
+    print(f"kit-backup: {archive} checks out")
+    return 0
+
+
+def restore(arg, to):
+    archive = pathlib.Path(arg).expanduser()
+    if not archive.exists():
+        sys.exit(f"kit-backup: {archive} doesn't exist")
+    dest = pathlib.Path(to).expanduser() if to else KIT
+    if dest.exists() and any(dest.iterdir()):
+        sys.exit(f"kit-backup: {dest} isn't empty, so nothing was restored. Move it aside first "
+                 f"(for example: mv {dest} {dest}.old), or pass --to an empty folder.")
+    problems = check(archive)
+    if problems:
+        sys.exit("kit-backup: the archive didn't check out, so nothing was restored:\n  " + "\n  ".join(problems))
+    with tempfile.TemporaryDirectory() as tmp:
+        extract(archive, tmp)
+        manifest = json.loads(pathlib.Path(tmp, "MANIFEST.json").read_text())
+        dest.mkdir(parents=True, exist_ok=True)
+        if os.name != "nt":
+            os.chmod(dest, 0o700)
+        src = pathlib.Path(tmp, "files")
+        for rel in manifest["files"]:
+            target = dest / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src / rel, target)
+        g = manifest.get("git")
+        if g:
+            git("init", "-q", str(dest))
+            git("fetch", "-q", "--update-head-ok", str(pathlib.Path(tmp, "repo.bundle")), "+refs/*:refs/*", cwd=dest)
+            if g.get("branch"):
+                git("symbolic-ref", "HEAD", f"refs/heads/{g['branch']}", cwd=dest)
+            else:
+                git("update-ref", "--no-deref", "HEAD", g["head"], cwd=dest)
+            git("reset", "-q", cwd=dest)   # index to HEAD; the restored files stay as they were
+            for remote in git("remote", cwd=dest).split():
+                git("remote", "remove", remote, cwd=dest)
+    print(f"kit-backup: restored {len(manifest['files'])} files"
+          + (f" and history at {g['head'][:7]}" if g else "") + f" into {dest}")
+    if dest == KIT:
+        print("Rerun the installer so Claude Code finds Kit again.")
+    return 0
+
+
+def main(argv):
+    if not argv:
+        return make()
+    cmd, rest = argv[0], argv[1:]
+    if cmd in ("-h", "--help", "help"):
+        print(__doc__)
+        return 0
+    if cmd == "list":
+        found = archives()
+        if not found:
+            print(f"kit-backup: no backups in {backup_dir()}")
+        for p in found:
+            print(f"{p.name}  {p.stat().st_size / 1e6:.1f} MB")
+        return 0
+    if cmd == "verify":
+        return verify(rest[0] if rest else None)
+    if cmd == "restore":
+        if not rest:
+            sys.exit("Usage: kit-backup restore ARCHIVE [--to DIR]")
+        to = rest[rest.index("--to") + 1] if "--to" in rest and rest.index("--to") + 1 < len(rest) else None
+        return restore(rest[0], to)
+    sys.exit(f"kit-backup: unknown command '{cmd}'. Run kit-backup --help.")
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

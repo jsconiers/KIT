@@ -1,0 +1,264 @@
+#!/usr/bin/env python3
+"""kit-retention: apply your records-retention rules to Kit's files, with legal holds that override them.
+
+  kit-retention report                 list what the rules make eligible for disposal; changes nothing
+  kit-retention dispose --yes          move the files in the last report (made within 24 hours) that
+                                       are still eligible into a dated holding folder; never deletes
+  kit-retention hold PROJECT --reason TEXT
+                                       put a project under legal hold: none of its files are ever
+                                       eligible, whatever the rules say
+  kit-retention release PROJECT        end a project's hold
+  kit-retention holds                  list active holds
+  kit-retention holds --brief          one line for the morning brief (empty when there are none)
+
+Kit's briefs, minutes, drafts, and notes may count as business records. Until you set rules from
+your organization's records policy, the rule is keep everything: report finds nothing and dispose
+moves nothing.
+
+Rules live in ~/Claude/Agents/kit/memory/context/retention.json (see retention.md next to it):
+  {"policy_source": "...", "default": "keep",
+   "rules": [{"name": "old briefs", "root": "kit", "paths": ["briefs/*.md"],
+              "older_than_days": 400, "action": "dispose"}],
+   "holding_dir": ".install/retention-holding"}
+"root" is "kit" (Kit's folder) or a folder path such as the library root. "paths" are glob
+patterns relative to the root. A file is eligible when a dispose rule matches it, it's older than
+older_than_days (by last change), and no hold covers it.
+
+A hold covers a file when the project's name is a folder in the file's path (for example
+artifacts/<project>/...) or the file is a text file that tags the project as [<project>]. The
+project "all" holds everything. Holds are kept in memory/context/legal-holds.json, and the morning
+brief and the dashboard list them.
+
+Disposal moves files to <holding_dir>/<date>/..., keeping their folders, so a mistake is undone by
+moving them back. Empty the holding folder yourself once the disposal is confirmed under your
+policy. Kit's history (.git), its install folder, and the retention files themselves are never
+eligible. Note that older versions stay in Kit's local git history; the policy owner should say
+whether that history needs the same treatment.
+"""
+import datetime
+import fnmatch
+import json
+import os
+import pathlib
+import re
+import shutil
+import sys
+
+KIT = pathlib.Path(os.path.expanduser(os.environ.get("KIT_DIR", "~/Claude/Agents/kit")))
+RULES = KIT / "memory/context/retention.json"
+HOLDS = KIT / "memory/context/legal-holds.json"
+REPORT = KIT / ".install/retention-report.json"
+NEVER = {".git", ".install"}
+TEXT = (".md", ".txt", ".json", ".csv", ".html")
+PROJECT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
+
+
+def now():
+    return datetime.datetime.now().astimezone()
+
+
+def load_rules():
+    if not RULES.exists():
+        return {"default": "keep", "rules": []}
+    cfg = json.loads(RULES.read_text())
+    cfg.setdefault("rules", [])
+    return cfg
+
+
+def load_holds():
+    return json.loads(HOLDS.read_text()) if HOLDS.exists() else {}
+
+
+def save_holds(holds):
+    HOLDS.parent.mkdir(parents=True, exist_ok=True)
+    tmp = HOLDS.with_suffix(".tmp")
+    tmp.write_text(json.dumps(holds, indent=1, sort_keys=True) + "\n")
+    tmp.replace(HOLDS)
+
+
+def root_of(rule):
+    r = rule.get("root", "kit")
+    return KIT if r == "kit" else pathlib.Path(os.path.expanduser(r))
+
+
+def holding_dir(cfg):
+    h = pathlib.Path(os.path.expanduser(cfg.get("holding_dir", ".install/retention-holding")))
+    return h if h.is_absolute() else KIT / h
+
+
+def held_by(path, rel, holds):
+    """The hold covering a file, or None."""
+    if not holds:
+        return None
+    if "all" in holds:
+        return "all"
+    parts = set(pathlib.PurePosixPath(rel).parts[:-1])
+    for project in holds:
+        if project in parts:
+            return project
+    if path.suffix.lower() in TEXT:
+        try:
+            if path.stat().st_size <= 2_000_000:
+                text = path.read_text(errors="ignore")
+                for project in holds:
+                    if f"[{project}]" in text:
+                        return project
+        except OSError:
+            return next(iter(holds))   # can't read it: treat it as held
+    return None
+
+
+def protected(path, root, cfg):
+    rel = path.relative_to(root)
+    if root == KIT and rel.parts and rel.parts[0] in NEVER:
+        return True
+    if path.resolve() in (RULES.resolve(), HOLDS.resolve()):
+        return True
+    hd = holding_dir(cfg).resolve()
+    return hd == path.resolve() or hd in path.resolve().parents
+
+
+def evaluate():
+    """(eligible, held) lists of dicts for every dispose rule."""
+    cfg, holds = load_rules(), load_holds()
+    eligible, held, seen = [], [], set()
+    for rule in cfg["rules"]:
+        if rule.get("action") != "dispose":
+            continue
+        root, days = root_of(rule), rule.get("older_than_days")
+        if not isinstance(days, int) or days < 1 or not root.is_dir():
+            continue
+        cutoff = now().timestamp() - days * 86400
+        for pattern in rule.get("paths") or []:
+            for path in sorted(root.glob(pattern)):
+                if not path.is_file() or path.is_symlink() or path in seen or protected(path, root, cfg):
+                    continue
+                seen.add(path)
+                st = path.stat()
+                if st.st_mtime >= cutoff:
+                    continue
+                rel = path.relative_to(root).as_posix()
+                item = {"path": str(path), "root": str(root), "rel": rel, "rule": rule.get("name", pattern),
+                        "mtime": st.st_mtime, "size": st.st_size}
+                h = held_by(path, rel, holds)
+                if h:
+                    held.append({**item, "hold": h})
+                else:
+                    eligible.append(item)
+    return cfg, eligible, held
+
+
+def cmd_report():
+    cfg, eligible, held = evaluate()
+    dispose_rules = [r for r in cfg["rules"] if r.get("action") == "dispose"]
+    if not dispose_rules:
+        print("kit-retention: no disposal rules are set, so everything is kept "
+              f"(set rules from your records policy in {RULES})")
+    for item in eligible:
+        age = int((now().timestamp() - item["mtime"]) // 86400)
+        print(f"eligible  {item['rel']}  ({item['rule']}, {age} days)")
+    for item in held:
+        print(f"held      {item['rel']}  (legal hold: {item['hold']})")
+    print(f"kit-retention: {len(eligible)} eligible, {len(held)} kept by legal holds. Nothing was moved.")
+    REPORT.parent.mkdir(parents=True, exist_ok=True)
+    REPORT.write_text(json.dumps({"made": now().isoformat(timespec="seconds"), "eligible": eligible}, indent=1))
+    if eligible:
+        print("To move them to the holding folder: kit-retention dispose --yes")
+    return 0
+
+
+def cmd_dispose(yes):
+    if not yes:
+        sys.exit("kit-retention: dispose needs --yes. Run kit-retention report first and read it.")
+    if not REPORT.exists():
+        sys.exit("kit-retention: no report yet; run kit-retention report first")
+    rep = json.loads(REPORT.read_text())
+    made = datetime.datetime.fromisoformat(rep["made"])
+    if (now() - made).total_seconds() > 86400:
+        sys.exit("kit-retention: the last report is more than a day old; run kit-retention report again")
+    cfg, eligible, _ = evaluate()
+    still = {e["path"]: e for e in eligible}
+    dest_root = holding_dir(cfg) / f"{now():%Y-%m-%d}"
+    moved = skipped = 0
+    for item in rep["eligible"]:
+        cur = still.get(item["path"])
+        if not cur or cur["mtime"] != item["mtime"]:
+            skipped += 1   # changed, now held, or gone since the report: leave it
+            continue
+        src = pathlib.Path(item["path"])
+        tag = "kit" if pathlib.Path(item["root"]) == KIT else pathlib.Path(item["root"]).name
+        dest = dest_root / tag / item["rel"]
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dest))
+        moved += 1
+    log = holding_dir(cfg) / "LOG.md"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with open(log, "a") as f:
+        f.write(f"- {now():%d-%b-%Y %H:%M}: moved {moved} file(s) to {dest_root.name}/ under the retention rules; "
+                f"{skipped} skipped\n")
+    REPORT.unlink()
+    print(f"kit-retention: moved {moved} file(s) to {dest_root}; {skipped} skipped because they changed, "
+          "came under a hold, or were gone. To undo, move them back.")
+    return 0
+
+
+def cmd_hold(project, reason):
+    if not PROJECT.match(project):
+        sys.exit("kit-retention: a project name is letters, digits, dots, hyphens, or underscores")
+    if not reason:
+        sys.exit("kit-retention: a hold needs --reason, for example the matter or who asked")
+    holds = load_holds()
+    holds[project] = {"since": f"{now():%d-%b-%Y}", "reason": reason}
+    save_holds(holds)
+    print(f"kit-retention: {project} is under legal hold ({reason}). None of its files will be disposed of.")
+    return 0
+
+
+def cmd_release(project):
+    holds = load_holds()
+    if project not in holds:
+        sys.exit(f"kit-retention: {project} isn't under hold")
+    del holds[project]
+    save_holds(holds)
+    print(f"kit-retention: the hold on {project} has ended; its files follow the normal rules again")
+    return 0
+
+
+def cmd_holds(brief):
+    holds = load_holds()
+    if brief:
+        if holds:
+            print("; ".join(f"{p} (since {h.get('since', '?')})" for p, h in sorted(holds.items())))
+        return 0
+    if not holds:
+        print("kit-retention: no legal holds")
+    for p, h in sorted(holds.items()):
+        print(f"{p}: since {h.get('since', '?')}, {h.get('reason', '')}")
+    return 0
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(__doc__)
+        return 0
+    cmd, rest = argv[0], argv[1:]
+    if cmd == "report":
+        return cmd_report()
+    if cmd == "dispose":
+        return cmd_dispose("--yes" in rest)
+    if cmd == "hold":
+        if not rest:
+            sys.exit("Usage: kit-retention hold PROJECT --reason TEXT")
+        reason = " ".join(rest[rest.index("--reason") + 1:]) if "--reason" in rest else ""
+        return cmd_hold(rest[0], reason.strip())
+    if cmd == "release":
+        if not rest:
+            sys.exit("Usage: kit-retention release PROJECT")
+        return cmd_release(rest[0])
+    if cmd == "holds":
+        return cmd_holds("--brief" in rest)
+    sys.exit(f"kit-retention: unknown command '{cmd}'. Run kit-retention --help.")
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

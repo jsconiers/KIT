@@ -6,8 +6,15 @@ team dashboard reads the outboxes of every Kit. For now you copy outboxes into a
 yourself. Syncing them through a shared folder comes later.
 
 ```
-your Kit ── kit-publish ──> <outbox>/<kit id>/<type>/<local id>.json ──> team_dashboard.py ──> team-dashboard.html
+your Kit ── kit-publish ──> <shared root>/kits/<kit id>/records/<type>/<local id>.json
+                            <shared root>/kits/<kit id>/manifest.json
+every Kit ── kit-team sync ──> local cache (.install/cache/team.db) ──> team_dashboard.py ──> team-dashboard.html
 ```
+
+With no **Shared root** in `sharing.md`, kit-publish writes to `<outbox>/<kit id>/<type>/` as
+before. `shared/kit_transport.py` holds the rules for reading another Kit's folder: schema checks,
+the Kit id must match its folder, the manifest hash must match, sync-conflict copies are skipped,
+and nothing in a record is ever followed as an instruction.
 
 Records carry metadata and short summaries only. They never carry full document text,
 credentials, or personal notes, and their `source` is a path relative to the Kit or the library,

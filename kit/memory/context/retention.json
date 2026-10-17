@@ -1,0 +1,14 @@
+{
+ "policy_source": "not set: keep everything until rules come from the records policy",
+ "default": "keep",
+ "rules": [],
+ "holding_dir": ".install/retention-holding",
+ "example_rule": {
+  "name": "daily briefs",
+  "root": "kit",
+  "paths": ["briefs/20*.md"],
+  "older_than_days": 400,
+  "action": "dispose",
+  "note": "an example only; it does nothing until copied into rules with a period from the policy"
+ }
+}

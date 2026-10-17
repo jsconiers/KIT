@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+"""kit-outlook: check that classic Outlook answers before a run relies on it, retrying if it's slow.
+
+  kit-outlook                       check once now and say what's wrong, if anything
+  kit-outlook check                 the same
+  kit-outlook check --retry         if Outlook doesn't respond, wait and try again (30 s, then 90 s)
+  kit-outlook check --write FILE    also write the result to FILE (the scheduled runs use
+                                    briefs/outlook.txt, which the brief and doctor.py read)
+  kit-outlook status FILE           print the result a run last wrote
+
+It never starts, quits, or restarts Outlook. If Outlook isn't running, it says so and stops. If
+Outlook is running but doesn't answer (AppleEvent timeout, error -1712), it retries; if Outlook
+still doesn't answer, the brief marks its calendar and mail sections stale and asks you to restart
+Outlook. Change the waits with OUTLOOK_RETRY_WAITS in .install/shared/morning/config, in seconds,
+for example OUTLOOK_RETRY_WAITS="30 90".
+
+The result file has one line: a status word, the time, and a plain message. Status words:
+  ok              Outlook answered
+  not-running     Outlook isn't open; nothing was started
+  not-responding  Outlook is open but didn't answer, even after the retries
+  blocked         macOS blocked Kit from controlling Outlook (Automation permission)
+  error           something else went wrong; the message says what
+  skipped         not macOS (the Windows runs talk to Outlook through COM instead)
+
+Exit status: 0 for ok or skipped, 1 for anything else.
+"""
+import datetime
+import os
+import pathlib
+import re
+import subprocess
+import sys
+import time
+
+KIT = pathlib.Path(os.path.expanduser(os.environ.get("KIT_DIR", "~/Claude/Agents/kit")))
+CONFIG = KIT / ".install/shared/morning/config"
+BUNDLE = "com.microsoft.Outlook"
+PROCESS = "Microsoft Outlook"
+DEFAULT_WAITS = [30, 90]
+# Asks Outlook for its version, only if it's already running, and gives up after 20 seconds.
+PROBE = f'''
+if application id "{BUNDLE}" is running then
+  with timeout of 20 seconds
+    tell application id "{BUNDLE}" to get version
+  end timeout
+else
+  return "NOT-RUNNING"
+end if
+'''
+RESTART = "Outlook didn't respond; restart Outlook, then ask Kit to redo the calendar and mail."
+
+
+def waits():
+    raw = os.environ.get("OUTLOOK_RETRY_WAITS")
+    if raw is None and CONFIG.exists():
+        m = re.search(r'^OUTLOOK_RETRY_WAITS="([^"]*)"', CONFIG.read_text(errors="ignore"), re.M)
+        raw = m.group(1) if m else None
+    if raw is None:
+        return DEFAULT_WAITS
+    return [int(w) for w in raw.split() if w.isdigit()]
+
+
+def running():
+    return subprocess.run(["pgrep", "-x", PROCESS], capture_output=True).returncode == 0
+
+
+def probe():
+    """One try. Returns (status, message)."""
+    if not running():
+        return "not-running", "Outlook isn't open, so Kit didn't use it. Open classic Outlook if you want calendar and mail."
+    try:
+        p = subprocess.run(["osascript", "-"], input=PROBE, capture_output=True, text=True, timeout=40)
+    except subprocess.TimeoutExpired:
+        return "not-responding", RESTART
+    out, err = p.stdout.strip(), p.stderr.strip()
+    if p.returncode == 0:
+        if out == "NOT-RUNNING":
+            return "not-running", "Outlook closed during the check, so Kit didn't use it."
+        return "ok", f"Outlook {out} answered."
+    if "-1712" in err or "timed out" in err.lower():
+        return "not-responding", RESTART
+    if "-1743" in err or "Not authorized" in err:
+        return "blocked", ("macOS blocked Kit from controlling Outlook. Allow it in System Settings > "
+                           "Privacy & Security > Automation.")
+    if "-600" in err:
+        return "not-running", "Outlook isn't open, so Kit didn't use it."
+    return "error", "Outlook check failed: " + " ".join(err.split())[:160]
+
+
+def check(retry):
+    status, msg = probe()
+    tries = 1
+    if retry:
+        for w in waits():
+            if status != "not-responding":
+                break
+            time.sleep(w)
+            status, msg = probe()
+            tries += 1
+    if status == "not-responding" and tries > 1:
+        msg = f"{msg} (no answer after {tries} tries)"
+    return status, msg
+
+
+def main(argv):
+    args = list(argv)
+    cmd = args.pop(0) if args and not args[0].startswith("-") else "check"
+    if cmd in ("-h", "--help", "help"):
+        print(__doc__)
+        return 0
+    if cmd == "status":
+        if not args:
+            sys.exit("Usage: kit-outlook status FILE")
+        f = pathlib.Path(args[0]).expanduser()
+        print(f.read_text().strip() if f.exists() else "no result yet")
+        return 0
+    if cmd != "check":
+        sys.exit(f"kit-outlook: unknown command '{cmd}'. Run kit-outlook --help.")
+    retry = "--retry" in args
+    out = None
+    if "--write" in args:
+        i = args.index("--write")
+        if i + 1 >= len(args):
+            sys.exit("kit-outlook: --write needs a file")
+        out = pathlib.Path(args[i + 1]).expanduser()
+    if sys.platform != "darwin":
+        status, msg = "skipped", "not macOS; Outlook is checked another way here."
+    else:
+        status, msg = check(retry)
+    line = f"{status} {datetime.datetime.now():%Y-%m-%d %H:%M} {msg}"
+    if out:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(line + "\n")
+    print(line)
+    return 0 if status in ("ok", "skipped") else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

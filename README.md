@@ -20,6 +20,15 @@ shared/              Cross-platform Python + assets:
   kit_setup.py         install/activate/deactivate logic
   bin/todo             command-line to-do that shares QUEUE.md
   bin/kit-settings     how briefs reach you and which app to-dos sync with, work and personal
+  bin/kit-update       update from GitHub: shows what's new, then moves the clone and reinstalls
+  bin/kit-pause        kill switch: stop scheduled runs and connector calls, and resume them
+  bin/kit-backup       back up Kit's folder (files and history), check it, and restore it
+  bin/kit-retention    records retention rules with legal holds; reports, never deletes on its own
+  bin/kit-outlook      check Outlook answers before a run, retrying if it's slow; never starts it
+  bin/kit-team         read what the team's Kits share, through a local cache: sync, list, search, inbox
+  bin/kit-precedent    search the library's indexes and registers for precedent, ranked, with file and line
+  bin/kit-cost         what Kit's scheduled runs cost, against a monthly budget; skips extras near it
+  bin/kit-queue        queue hygiene: stale items, likely duplicates, the weekly trend; applies verdicts you approve
   bin/connector-guard  read-only guard and audit log for agents that reach outside systems
   bin/vsdx-finish      fills in title blocks and builds legends in Visio diagrams
   bin/kit-grammar      optional offline spelling and grammar pass (LanguageTool), skipped if absent
@@ -67,7 +76,9 @@ KIT_OWNER=Alex bash install.sh
 start `claude`, run `/context` to confirm `KIT.md` loaded, and say "Kit, introduce yourself."
 
 The installer asks how you want the morning brief delivered and which app your to-dos sync with
-(see Settings below), and puts `todo` and `kit-settings` in `~/.local/bin`. The optional scheduled
+(see Settings below), and puts `todo`, `kit-settings`, `kit-update`, `kit-pause`, `kit-backup`, `kit-retention`,
+`kit-outlook`, `kit-team`, `kit-precedent`, `kit-cost`, and `kit-queue` in
+`~/.local/bin`. The optional scheduled
 runs (morning brief, post-open market read, weekly review) install as launchd jobs from
 `platform/mac/morning/`. The market reads in the prompts call the author's own MCP server — edit
 or remove those steps to fit your tools.
@@ -118,6 +129,46 @@ running with your work account; Kit never starts Outlook and never sends mail. O
 `python %USERPROFILE%\Claude\Agents\kit\.install\shared\bin\kit-settings`; Windows uses Outlook
 for to-dos.
 
+**Updating.** `kit-update` fetches GitHub and shows the new commits and files without changing
+anything; `kit-update --apply` saves a backup branch, moves your clone onto GitHub's main, and
+reruns the installer. It stops if your clone has uncommitted work or commits GitHub doesn't have.
+
+**Pausing, backups, and retention.** `kit-pause <reason>` stops every scheduled run and every
+connector call until `kit-pause resume`; add `--hard` to unload the launchd jobs too (it shows the
+commands and needs `--yes`). `kit-backup` writes a checked archive of Kit's folder and history to
+BACKUP_DIR; `kit-backup restore <archive> --to <empty folder>` brings it back. `kit-retention`
+keeps everything until you set rules from your records policy in
+`memory/context/retention.json`; legal holds (`kit-retention hold <project> --reason ...`) override
+every rule and show in the brief and on the dashboard. Before the morning brief and weekly
+review, `kit-outlook` checks Outlook answers and retries; if it still doesn't, the brief marks
+calendar and mail stale and asks you to restart Outlook.
+
+**Cost.** Every scheduled run records its estimated cost (Claude Code's own figure, not your bill)
+in `.install/logs/cost.jsonl`; `kit-cost` shows this month's spend, the projection, and the
+costliest runs, and `kit-cost report` breaks a month down by run kind and day. Set
+COST_BUDGET_MONTHLY in the config to add a budget: from COST_WARN_PCT the brief says how much is
+used, and from COST_STOP_PCT only the morning brief (COST_ESSENTIAL_MODES) runs. Interactive
+sessions aren't counted; see those with /cost and /usage in Claude Code.
+
+**Keeping the queue short.** `todo` stamps "updated" on an item whenever it changes it, and
+`todo touch <n>` marks one as looked at. Each morning the brief lists stale items (untouched for
+seven days) and likely duplicates as H1, H2, ... with a proposed verdict; reply in a session with
+"apply verdicts H1 keep, H2 drop, H3 merge into H5" and Kit runs `kit-queue apply`, which backs up
+QUEUE.md first. **Sprints.** `todo sprint start <name> <start> <end>` opens a sprint in QUEUE.md's
+Sprint section; `todo sprint add <roadmap number or text> <S|M|L>` adds items (S=1, M=3, L=5
+points); `todo sprint done <n>` finishes one and closes its roadmap item; `todo sprint close`
+carries unfinished items over and writes `briefs/sprint-<name>.md`. The dashboard shows a Sprint
+panel with a burndown, the daily work list proposes sprint items first, and the weekly review
+proposes the next sprint when one ends.
+
+**Sharing with your team.** Set **Shared root** in `memory/context/sharing.md` to a folder every
+architect's Kit can reach (a synced SharePoint or OneDrive library, a network share, or a synced
+Dropbox folder where allowed). `kit-publish` then writes this Kit's records to
+`<shared root>/kits/<kit id>/` with a manifest of hashes, `kit-team sync` pulls every Kit's records
+into a local cache, and the team dashboard renders from that cache. Records from other Kits are
+checked (schema, Kit id, manifest hash) and shown as information only. Without a Shared root,
+kit-publish writes to the outbox as before.
+
 ## Kit's staff
 
 `kit/agents/` holds Kit's staff, Claude Code subagents that Kit directs: a researcher, a
@@ -125,7 +176,8 @@ librarian, a curator, an IA writer and a GDS writer, a reviewer, a diagrammer, a
 demand tracker, a connector gateway, an intake triager, a dependency mapper, a status reporter,
 an implementation planner, a deck builder, a handoff agent, a meeting scribe, a standards
 checker, a risk and compliance mapper, a cost estimator, a change board prep agent, a decision
-recorder, a PMO estimator, an onboarding guide, and an auditor. They work
+recorder, a PMO estimator, an onboarding guide, a POC lead, a training lead, a future tech planner, a lab
+planner, a precedent finder, and an auditor. They work
 through Kit, apart from a few direct pairings listed in `memory/context/agents.md`. The gateway
 is the agent meant to reach outside systems: `shared/bin/connector-guard` runs as a hook on it
 to keep connectors read-only and record every request in an audit log.

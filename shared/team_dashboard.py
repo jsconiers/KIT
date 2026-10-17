@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Build the team dashboard: one read-only HTML page from the records several Kits publish.
 
-  python3 ~/Claude/Agents/kit/.install/shared/team_dashboard.py              from this Kit's outbox
+  python3 ~/Claude/Agents/kit/.install/shared/team_dashboard.py              sync, then render the cache
+  python3 ~/Claude/Agents/kit/.install/shared/team_dashboard.py --no-sync    render the cache as it is
   python3 ~/Claude/Agents/kit/.install/shared/team_dashboard.py --source DIR --source DIR2
   python3 ~/Claude/Agents/kit/.install/shared/team_dashboard.py --out page.html --open
 
-Each --source is a folder of records from bin/kit-publish (searched recursively, one record per
-.json file). The page shows status snapshots by project, open waiting items and demand roll-ups,
+By default it pulls records from the shared folder in sharing.md (or, with no Shared root, this
+Kit's outbox) into the local cache (.install/cache/team.db, see shared/kit_transport.py), then
+renders the page from the cache. Each --source instead reads a folder directly: a shared folder
+(one with a kits/ folder) is read through the transport's checks; any other folder is searched
+recursively, one record per .json file. The page shows status snapshots by project, open waiting items and demand roll-ups,
 recent decisions, shared lessons, artifact and handoff pointers, how old each Kit's latest record
 is, and warnings for records it couldn't accept. Filters by project and Kit need JavaScript;
 without it, everything shows. No external assets. Default output:
@@ -29,9 +33,10 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import kit_records as kr  # noqa: E402
 import kit_template  # noqa: E402
+import kit_transport as kt  # noqa: E402
 
 HOME = pathlib.Path.home()
-KIT = HOME / "Claude/Agents/kit"
+KIT = kt.KIT
 OUT = KIT / "team-dashboard.html"
 NOW = dt.datetime.now(dt.timezone.utc)
 TODAY = dt.date.today()
@@ -39,42 +44,23 @@ MAX_BYTES = 256 * 1024
 e = html.escape
 
 
-def default_source():
-    m = re.search(r"^- \*\*Outbox:\*\*\s*`([^`]+)`", (KIT / "memory/context/sharing.md").read_text()
-                  if (KIT / "memory/context/sharing.md").exists() else "", re.M)
-    return pathlib.Path(os.path.expanduser(m.group(1))) if m else KIT / "outbox"
-
-
 # ---------- loading ----------
 
-def accept(rec, schemas):
-    """(ok, warning or ''). Current and previous majors are accepted; a newer minor is read leniently."""
-    t, ver = rec.get("schema"), kr.split_version(rec.get("schema_version", ""))
-    if t not in schemas or not ver:
-        return False, f"unknown record type or version ({t!r} {rec.get('schema_version')!r})"
-    current = max(schemas[t])
-    (cmaj, cmin), _ = schemas[t][current]
-    if ver[0] > cmaj:
-        return False, f"{t} {ver[0]}.{ver[1]} is newer than this dashboard ({cmaj}.{cmin}); update it"
-    if ver[0] < cmaj - 1:
-        return False, f"{t} {ver[0]}.{ver[1]} is too old (this dashboard reads {cmaj - 1}.x and {cmaj}.x)"
-    if ver[0] not in schemas[t]:
-        return False, f"{t} {ver[0]}.{ver[1]}: no schema kept for that major version"
-    known_minor = schemas[t][ver[0]][0][1]
-    lenient = ver[1] > known_minor
-    problems = kr.validate(rec, schemas, lenient=lenient)
-    if problems:
-        return False, "invalid: " + "; ".join(problems[:3])
-    if lenient:
-        return True, f"{t} {ver[0]}.{ver[1]} is newer than {ver[0]}.{known_minor}; extra fields ignored"
-    if ver[0] < cmaj:
-        return True, f"{t} {ver[0]}.{ver[1]} is the previous major version; ask its Kit to update"
-    return True, ""
+accept = kr.accept   # the version rules live in kit_records, shared with kit_transport
 
 
 def load(sources, schemas):
     recs, warnings = {}, []
     for src in sources:
+        if (src / "kits").is_dir():
+            got, warns = kt.FolderTransport(src, layout="shared").scan(schemas)
+            warnings += warns
+            for rec, _ in got:
+                prev = recs.get(rec["id"])
+                if prev and kr.parse_iso(prev["updated"]) >= kr.parse_iso(rec["updated"]):
+                    continue
+                recs[rec["id"]] = rec
+            continue
         if not src.is_dir():
             warnings.append(("source", str(src), "folder not found"))
             continue
@@ -353,7 +339,9 @@ def page(recs, warnings, sources, stale_days):
 
 def main(argv):
     ap = argparse.ArgumentParser(prog="team_dashboard.py", description=__doc__.split("\n")[0])
-    ap.add_argument("--source", action="append", help="record folder (repeatable); default this Kit's outbox")
+    ap.add_argument("--source", action="append", help="record folder to read directly (repeatable)")
+    ap.add_argument("--cache", default=str(kt.DEFAULT_DB), help="the local cache to sync and render from")
+    ap.add_argument("--no-sync", action="store_true", help="render the cache without pulling first")
     ap.add_argument("--out", default=str(OUT))
     ap.add_argument("--open", action="store_true")
     ap.add_argument("--stale-days", type=int, default=7, help="mark a Kit stale after this many days")
@@ -361,8 +349,18 @@ def main(argv):
     a = ap.parse_args(argv)
     global TEMPLATE_ARG
     TEMPLATE_ARG = a.template
-    sources = [pathlib.Path(s).expanduser() for s in a.source] if a.source else [default_source()]
-    recs, warnings = load(sources, kr.load_schemas())
+    schemas = kr.load_schemas()
+    if a.source:
+        sources = [pathlib.Path(s).expanduser() for s in a.source]
+        recs, warnings = load(sources, schemas)
+    else:
+        cache = kt.Cache(a.cache)
+        transports = kt.sources(KIT)
+        if not a.no_sync:
+            cache.sync(transports, schemas)
+        recs, warnings = cache.records(), cache.warnings()
+        sources = [t.root for t in transports]
+        cache.close()
     out = pathlib.Path(a.out).expanduser()
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(page(recs, warnings, sources, a.stale_days))

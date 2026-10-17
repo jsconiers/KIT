@@ -2,7 +2,7 @@
 <!-- Kit dashboard template (default). Copy it to ~/Claude/Agents/kit/templates/dashboard.html to
      change the look; your copy wins and survives reinstalls. Placeholders: $$now_iso $$now_text
      $$audit_banner $$hero $$lane_you $$lane_kit $$lane_wait $$schedule $$briefs $$health_checks $$runs_head
-     $$runs_rows $$audit $$staff. Write a literal dollar sign as $$$$. Keep it self-contained: no
+     $$runs_rows $$sprint $$audit $$staff. Write a literal dollar sign as $$$$. Keep it self-contained: no
      outside fonts, scripts, or images. -->
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -100,6 +100,7 @@ $lane_wait
 <table aria-label="Scheduled runs, last seven days"><thead><tr><th></th>$runs_head</tr></thead><tbody>$runs_rows</tbody></table>
 </section>
 </div>
+<section class="panel" aria-labelledby="p-sprint"><h2 id="p-sprint">Sprint</h2>$sprint</section>
 <section class="panel" aria-labelledby="p-audit"><h2 id="p-audit">Audit</h2>$audit</section>
 <section class="panel" aria-labelledby="p-staff"><h2 id="p-staff">Kit's staff</h2><ul class="staff">$staff</ul></section>
 </main>

@@ -1,0 +1,23 @@
+{
+  "body": {
+    "decided": "2026-10-01",
+    "options": [
+      "shared folder, wiki, database."
+    ],
+    "origin": "decision-note",
+    "revisit": "01-Jan-2027",
+    "sources": [],
+    "status": "current",
+    "summary": "share records through a synced folder.",
+    "title": "Use a shared folder for Kit records",
+    "why": "least new infrastructure."
+  },
+  "classification": "internal",
+  "id": "kit-fixture:decision:2026-10-01-use-folder-transport",
+  "kit_id": "kit-fixture",
+  "owner_role": "solutions architect",
+  "project": "general",
+  "schema": "decision",
+  "schema_version": "1.0",
+  "source": "kit:memory/decisions/2026-10-01-use-folder-transport.md"
+}

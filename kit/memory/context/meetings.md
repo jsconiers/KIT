@@ -9,3 +9,5 @@ What the meeting scribe uses. It reads this before every job, so keep it current
 - **Project managers:** optional. Who manages each project, so the scribe can find their notes in
   email.
 - **Mail:** optional. The command that searches mail (read-only), and the one that creates drafts.
+- **Vendor meeting template:** `~/Claude/Agents/kit/templates/vendor-meeting-template.md`, an
+  example to adapt. Point here to your team's own if it has one.
