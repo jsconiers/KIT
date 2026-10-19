@@ -120,5 +120,45 @@ doc.KIT = pathlib.Path(sys.argv[2]); doc.results.clear(); doc.check_cost()
 assert doc.results and doc.results[0][1] == "Cost" and "% of $100 budget" in doc.results[0][2], doc.results
 EOF
 
+# ---- cost by model ---------------------------------------------------------------------------------
+export KIT_COST_TODAY="2026-03-15"
+rm -f "$LEDGER"; printf 'OUTLOOK_CHECK="off"\n' > "$CONF"
+cat > "$S/mu.json" <<'JSON'
+{"type":"result","result":"done","total_cost_usd":1.30,"usage":{"input_tokens":10,"output_tokens":5},
+ "modelUsage":{"claude-opus-5-5":{"inputTokens":900,"outputTokens":400,"cacheReadInputTokens":1000,
+   "cacheCreationInputTokens":50,"costUSD":1.20},
+  "claude-haiku-5-5":{"inputTokens":300,"outputTokens":90,"cacheReadInputTokens":0,
+   "cacheCreationInputTokens":0,"costUSD":0.10}}}
+JSON
+python3 "$BIN/kit-cost" record --mode morning --rc 0 --json-file "$S/mu.json" --log "$S/m.log"
+python3 - "$LEDGER" <<'PY' && ok "record: per-model cost and tokens, primary model is the costliest" || bad "record models"
+import json, sys
+r = json.loads(open(sys.argv[1]).read().splitlines()[-1])
+assert r["model"] == "claude-opus-5-5", r["model"]
+assert r["models"]["claude-haiku-5-5"]["cost_usd"] == 0.10 and r["models"]["claude-opus-5-5"]["output_tokens"] == 400, r["models"]
+PY
+grep -q "(claude-opus-5-5)" "$S/m.log" && ok "record: log line names the model" || bad "record log model"
+echo '{"date":"2026-03-02T08:00:00","mode":"morning","cost_usd":0.5}' >> "$LEDGER"
+python3 "$BIN/kit-cost" record-usage --source delegate --provider local-ollama --model llama3 --input 100 --output 20 >/dev/null
+python3 "$BIN/kit-cost" record-usage --source kit-run --provider approved-api --model gpt-x --cost 0.25 >/dev/null
+python3 "$BIN/kit-cost" report --json > "$S/rep.json"
+python3 - "$S/rep.json" <<'PY' && ok "report: by_model sums per model, old lines are 'unknown', unpriced counted" || bad "report by_model"
+import json, sys
+d = json.load(open(sys.argv[1]))
+bm = d["by_model"]
+assert abs(bm["claude-opus-5-5"]["spend_usd"] - 1.2) < 1e-9, bm
+assert bm["unknown"]["spend_usd"] == 0.5, bm
+assert bm["llama3"]["unpriced"] == 1 and bm["llama3"]["spend_usd"] == 0, bm
+assert bm["gpt-x"]["spend_usd"] == 0.25, bm
+assert d["by_mode"]["delegate"]["runs"] == 1 and d["by_mode"]["kit-run"]["runs"] == 1, d["by_mode"]
+PY
+txt=$(python3 "$BIN/kit-cost" report --by model)
+echo "$txt" | grep -q "By model:" && ! echo "$txt" | grep -q "By day:" && echo "$txt" | grep -q "llama3.*1 not priced" \
+  && ok "report --by model: only the model table, unpriced marked" || bad "report --by model"
+python3 "$BIN/kit-cost" | grep -q "^By model: claude-opus-5-5" && ok "summary: top models line" || bad "summary models"
+python3 "$BIN/kit-cost" record-usage --source bogus --provider p --model m >/dev/null 2>&1 \
+  && bad "record-usage accepts an unknown source" || ok "record-usage: unknown source refused"
+unset KIT_COST_TODAY
+
 echo "kit-cost tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

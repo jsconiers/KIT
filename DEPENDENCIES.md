@@ -33,8 +33,15 @@ Support levels used below:
 | `kit-outlook` | `osascript`, `pgrep`, classic Outlook | macOS; reports "skipped" elsewhere | run.sh skips the check; calendar and mail fail the old way |
 | `kit-team` | Python 3.8 (sqlite3 is in the standard library) | Same code; owner-only permissions on macOS only | No team view; kit-publish still writes records |
 | `kit-precedent` | Python 3.8 | Same code | The precedent finder searches the indexes by hand |
-| `kit-cost` | Python 3.8; Claude Code with `--output-format json` | Same code; run.sh guard is macOS (the Windows runner doesn't record cost yet) | No ledger or budget guard; runs go ahead as before |
+| `kit-cost` | Python 3.8; Claude Code with `--output-format json` (uses its `modelUsage` for cost by model) | Same code; run.sh guard is macOS (the Windows runner doesn't record cost yet) | No ledger or budget guard; runs go ahead as before |
 | `kit-queue` | Python 3.8 | Same code | No hygiene report; the brief falls back to listing items untouched for seven days |
+| `kit-version` | Python 3.8; git for the GitHub comparison | Same code | No version report; `.install/VERSION.json` still records each install |
+| `kit-models` | Python 3.8 | Same code | Every agent keeps the model in its file (inherit by default) and runs use Claude Code's default |
+| `kit-labcheck` | Python 3.8 | Same code | The lab planner reads requests and runbooks against the data rule by hand |
+| `kit-metrics` | Python 3.8 | Same code (opens the page with the platform's opener) | No metrics page; the data files are still kept |
+| `kit-project` | Python 3.8 | Same code | Create project folders by hand from `memory/context/project-types.md` |
+| `kit-delegate` | Python 3.8; a provider's API reachable, and its credential by env-var or Keychain name | Same code; Keychain on macOS only (Windows: env var) | No delegate tool; Claude Code agents keep their own model |
+| `kit-run` | Python 3.8; as kit-delegate | Same code; experimental | Agents run only inside Claude Code |
 
 ### macOS
 
@@ -393,6 +400,7 @@ session, including MCP connectors, minus the ones listed.
 | | |
 |---|---|
 | Setup | `labs.md`, `library.md`; `standards.md` for the security baseline |
+| Commands | `python3` with `shared/bin/kit-labcheck` |
 | Tools | All except WebSearch, WebFetch, Agent, SendMessage |
 | Skills | docx, pptx, xlsx, pdf (to read sources) |
 | Templates | `templates/lab-runbook-template.md` |
@@ -454,6 +462,10 @@ Kit never stores credentials in its notes, and the gateway never asks for, reads
 
 A failed sign-in can count against a shared account: the gateway stops after one failure.
 
+- `ANTHROPIC_API_KEY` (environment variable name), only for direct calls by kit-delegate and
+  kit-run on the Anthropic provider; Claude Code's own sign-in is separate.
+- A provider's `credential_env` or `keychain_entry`, as named in models.json.
+
 ## 6. Check it
 
 Run `python3 ~/Claude/Agents/kit/.install/shared/doctor.py` (add `--servers` to start each MCP
@@ -479,6 +491,11 @@ server, `--brief` for problems only).
 - Legal holds: lists active holds (ok; warn if the holds file can't be read).
 - Cost: this month's scheduled-run spend and projection, and the share of the budget used (warn
   at the warning level or above).
+- Kit version: the installed version and commit, and a warning when the repo clone is at a
+  different commit than the install.
+- Models: models.json is valid and the agents' `model:` lines match it (warn on drift).
+- Direct model calls: enabled_phase, which providers kit-delegate and kit-run may reach, and
+  whether each one's credential is named (never reads a Keychain value).
 
 ### Gaps it doesn't check
 
@@ -518,3 +535,14 @@ Claude Code uses for hooks, on every machine.
   ahead; output that isn't JSON is logged as is and no cost is recorded).
 - kit-queue apply: closed (only H numbers from the saved briefs/hygiene.json, matched by title; a
   missing item is skipped and reported; QUEUE.md is backed up before any change).
+- kit-models apply: closed (any config error means nothing is written; refused profiles fall back to
+  a Claude profile, never to an unapproved provider).
+- kit-labcheck: a first-pass check, not a guarantee; it fails open on wording it doesn't know
+  (add terms in `labs.md`) and exits 2 if a file can't be read.
+- kit-delegate and kit-run policy: closed (a provider above enabled_phase, outside
+  allowed_providers, or below the request's data class is refused; the fallback chain ends in
+  Claude, or the request is refused).
+- kit-run tools: closed (no send, delete, install, or connector tools; writes only to the agent's
+  write paths with the owner's yes; with no one at the keyboard, writes are refused).
+- run.ps1 time limit: closed for delivery (a stopped run's text is never delivered; a failure
+  notice goes out instead); the claude process is ended by its run id.

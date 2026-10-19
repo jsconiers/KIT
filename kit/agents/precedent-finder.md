@@ -35,7 +35,8 @@ unless `precedent.md` says otherwise:
   current or superseded.
 - **Published document indexes:** the indexes `library.md` names for each published library (for
   example a design specification index and an impact assessment index).
-- **The knowledge base:** `knowledge/decisions.md`, patterns, and system profiles.
+- **The knowledge base:** `knowledge/decisions.md`, `knowledge/precedents.md` (what earlier POCs
+  and labs found, recorded by the curator), patterns, and system profiles.
 - **Decision records:** `decisions/INDEX.md` and the ADRs it lists.
 - **POCs:** `poc/INDEX.md` and each POC's `findings.md`, including no-go and pivot verdicts.
 - **Labs:** `labs/REGISTER.md`.

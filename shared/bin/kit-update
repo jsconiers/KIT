@@ -4,6 +4,7 @@
   kit-update            fetch, then show what's new: commits, files, and what would happen
   kit-update --apply    move the repo clone onto GitHub's main and rerun the installer
   kit-update --yes      with --apply, skip the confirmation question
+  kit-version           which version is installed (also: kit-version --check)
 
 It works on the repo clone (~/KIT, or KIT_REPO if set) and never pushes. It stops, changing
 nothing, when the clone has uncommitted changes, or has commits GitHub doesn't (send those first
@@ -20,6 +21,7 @@ To undo: git -C ~/KIT reset --hard backup/pre-update-<time>, then rerun the inst
 (bash ~/KIT/platform/mac/install.sh, or install.ps1 on Windows).
 """
 import argparse
+import json
 import datetime
 import os
 import pathlib
@@ -70,7 +72,20 @@ def plan():
                     "first, then run kit-update again")
 
 
+def installed_version():
+    try:
+        return json.loads((KIT / ".install/VERSION.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def version_at(ref):
+    return (git("show", f"{ref}:VERSION", check=False) or "").strip() or "unknown"
+
+
 def show_incoming():
+    have = installed_version().get("version") or version_at("HEAD")
+    print(f"\nVersion: {have} -> {version_at('origin/main')}")
     print("\nNew on GitHub:")
     print(git("log", "--format=  %h %ad %s", "--date=short", "HEAD..origin/main") or "  (nothing)")
     stat = git("diff", "--stat", "HEAD", "origin/main")
@@ -138,6 +153,12 @@ def main(argv):
               f"git -C {REPO} reset --hard {backup}, then rerun the installer.")
         return rc
     show_kit_md()
+    v = installed_version()
+    prev = v.get("previous") or {}
+    if v:
+        print(f"\nkit-update: Kit {prev.get('version', 'unknown')} -> {v.get('version')} "
+              f"({(v.get('commit') or 'unknown')[:7]}). The next morning brief lists what changed "
+              f"(briefs/kit-release-notes.md).")
     print(f"\nkit-update: done. To undo: git -C {REPO} reset --hard {backup}, then rerun the installer.")
     return 0
 

@@ -10,7 +10,8 @@
 #
 #   Kit Morning Brief     weekdays (Mon-Fri)  07:45   -> run.ps1 morning
 #   Kit Post-Open Read    weekdays (Mon-Fri)  09:45   -> run.ps1 open      (optional; see note)
-#   Kit Weekly Review     Monday              07:30   -> run.ps1 weekly
+#   Kit Weekly Review     Monday              06:30   -> run.ps1 weekly    (before the brief)
+#   Kit Work List         Monday-Thursday     09:00   -> run.ps1 worklist
 #   Kit Reminders Sync    every 15 min + at logon     -> reminders_sync_win.py
 #   Kit Trade Journal     weekdays (Mon-Fri)  16:20   -> run.ps1 journal   (optional; see note)
 #
@@ -42,8 +43,9 @@ if (-not (Test-Path -LiteralPath $RunPs1)) {
 # Common principal (current user) and settings, shared by every task.
 $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
 $settings  = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
-# Give a run room to finish (claude timeout is ~1200s; allow some headroom).
-$settings.ExecutionTimeLimit = "PT1H"
+# Give a run room to finish: run.ps1 enforces its own limits (weekly review 50 min, others 20 min
+# or less) and may wait up to 30 min for another run, so allow headroom above both.
+$settings.ExecutionTimeLimit = "PT2H"
 
 function Register-KitTask {
     param(
@@ -76,11 +78,17 @@ if ($RegisterOpen) {
         -ActionArgs @("-ExecutionPolicy", "Bypass", "-NoProfile", "-WindowStyle", "Hidden", "-File", "`"$RunPs1`"", "open")
 }
 
-# --- Kit Weekly Review: Monday 07:30 ---------------------------------------------------------
+# --- Kit Weekly Review: Monday 06:30 (finishes before the 07:45 morning brief) ---------------
 Register-KitTask -Name "Kit Weekly Review" `
     -Description "Kit's weekly review (port of com.USER.kit.weekly)." `
-    -Trigger (New-ScheduledTaskTrigger -Weekly -DaysOfWeek "Monday" -At "7:30am") `
+    -Trigger (New-ScheduledTaskTrigger -Weekly -DaysOfWeek "Monday" -At "6:30am") `
     -ActionArgs @("-ExecutionPolicy", "Bypass", "-NoProfile", "-WindowStyle", "Hidden", "-File", "`"$RunPs1`"", "weekly")
+
+# --- Kit Work List: Monday to Thursday 09:00 --------------------------------------------------
+Register-KitTask -Name "Kit Work List" `
+    -Description "Kit's proposed work list for the owner to approve (port of com.USER.kit.worklist)." `
+    -Trigger (New-ScheduledTaskTrigger -Weekly -DaysOfWeek @("Monday", "Tuesday", "Wednesday", "Thursday") -At "9:00am") `
+    -ActionArgs @("-ExecutionPolicy", "Bypass", "-NoProfile", "-WindowStyle", "Hidden", "-File", "`"$RunPs1`"", "worklist")
 
 # --- Kit Reminders Sync: every 15 minutes + at logon -----------------------------------------
 # Mirrors com.USER.kit.sync (StartInterval 900, RunAtLoad true). A repeating "Once" trigger gives

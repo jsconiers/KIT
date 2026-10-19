@@ -90,7 +90,7 @@ next. It loads at the start of every session. Update it whenever the queue chang
 that matters.
 
 **Briefs (`briefs/`).** On weekday mornings an unattended run writes the day's brief here by
-8:00, and a Monday 7:30 run writes the weekly review, with the auditor's weekly summary. Delivery
+8:00, and a Monday 6:30 run writes the weekly review, with the auditor's weekly summary. Delivery
 is set in `.install/shared/morning/config` and works the same on macOS and Windows: a desktop
 notification with the dashboard (`local`), a draft saved in Outlook that syncs to the phone
 (`outlook-drafts`), or a draft opened for review (`outlook-review`), plus an iMessage text on

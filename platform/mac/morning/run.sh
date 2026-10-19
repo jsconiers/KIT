@@ -1,8 +1,9 @@
 #!/bin/zsh
 # Kit's scheduled runs, started by launchd:
 #   run.sh          morning brief (weekdays 7:45, delivered by 8:00)
-#   run.sh weekly   weekly review (Monday 7:30)
+#   run.sh weekly   weekly review (Monday 6:30)
 #   run.sh worklist proposed work list for the owner to approve (Monday to Thursday 9:00)
+#   run.sh eod      end-of-day wrap-up (weekdays 17:30; EOD="off" in the config skips it)
 # Nothing runs while Kit is paused (kit-pause). Before the morning and weekly runs, kit-outlook
 # checks that Outlook answers (set OUTLOOK_CHECK="off" in the config to skip it).
 # Every run records its estimated cost in .install/logs/cost.jsonl (kit-cost). With
@@ -40,6 +41,7 @@ case "$MODE" in
   weekly) PROMPT="$SHAREDIR/prompt-weekly.md"; TEXT="briefs/weekly-text.txt" ;;
   journal) PROMPT="$SHAREDIR/prompt-journal.md"; TEXT="briefs/journal-text.txt" ;;
   worklist) PROMPT="$SHAREDIR/prompt-worklist.md"; TEXT="briefs/worklist-text.txt" ;;
+  eod)    [ "${EOD:-on}" = "off" ] && exit 0; PROMPT="$SHAREDIR/prompt-eod.md"; TEXT="briefs/eod-text.txt" ;;
   *)      MODE=morning; PROMPT="$SHAREDIR/prompt.md"; TEXT="briefs/latest-text.txt" ;;
 esac
 DONE="$LOGDIR/$TODAY.$MODE.done"
@@ -147,13 +149,52 @@ if [ "$MODE" = "weekly" ]; then
 fi
 args=(-p "$PROMPT_TEXT" --output-format json --allowedTools "${ALLOWED[@]}")
 [ -n "${BLOCK_TOOLS:-}" ] && args+=(--disallowedTools ${=BLOCK_TOOLS})
+# Model for this run: kit-models apply writes MODEL_<MODE> lines to models.env (for example
+# MODEL_WEEKLY=sonnet). Without it, the run uses Claude Code's default model.
+[ -f "$SHAREDIR/models.env" ] && source "$SHAREDIR/models.env"
+RUN_MODEL_VAR="MODEL_${(U)MODE}"
+[ -n "${(P)RUN_MODEL_VAR:-}" ] && args+=(--model "${(P)RUN_MODEL_VAR}")
+
+# Time limit for this run, in seconds. The weekly review does the most (auditor, horizon scan,
+# sprint review, cost, retrospective), so it gets longer. Override with RUN_TIMEOUT_<MODE> or
+# RUN_TIMEOUT in the config.
+case "$MODE" in
+  weekly)   TIMEOUT=${RUN_TIMEOUT_WEEKLY:-3000} ;;
+  worklist) TIMEOUT=${RUN_TIMEOUT_WORKLIST:-900} ;;
+  *)        TIMEOUT=${RUN_TIMEOUT:-1200} ;;
+esac
+
+# One scheduled run at a time: if another is still going (say, a long weekly review when the
+# morning brief starts), wait for it, up to RUN_LOCK_WAIT seconds, then go ahead anyway. A lock
+# left by a run that died is cleared.
+LOCKDIR="$LOGDIR/.run.lock"
+waited=0; OWN_LOCK=""
+while true; do
+  if mkdir "$LOCKDIR" 2>/dev/null; then OWN_LOCK=1; break; fi
+  holder=$(cat "$LOCKDIR/pid" 2>/dev/null)
+  if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
+    rm -rf "$LOCKDIR"; continue
+  fi
+  if [ "$waited" -ge "${RUN_LOCK_WAIT:-1800}" ]; then
+    echo "== $(date) $MODE: another run still holds the lock after ${waited}s; going ahead" >> "$LOG"
+    break
+  fi
+  [ "$waited" -eq 0 ] && echo "== $(date) $MODE: waiting for another run to finish" >> "$LOG"
+  sleep 15; waited=$((waited + 15))
+done
+if [ -n "$OWN_LOCK" ]; then
+  echo $$ > "$LOCKDIR/pid"
+  trap 'rm -rf "$LOCKDIR"' EXIT
+fi
 
 echo "== $(date) start $MODE ${TEST}" >> "$LOG"
 # JSON output carries the text result plus the run's estimated cost and token counts. kit-cost
 # writes the text to the log and the cost to the ledger; if the output isn't JSON it logs it as is.
 RUNOUT="$LOGDIR/.run-$MODE-$$.json"
-perl -e 'alarm shift; exec @ARGV' 1200 claude "${args[@]}" > "$RUNOUT" 2>> "$LOG"
+perl -e 'alarm shift; exec @ARGV' "$TIMEOUT" claude "${args[@]}" > "$RUNOUT" 2>> "$LOG"
 rc=$?
+TIMED_OUT=""
+[ "$rc" -eq 142 ] && TIMED_OUT=1 && echo "== $(date) $MODE run hit its time limit ($((TIMEOUT / 60)) min) and was stopped" >> "$LOG"
 if [ -f "$KIT/.install/shared/bin/kit-cost" ]; then
   python3 "$KIT/.install/shared/bin/kit-cost" record --mode "$MODE" --rc "$rc" --json-file "$RUNOUT" --log "$LOG" 2>> "$LOG" \
     || cat "$RUNOUT" >> "$LOG"
@@ -177,7 +218,11 @@ elif [ -s "$TEXT" ]; then
     echo "== delivery failed" >> "$LOG"
   fi
 else
-  echo "Kit's $MODE run didn't finish (rc=$rc). Log: ~/Claude/Agents/kit/.install/logs/$TODAY.log" > "$LOGDIR/failure-$MODE.txt"
+  if [ -n "$TIMED_OUT" ]; then
+    echo "Kit's $MODE run hit its $((TIMEOUT / 60))-minute limit and stopped before writing anything. Raise RUN_TIMEOUT_${(U)MODE} in the config if it keeps happening. Log: ~/Claude/Agents/kit/.install/logs/$TODAY.log" > "$LOGDIR/failure-$MODE.txt"
+  else
+    echo "Kit's $MODE run didn't finish (rc=$rc). Log: ~/Claude/Agents/kit/.install/logs/$TODAY.log" > "$LOGDIR/failure-$MODE.txt"
+  fi
   deliver "$LOGDIR/failure-$MODE.txt" nobrief >> "$LOG" 2>&1
   echo "== sent failure notice" >> "$LOG"
 fi

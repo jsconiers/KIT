@@ -22,10 +22,17 @@ in `memory/context/writing.md`; none ship here.
 | Labs | `lab-request-template.md` | lab planner (and the approver) | `labs.md` |
 | Labs | `lab-runbook-template.md` | lab planner | `labs.md` |
 | Training | `learning-plan-template.md` | training lead | `training.md` |
+| Training | `learning-path-template.md` | training lead | `training.md` |
+| Training | `training-kit-template.md` | training lead, deck builder | `training.md` |
+| Training | `skills-matrix-template.md` | training lead | `training.md` |
 | Research | `research-brief-template.md` | researcher, librarian (filing) | `writing.md` |
 | Future tech | `radar-ballot-template.md` | future tech planner | `future-tech.md` |
 | Future tech | `tech-lifecycle-review-template.md` | future tech planner | `future-tech.md` |
 | Future tech | `strategy-brief-template.md` | future tech planner | `future-tech.md` |
+| Future tech | `tech-debt-register-template.md` | future tech planner | `future-tech.md` |
+| Future tech | `vendor-landscape-template.md` | future tech planner | `future-tech.md` |
+| Future tech | `radar-view-template.md` | future tech planner | `future-tech.md` |
+| Future tech | `innovation-intake-template.md` | future tech planner | `future-tech.md` |
 
 ## How a piece of exploration work flows
 

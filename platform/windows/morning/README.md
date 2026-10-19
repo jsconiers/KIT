@@ -10,7 +10,7 @@ Files:
 
 | File | Role | Mac equivalent |
 |---|---|---|
-| `run.ps1` | The scheduled run: modes, skip-days, once-per-day markers, headless `claude -p` with a ~1200s timeout, delivery, dashboard refresh, git auto-commit. | `run.sh` |
+| `run.ps1` | The scheduled run: modes (including the work list), skip-days, once-per-day markers, the kit-pause kill switch, the kit-cost budget guard, headless `claude -p` with JSON output and cost recording, the model from `models.env`, a time limit per kind of run (a stopped run's claude process is found by its run id and ended), one run at a time (a lock), delivery, dashboard refresh, git auto-commit. No Outlook check before runs (kit-outlook is macOS-only). | `run.sh` |
 | `register-tasks.ps1` | Creates the Task Scheduler tasks. | the four `.plist.template` files |
 | `unregister-tasks.ps1` | Removes those tasks. | `launchctl bootout` |
 
@@ -37,7 +37,8 @@ when that user is logged on (launchd runs in the user's GUI session; these match
 |---|---|---|---|
 | Kit Morning Brief | Weekdays (Mon-Fri) 07:45 | `run.ps1 morning` | `com.USER.kit.morning` |
 | Kit Post-Open Read | Weekdays (Mon-Fri) 09:45 | `run.ps1 open` | `com.USER.kit.open` |
-| Kit Weekly Review | Monday 07:30 | `run.ps1 weekly` | `com.USER.kit.weekly` |
+| Kit Weekly Review | Monday 06:30 | `run.ps1 weekly` | `com.USER.kit.weekly` |
+| Kit Work List | Monday-Thursday 09:00 | `run.ps1 worklist` | `com.USER.kit.worklist` |
 | Kit Reminders Sync | Every 15 min + at logon | `reminders_sync_win.py` | `com.USER.kit.sync` |
 | Kit Trade Journal | Weekdays (Mon-Fri) 16:20 | `run.ps1 journal` | *(no plist; see note)* |
 

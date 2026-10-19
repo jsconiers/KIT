@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.{{USER}}.kit.eod</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>{{HOME}}/Claude/Agents/kit/.install/platform/mac/morning/run.sh</string>
+    <string>eod</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <!-- End-of-day wrap-up: weekdays 17:30. Template only; install it like the other Kit jobs. -->
+  <array>
+    <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>17</integer><key>Minute</key><integer>30</integer></dict>
+    <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>17</integer><key>Minute</key><integer>30</integer></dict>
+    <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>17</integer><key>Minute</key><integer>30</integer></dict>
+    <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>17</integer><key>Minute</key><integer>30</integer></dict>
+    <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>17</integer><key>Minute</key><integer>30</integer></dict>
+  </array>
+  <key>StandardOutPath</key>
+  <string>{{HOME}}/Claude/Agents/kit/.install/logs/launchd.out</string>
+  <key>StandardErrorPath</key>
+  <string>{{HOME}}/Claude/Agents/kit/.install/logs/launchd.err</string>
+</dict>
+</plist>

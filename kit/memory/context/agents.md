@@ -4,6 +4,13 @@ The agents Kit directs for {{OWNER}}. Each is a Claude Code subagent: its defini
 `~/Claude/Agents/kit/agents/` and is installed into `~/.claude/agents/`, where Claude Code finds it
 (`python3 ~/Claude/Agents/kit/.install/shared/doctor.py --fix-agents` copies them over).
 
+Each agent's model comes from `models.json` (and `models/<agent>.json`) through `kit-models apply`;
+don't edit an agent's `model:` line by hand, since the next apply resets it.
+
+kit-run (experimental) can run an agent outside Claude Code; it has no connectors, subagents,
+hooks, or skills, so use it only for agents that read and write files. kit-delegate gives agents a
+"delegate" tool once its MCP server is added.
+
 Work between agents goes through Kit, except for these direct pairs:
 
 - The IA writer and the GDS writer talk to each other.
@@ -15,22 +22,27 @@ Work between agents goes through Kit, except for these direct pairs:
 
 Agents not named in a pair can't start or message other agents at all.
 
-The gateway is the agent meant to reach outside systems. It's read-only and least privilege, and
-the connector guard (`~/Claude/Agents/kit/.install/shared/bin/connector-guard`) enforces that with
-hooks and records every request in an audit log. Failed calls are logged too, through a PostToolUseFailure hook. The guard also runs on the three agents that call
-the gateway. Connectors aren't locked to the gateway yet: other agents can still use them directly.
+The gateway is the agent meant to reach outside systems. It's read-only and least privilege, and the
+connector guard (`~/Claude/Agents/kit/.install/shared/bin/connector-guard`) enforces that with hooks
+and records every request in an audit log. Failed calls are logged too, through a PostToolUseFailure
+hook. The guard also runs on the three agents that call the gateway. Connectors aren't locked to the
+gateway yet: other agents can still use them directly.
 
 Each agent reads its setup file in `memory/context/` before every job. Delegate with a brief: the
 goal, the context, constraints, what done looks like, and when it's due. When a report ends with a
-**Requests**, **Librarian requests**, or **Curator requests** section, route each request to the right agent, then brief
-the requester again with the answers. All of them may see their setup files, the library, and
-what Kit gives them, never personal notes, and all run for {{OWNER}} on this computer.
+**Requests**, **Librarian requests**, or **Curator requests** section, route each request to the
+right agent, then brief the requester again with the answers. All of them may see their setup files,
+the library, and what Kit gives them, never personal notes, and all run for {{OWNER}} on this
+computer.
 
 ## researcher
 
 - **Does:** research only, with sources and a confidence level on each finding. Read-only.
 - **Reach it:** a brief with the question and why it matters. For anything that touches internal
-  documents, ask the librarian first and put what it finds in the brief.
+  documents, ask the librarian first and put what it finds in the brief. For a vendor or product
+  evaluation, ask for "vendor evaluation mode", name the options and any weights, and pass on vendor
+  material under NDA only if {{OWNER}} agrees. Send its shortlist and "Verify in POC" claims to the
+  POC lead.
 - **Note:** its searches go to outside search engines, so briefs shouldn't invite confidential
   details into a query.
 
@@ -53,6 +65,8 @@ what Kit gives them, never personal notes, and all run for {{OWNER}} on this com
   new filings", or "check this document against our decisions".
 - **Talks directly to:** the librarian, one way. It can ask the librarian anything; the
   librarian can't start a conversation with it.
+- **Routine:** After every POC verdict and lab closure, brief it with the findings and the decision
+  (or the register row) to add a row to `knowledge/precedents.md`.
 - **Setup:** `memory/context/knowledge.md`.
 
 ## ia-writer
@@ -92,7 +106,9 @@ what Kit gives them, never personal notes, and all run for {{OWNER}} on this com
 ## scheduler
 
 - **Does:** calendar work: what's coming, finding time, prep and focus time, meeting preparation,
-  and drafts of invitations and replies. Never sends, accepts, or declines.
+  and drafts of invitations and replies. Never sends, accepts, or declines. Plans study and lab
+  blocks from training plans and lab runbooks Kit passes on, inside working hours (09:00 to 17:00
+  assumed until calendar.md sets them), as draft holds for {{OWNER}} to approve.
 - **Reach it:** the period or meeting, and the deadlines from the queue that matter.
 - **Setup:** `memory/context/calendar.md`.
 
@@ -163,15 +179,19 @@ what Kit gives them, never personal notes, and all run for {{OWNER}} on this com
   decisions, actions, and disagreements between the sources flagged.
 - **Reach it:** the meeting (project and date), or "process the meeting inbox".
 - **Routine:** after it reports, have the librarian catalog the minutes and the curator record the
-  decisions, and put the actions in the queue.
+  decisions. Copy the minutes' Actions block into `briefs/pending-actions.md` as proposals. In a
+  session, {{OWNER}} confirms each: his become `[work]` items (`todo work ...`), others' go to
+  Waiting on others, the rest are marked dropped. Mark each line confirmed or dropped in the file.
+  Nothing goes in the queue unconfirmed.
 - **Setup:** `memory/context/meetings.md`.
 
 ## standards-checker
 
 - **Does:** checks a design (usually a GDS, sometimes an IA) against the team's engineering
-  standards, reference architectures, and security baselines. Writes a conformance report
-  (conforms, gap, not applicable, or can't tell, with evidence and section) and lists the
-  exceptions that would need a waiver. Read-only on the document.
+  standards, reference architectures, and security baselines. Writes a conformance report (conforms,
+  gap, not applicable, or can't tell, with evidence and section) and lists the exceptions that would
+  need a waiver. Read-only on the document. Flags results against a standard that may be out of date
+  because the radar moved a technology to adopt or hold after the standard's date.
 - **Reach it:** the document and version, its project, and the kind of change.
 - **Routine:** run it on each GDS draft alongside the reviewer, before {{OWNER}} shares it.
 - **Setup:** `memory/context/standards.md`.
@@ -287,7 +307,9 @@ what Kit gives them, never personal notes, and all run for {{OWNER}} on this com
   technology, a sequence of reading, hands-on labs (reusing lab runbooks), and checkpoints, with
   progress tracked in the library. Builds a team skills matrix by role (never an individual's gaps
   in shared output) and outlines learning material from POC outputs. Assumes no learning platform.
-  Writes in the library's `training/` folder.
+  Writes in the library's `training/` folder. Keeps learning paths per technology
+  (`paths/<technology>.md`), builds training kits (`materials/<topic>-kit.md`) on request, and keeps
+  the skills matrix by role against the radar.
 - **Reach it:** who the plan is for ({{OWNER}} or a role), the target role or technology, the
   deadline, and the weekly time available; or "team skills matrix", or "learning outline from
   <POC>".
@@ -304,28 +326,37 @@ what Kit gives them, never personal notes, and all run for {{OWNER}} on this com
   end of support, licensing, skills risk, with an invest, maintain, migrate, or retire
   recommendation); and the quarterly strategy brief. Radar placements are decided by vote: it
   prepares ballots and records results, and never places anything itself. Writes in the library's
-  `radar/` folder.
-- **Reach it:** the job ("ballot for <technology>", "record the vote on <technology>",
-  "lifecycle review of <technology>", "radar refresh", or "strategy brief for <quarter>") and the
-  audience.
+  `radar/` folder. Keeps the tech debt register (`radar/tech-debt.md`, linked to lifecycle reviews)
+  and the vendor landscape (`radar/vendors.md`, renewals within 90 days flagged), and lists
+  "Standards to update" after each adopt or hold vote. Keeps the innovation funnel
+  (`radar/innovation.md`): ideas pass assess, POC, pilot, and adopt gates in order, each decided by
+  the approver role.
+- **Reach it:** the job ("ballot for <technology>", "record the vote on <technology>", "lifecycle
+  review of <technology>", "radar refresh", or "strategy brief for <quarter>") and the audience.
 - **Routine:** answer its Requests: configuration data from the gateway, outside research from the
-  researcher, skills coverage from the training lead. Pass on vote results with date, forum by
-  role, and ring decided. Put its 12- and 24-month end-of-support warnings in the weekly review.
-  Send the strategy brief to the deck builder, standards impacts to {{OWNER}}, and decided votes to
-  the curator and, where they're architecture decisions, the decision recorder.
+  researcher, skills coverage from the training lead. Pass on vote results with date, forum by role,
+  and ring decided. Put its 12- and 24-month end-of-support warnings in the weekly review. Send the
+  strategy brief to the deck builder, standards impacts to {{OWNER}}, and decided votes to the
+  curator and, where they're architecture decisions, the decision recorder. Pass on renewal dates
+  and debt items as they come up; send its "Standards to update" list to the standards owner and the
+  standards checker.
 - **Setup:** `memory/context/future-tech.md`.
 
 ## lab-planner
 
-- **Does:** lab runbooks for on-premises and cloud labs from a brief or POC charter: setup, tests,
-  teardown, and a delete-or-return checklist. Applies the data rule (synthetic, masked, or public
-  only), checks the security baseline, keeps a lab register with each lab's owner and teardown
-  date, and lists labs overdue for teardown. Never builds, changes, or tears down a lab. Writes in
+- **Does:** lab requests and runbooks for on-premises and cloud labs. Records the approver's
+  decision (no final runbook without it; drafts say so), checks the data rule with `kit-labcheck`,
+  checks the security baseline, and keeps the lab register: owner, status, teardown date, cost cap,
+  last activity, and hardware on loan. Reports labs past teardown, idle labs (30 days), overdue
+  loans, and requests waiting for approval. Never builds, changes, or tears down a lab. Writes in
   the library's `labs/` folder.
-- **Reach it:** the purpose, owner by role, on-premises or cloud, components, timebox, and budget;
-  or the POC id ("runbook for POC-0003"); or "overdue labs".
-- **Routine:** for POC labs, give it the charter and test plan. Put its overdue-labs list in the
-  weekly review. Raise any waiver it lists with {{OWNER}}.
+- **Reach it:** "new lab request: <purpose, owner role, environment, data, timebox, budget>"; the
+  POC id ("runbook for POC-0003"); "approval for LAB-0004: approved by <role> on <date>"; "loan:
+  <item, asset tag, role, lab, due back>"; or "lab report".
+- **Routine:** pass on the approver's decision by role and date before asking for a final runbook.
+  For POC labs, give it the charter and test plan. Put its lab report in the weekly review. Raise
+  waivers and kit-labcheck findings it can't explain with {{OWNER}}. When a lab closes, brief the
+  curator to record the outcome as precedent.
 - **Setup:** `memory/context/labs.md`.
 
 ## precedent-finder

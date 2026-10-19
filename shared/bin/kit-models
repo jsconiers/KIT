@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+"""kit-models: which model each agent and each scheduled run uses, set from one config file.
+
+  kit-models                          the model for every agent and run, and where it came from
+  kit-models --json                   the same, as JSON
+  kit-models resolve NAME [--profile P|--model M]
+                                      one agent (or run:MODE, e.g. run:weekly), with an optional
+                                      one-off override
+  kit-models check                    check the config: unknown agents and profiles, refused
+                                      providers; exit 1 on errors
+  kit-models apply [--dry-run]        write each agent's `model:` line in Kit's own agents folder,
+                                      and the scheduled runs' models into models.env; then install
+                                      the agents with: python3 ~/Claude/Agents/kit/.install/shared/doctor.py --fix-agents
+
+The config is models.json in the Kit folder, with optional per-agent files in models/<agent>.json,
+which win for that agent. Agents and runs name profiles (deep, standard, fast); profiles name a
+provider and model. default_profile is "deep" (Opus); change that one value to change the default.
+
+Phase 1 is Claude models only, through Claude Code. Profiles on other providers (an approved API,
+a local model) are refused for now, and the agent falls back to the profile's fallback or the
+default. Move an agent off Opus only after it passes its evals on the new profile.
+
+kit-models apply backs up every file it changes into .install/backups/ first and changes only the
+`model:` line, so other edits to an agent survive. Running it twice changes nothing the second
+time. To undo: copy the backed-up files back, or set the agents to "default" and apply again.
+"""
+import argparse
+import datetime as dt
+import json
+import os
+import pathlib
+import shutil
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import kit_models as km  # noqa: E402  (shared/kit_models.py)
+
+KIT = km.KIT
+
+
+def agents_dir(args):
+    return pathlib.Path(os.path.expanduser(args.agents_dir)) if getattr(args, "agents_dir", None) \
+        else KIT / "agents"
+
+
+def env_file(args):
+    return pathlib.Path(os.path.expanduser(args.env_file)) if getattr(args, "env_file", None) \
+        else KIT / ".install/shared/morning/models.env"
+
+
+def agent_names(folder):
+    return sorted(p.stem for p in folder.glob("*.md")) if folder.is_dir() else []
+
+
+def load_or_exit():
+    try:
+        return km.load(KIT)
+    except km.ConfigError as e:
+        sys.exit(f"kit-models: {e}")
+
+
+def table(cfg, names):
+    rows = [("agent", n, km.resolve_agent(cfg, n)) for n in names]
+    rows += [("run", m, km.resolve_run(cfg, m)) for m in km.RUN_MODES]
+    return rows
+
+
+def cmd_show(args):
+    cfg = load_or_exit()
+    rows = table(cfg, agent_names(agents_dir(args)))
+    if args.json:
+        print(json.dumps([{"kind": k, "name": n, **{x: r[x] for x in ("profile", "model", "source", "notes")}}
+                          for k, n, r in rows], indent=2))
+        return 0
+    where = cfg["_path"] or "no models.json (built-in default, opus)"
+    print(f"Model config: {where}; default_profile: {cfg.get('default_profile', 'not set')}\n")
+    width = max([len(n) for _, n, _ in rows] + [5])
+    for kind, name, r in rows:
+        label = name if kind == "agent" else f"run:{name}"
+        prof = r["profile"] or "-"
+        print(f"  {label:<{width + 4}} {r['model']:<16} {prof:<10} {r['source']}")
+        for note in r["notes"]:
+            print(f"  {'':<{width + 4}} note: {note}")
+    return 0
+
+
+def cmd_resolve(args):
+    cfg = load_or_exit()
+    override = args.profile or args.model
+    try:
+        if args.name.startswith("run:"):
+            r = km.resolve_run(cfg, args.name[4:], override)
+        else:
+            r = km.resolve_agent(cfg, args.name, override)
+    except km.ConfigError as e:
+        sys.exit(f"kit-models: {e}")
+    print(json.dumps(r, indent=2) if args.json else
+          f"{args.name}: {r['model']} (profile {r['profile'] or '-'}, from {r['source']})"
+          + "".join(f"\n  note: {n}" for n in r["notes"]))
+    return 0
+
+
+def cmd_check(args):
+    cfg = load_or_exit()
+    errors, warnings = km.check(cfg, agent_names(agents_dir(args)))
+    for w in warnings:
+        print(f"warning: {w}")
+    for e in errors:
+        print(f"error: {e}")
+    if not errors:
+        print(f"kit-models: config ok ({cfg['_path'] or 'built-in default'}), {len(warnings)} warning(s)")
+    return 1 if errors else 0
+
+
+def cmd_apply(args):
+    cfg = load_or_exit()
+    folder = agents_dir(args)
+    names = agent_names(folder)
+    if not names:
+        sys.exit(f"kit-models: no agent files in {folder}")
+    errors, warnings = km.check(cfg, names)
+    for w in warnings:
+        print(f"warning: {w}")
+    if errors:
+        for e in errors:
+            print(f"error: {e}")
+        sys.exit("kit-models: fix the errors above; nothing was changed")
+    changes = []
+    for n in names:
+        path = folder / f"{n}.md"
+        old = path.read_text(encoding="utf-8")
+        model = km.resolve_agent(cfg, n)["model"]
+        try:
+            new = km.set_model_line(old, model)
+        except km.ConfigError as e:
+            print(f"skipped {path.name}: {e}")
+            continue
+        if new != old:
+            before = next((ln for ln in old.split("\n") if ln.startswith("model:")), "model: (none)")
+            changes.append((path, new, f"{n}: {before.split(':', 1)[1].strip()} -> {model}"))
+    env_path = env_file(args)
+    new_env = km.env_text(cfg)
+    old_env = env_path.read_text(encoding="utf-8") if env_path.exists() else None
+    if new_env != old_env:
+        changes.append((env_path, new_env, f"{env_path.name}: scheduled runs -> " + ", ".join(
+            f"{m} {km.resolve_run(cfg, m)['model']}" for m in km.RUN_MODES)))
+    if not changes:
+        print("kit-models: nothing to change; every agent and run already matches the config")
+        return 0
+    for _, _, summary in changes:
+        print(("would change " if args.dry_run else "changed ") + summary)
+    if args.dry_run:
+        print(f"\nkit-models: dry run; {len(changes)} file(s) would change, nothing was written")
+        return 0
+    backup = KIT / ".install/backups" / f"models-{dt.datetime.now():%Y%m%d-%H%M%S}"
+    backup.mkdir(parents=True, exist_ok=True)
+    for path, text, _ in changes:
+        if path.exists():
+            shutil.copy2(str(path), str(backup / path.name))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(str(tmp), str(path))
+    agent_changes = sum(1 for p, _, _ in changes if p.suffix == ".md")
+    print(f"\nkit-models: {len(changes)} file(s) changed; originals in {backup}")
+    if agent_changes and folder == KIT / "agents":
+        print("Install the agents for Claude Code with: "
+              "python3 ~/Claude/Agents/kit/.install/shared/doctor.py --fix-agents")
+    return 0
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-models", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--json", action="store_true", help="JSON output")
+    ap.add_argument("--agents-dir", help=argparse.SUPPRESS)
+    ap.add_argument("--env-file", help=argparse.SUPPRESS)
+    sub = ap.add_subparsers(dest="cmd")
+    r = sub.add_parser("resolve", help="one agent, or run:MODE")
+    r.add_argument("name")
+    g = r.add_mutually_exclusive_group()
+    g.add_argument("--profile")
+    g.add_argument("--model")
+    r.add_argument("--json", action="store_true")
+    sub.add_parser("check", help="check the config")
+    a = sub.add_parser("apply", help="write the agents' model lines and models.env")
+    a.add_argument("--dry-run", action="store_true")
+    args = ap.parse_args(argv)
+    handlers = {None: cmd_show, "resolve": cmd_resolve, "check": cmd_check, "apply": cmd_apply}
+    return handlers[args.cmd](args)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

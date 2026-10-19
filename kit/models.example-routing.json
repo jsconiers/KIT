@@ -1,0 +1,18 @@
+{
+  "_about": "A proposed starting set from the model routing design, not in use. To adopt part of it, copy entries into the agents and runs maps in models.json, then run kit-models check and kit-models apply. Move each agent only after it passes its evals on the new profile; until then everything stays on default_profile (deep, Opus).",
+  "agents": {
+    "ia-writer": "deep", "gds-writer": "deep", "reviewer": "deep",
+    "standards-checker": "deep", "risk-compliance-mapper": "deep",
+    "implementation-planner": "deep", "researcher": "deep",
+    "future-tech-planner": "deep", "poc-lead": "deep",
+    "curator": "standard", "decision-recorder": "standard", "precedent-finder": "standard",
+    "status-reporter": "standard", "meeting-scribe": "standard", "handoff": "standard",
+    "deck-builder": "standard", "diagrammer": "standard",
+    "cost-estimator": "standard", "pmo-estimator": "standard", "change-board-prep": "standard",
+    "intake-triager": "standard", "dependency-mapper": "standard", "demand-tracker": "standard",
+    "training-lead": "standard", "lab-planner": "standard", "onboarding-guide": "standard",
+    "auditor": "standard",
+    "gateway": "fast", "librarian": "fast", "scheduler": "fast"
+  },
+  "runs": {"morning": "standard", "weekly": "standard", "worklist": "standard"}
+}

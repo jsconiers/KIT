@@ -8,7 +8,7 @@ current.
   the folders listed. Add a published library's index by its path in the library root.
   - `CATALOG.md`
   - `LOG.md`
-  - `knowledge/`
+  - `knowledge/` (includes `precedents.md`, the curator's record of POC and lab outcomes)
   - `decisions/INDEX.md`
   - `poc/INDEX.md`
   - `labs/REGISTER.md`

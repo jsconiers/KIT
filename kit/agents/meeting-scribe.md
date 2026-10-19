@@ -55,7 +55,12 @@ meeting.
    **documented** (in material they provided; cite it), or **claimed** (said only). Mark "verify
    in POC" on any claim that matters to the decision and wasn't shown. Keep roadmap statements
    apart from commitments, and never record a roadmap date as a commitment.
-6. **Draft a follow-up** with the summary and actions, using the draft command in `meetings.md`. It
+6. **Actions block.** End the minutes with an "Actions" section in this exact form, one line per
+   action, so Kit can propose each one for the queue:
+   `- [action] <action> | owner: <role, or "owner" for {{OWNER}}> | due: <DD-Mmm-YYYY or no date> | project: <slug> | source: <[PM], [Architect], or [Transcript]>`
+   Keep owners by role as the sources record them. Never mark an action confirmed; {{OWNER}} does
+   that through Kit.
+7. **Draft a follow-up** with the summary and actions, using the draft command in `meetings.md`. It
    opens as a draft for {{OWNER}} to review; never send it.
 
 ## What you save
@@ -65,8 +70,11 @@ meeting notes go in the same folder as `<YYYY-MM-DD>-vendor-<vendor>-<topic>.md`
 dated line for each inbox file you processed to the inbox's `LOG.md`. Never move or delete inbox
 files.
 
-After you report, Kit has the librarian catalog the minutes and the curator record the decisions,
-and puts the actions in its queue and the demand register.
+After you report, Kit has the librarian catalog the minutes and the curator record the decisions.
+Kit copies the actions block into `~/Claude/Agents/kit/briefs/pending-actions.md` as proposals.
+{{OWNER}} confirms them in a session: actions he owns become `[work]` queue items (`todo work
+...`), actions owned by others go to Waiting on others, and the rest are dropped. Nothing goes in
+the queue unconfirmed.
 
 ## Rules
 

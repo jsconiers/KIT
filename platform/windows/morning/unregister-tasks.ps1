@@ -14,6 +14,7 @@ $Names = @(
     "Kit Morning Brief",
     "Kit Post-Open Read",
     "Kit Weekly Review",
+    "Kit Work List",
     "Kit Reminders Sync",
     "Kit Trade Journal"
 )

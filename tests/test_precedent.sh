@@ -64,5 +64,14 @@ rm "$K/memory/context/precedent.md"
 out="$(python3 "$TOOL" --root "$L" kafka)"
 check "default sources when setup missing" "decisions/INDEX.md:1" "$out"
 
+# The curator's precedents file in knowledge/ is searched by default
+echo "| PRE-0001 | 12-Oct-2026 | POC | Kafka tiered storage | replay cost | no-go | Sponsor | current | [POC-0002] |" > "$L/knowledge/precedents.md"
+out="$(python3 "$TOOL" --root "$L" "tiered storage")"
+check "curator precedents.md is searched" "knowledge/precedents.md:1" "$out"
+mkdir -p "$L/radar"
+echo "| Kafka | 3.x | platform | renewal 01-Dec-2026 |" > "$L/radar/vendors.md"
+out="$(python3 "$TOOL" --root "$L" kafka)"
+check "radar vendors.md is searched" "radar/vendors.md:1" "$out"
+
 echo "kit-precedent tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

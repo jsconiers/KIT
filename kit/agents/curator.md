@@ -58,6 +58,19 @@ says otherwise. Create each part the first time you need it.
   versions, and naming, each with its sources.
 - `systems/<system>.md`: one page per system or platform: what it is, the documents that cover it,
   its current decisions, open questions, and related systems.
+- `precedents.md`: what POCs and labs found, one row per outcome, so the precedent finder and
+  `kit-precedent` can find it later:
+
+  ```
+  | Id | Date | Kind | Technology or system | Question tested | Outcome | Decided by | Status | Sources |
+  |---|---|---|---|---|---|---|---|---|
+  | PRE-0001 | 12-Oct-2026 | POC | Message bus tiered storage | Can tiered storage cut retention cost without breaking replay? | no-go: replay latency 4x target | Sponsor (architecture review board) | current | [POC-0002 findings v1.0 §Results] [ADR-0007] |
+  ```
+
+  **Kind** is POC or lab. **Outcome** is the verdict (go, no-go, pivot) or, for a lab, what it
+  proved and how it closed, in one line with the deciding number or reason. **Status** is current
+  or superseded (by PRE-nnnn). Name the technology the way the radar and the POC register do, so a
+  search for it finds every row.
 - `conflicts.md`: places where documents disagree, or where a newer document changed an earlier
   decision without saying so, with both sources and whether it's open or resolved.
 - `LOG.md`: one dated line for every change you make.
@@ -76,6 +89,11 @@ Every fact ends with its sources, by accession number, document number, and sect
   against what's already recorded, and log any conflicts. Then move the **Caught up to** line.
 - **Check:** compare a draft or document against recorded decisions and standards, and report
   each conflict with both sources.
+- **Record outcomes:** when Kit passes on a POC's findings with the sponsor's decision, or a lab's
+  closure from the lab register, add a row to `precedents.md`. Take the outcome only from the
+  findings, the decision, or the register, never from your own reading of the evidence. Record a
+  no-go and a pivot as carefully as a go: they stop the next team from testing the same thing.
+  If a later POC or lab overturns an earlier one, mark the earlier row superseded and link both.
 - **Maintain:** when a decision changes, mark the old one superseded and link the new one. Merge
   duplicates, and keep entries short.
 
@@ -100,5 +118,6 @@ process all of it at once.
 
 ## What you send back to Kit
 
-The answer first, then the entries you added or changed (the file and one line each), conflicts you
+The answer first, then the entries you added or changed (the file and one line each, including
+precedent rows), conflicts you
 found, what you asked the librarian, gaps the knowledge base still has, and **Requests**, if any.

@@ -68,3 +68,13 @@ COST_BUDGET_MONTHLY=""
 COST_WARN_PCT="80"
 COST_STOP_PCT="95"
 COST_ESSENTIAL_MODES="morning"
+
+# Time limits for scheduled runs, in seconds (weekly review 3000, work list 900, others 1200), and
+# how long a run waits for another to finish before going ahead anyway (1800).
+RUN_TIMEOUT=""
+RUN_TIMEOUT_WEEKLY=""
+RUN_TIMEOUT_WORKLIST=""
+RUN_LOCK_WAIT=""
+
+# End-of-day wrap-up (run.sh eod, weekdays 17:30 when its launchd job is installed): "on" or "off".
+EOD="on"

@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""kit-version: which version of Kit is installed, and whether GitHub has a newer one.
+
+  kit-version            installed version, commit, and date; compares with the repo clone's last fetch
+  kit-version --check    fetch GitHub first, then compare
+  kit-version --history  the last installs, newest first
+  kit-version --json     the same as JSON
+
+The installed version comes from ~/Claude/Agents/kit/.install/VERSION.json, which the installer
+writes. The repo clone is ~/KIT, or KIT_REPO if set. Without --check, nothing touches the network.
+"""
+import argparse
+import json
+import os
+import pathlib
+import subprocess
+import sys
+
+HOME = pathlib.Path.home()
+KIT = HOME / "Claude/Agents/kit"
+INSTALL = KIT / ".install"
+REPO = pathlib.Path(os.environ.get("KIT_REPO", HOME / "KIT")).expanduser()
+
+
+def git(*args, timeout=60):
+    try:
+        r = subprocess.run(["git", "-C", str(REPO), *args], capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def short(c):
+    return (c or "unknown")[:7]
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-version", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--check", action="store_true", help="fetch GitHub before comparing")
+    ap.add_argument("--history", action="store_true", help="show the last installs")
+    ap.add_argument("--json", action="store_true", help="print JSON")
+    args = ap.parse_args(argv)
+
+    try:
+        v = json.loads((INSTALL / "VERSION.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        v = {}
+    out = {"installed": {k: v.get(k) for k in ("version", "commit", "installed")} if v else None,
+           "repo": None, "github": None, "github_ahead": None}
+
+    if (REPO / ".git").exists():
+        if args.check:
+            git("fetch", "--quiet", "origin", timeout=120)
+        head = git("rev-parse", "HEAD")
+        remote = git("rev-parse", "origin/main")
+        out["repo"] = head
+        out["github"] = remote
+        installed = v.get("commit")
+        if remote and installed and installed != "unknown":
+            ahead = git("rev-list", "--count", f"{installed}..{remote}")
+            out["github_ahead"] = int(ahead) if ahead and ahead.isdigit() else None
+
+    if args.json:
+        if args.history:
+            out["history"] = list(reversed(v.get("history", [])))
+        print(json.dumps(out, indent=2))
+        return 0
+
+    if not v:
+        print("kit-version: no version recorded yet; it's written the next time the installer runs")
+    else:
+        print(f"Kit {v.get('version')} ({short(v.get('commit'))}), installed {v.get('installed')}")
+        prev = v.get("previous")
+        if prev:
+            print(f"Before that: {prev.get('version')} ({short(prev.get('commit'))}), installed {prev.get('installed')}")
+    if out["repo"]:
+        when = "just fetched" if args.check else "as of the clone's last fetch; --check to fetch now"
+        if out["github_ahead"]:
+            print(f"GitHub is {out['github_ahead']} commit(s) ahead of this install ({when}). "
+                  "To update: kit-update --apply")
+        elif out["github_ahead"] == 0:
+            print(f"Up to date with GitHub ({when}).")
+        else:
+            print(f"Couldn't compare with GitHub ({when}).")
+    else:
+        print(f"No repo clone at {REPO}, so GitHub wasn't compared.")
+    if args.history and v.get("history"):
+        print("\nEarlier installs, newest first:")
+        for h in reversed(v["history"]):
+            print(f"  {h.get('installed')}  {h.get('version')} ({short(h.get('commit'))})")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

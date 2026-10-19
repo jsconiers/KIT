@@ -2,17 +2,24 @@
 """kit-cost: what Kit's scheduled runs cost, and a budget guard for them.
 
   kit-cost                          this month so far: spend, budget used, projection, costliest runs
-  kit-cost report [--month YYYY-MM] [--json]
-                                    a month by run kind and by day, against the month before
+  kit-cost report [--month YYYY-MM] [--by mode|day|model] [--json]
+                                    a month by run kind, by day, and by model, against the month
+                                    before; --by shows one table only
   kit-cost check [--mode MODE] [--json]
                                     exit 0 ok, 1 over the warning level, 2 over the stop level;
                                     with --mode, also says whether that kind of run may go ahead
   kit-cost record --mode MODE --rc N --json-file FILE [--log FILE]
                                     used by run.sh: read one run's JSON output, write its text
                                     result to the log, and add a line to the ledger
+  kit-cost record-usage --source delegate|kit-run --provider P --model M [--input N] [--output N]
+                        [--cost USD] [--mode MODE]
+                                    add a line for model use outside Claude Code's own runs (the
+                                    kit-delegate tool and the kit-run runtime); without --cost the
+                                    line counts as "not priced"
 
 Each scheduled run (run.sh) asks Claude Code for JSON output and records its estimated cost and
-token counts in .install/logs/cost.jsonl. Only Kit's scheduled runs are in that ledger; your own
+token counts in .install/logs/cost.jsonl, with the cost and tokens for each model the run used
+(Claude Code's modelUsage), so reports can show spend by model. Only Kit's scheduled runs are in that ledger; your own
 interactive sessions aren't. See those with /cost (this session) and /usage (plan limits) in
 Claude Code. All figures are Claude Code's client-side estimates, not your bill.
 
@@ -88,6 +95,60 @@ def cost(rec):
         return 0.0
 
 
+def num(x):
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return None
+
+
+def models_from(data):
+    """Per-model cost and tokens from Claude Code's JSON result (modelUsage, keyed by model id).
+    Returns {} when the field is missing or not in the expected shape."""
+    mu = data.get("modelUsage")
+    if not isinstance(mu, dict):
+        return {}
+    out = {}
+    for name, u in mu.items():
+        if not isinstance(u, dict):
+            continue
+        out[str(name)] = {"cost_usd": num(u.get("costUSD")),
+                          "input_tokens": u.get("inputTokens"), "output_tokens": u.get("outputTokens"),
+                          "cache_read_tokens": u.get("cacheReadInputTokens"),
+                          "cache_write_tokens": u.get("cacheCreationInputTokens")}
+    return out
+
+
+def primary_model(models):
+    """The model that cost the most (or, when none is priced, wrote the most output)."""
+    if not models:
+        return "unknown"
+    return max(models, key=lambda m: ((models[m].get("cost_usd") or 0), (models[m].get("output_tokens") or 0)))
+
+
+def model_spend(rec):
+    """[(model, cost or None)] for one ledger line. Old lines without models count as "unknown"."""
+    ms = rec.get("models")
+    if isinstance(ms, dict) and ms:
+        return [(m, num(v.get("cost_usd")) if isinstance(v, dict) else None) for m, v in ms.items()]
+    return [(rec.get("model") or "unknown", num(rec.get("cost_usd")))]
+
+
+def by_model(recs):
+    """{model: {"runs": n, "spend_usd": x, "unpriced": n}} across ledger lines."""
+    out = {}
+    for r in recs:
+        for m, c in model_spend(r):
+            row = out.setdefault(m, {"runs": 0, "spend_usd": 0.0, "unpriced": 0})
+            row["runs"] += 1
+            if c is None:
+                row["unpriced"] += 1
+            else:
+                row["spend_usd"] += c
+    return {m: {**v, "spend_usd": round(v["spend_usd"], 4)}
+            for m, v in sorted(out.items(), key=lambda kv: -kv[1]["spend_usd"])}
+
+
 def status(month=None):
     """Spend, budget, and levels for a month (this month by default)."""
     day = today()
@@ -127,8 +188,15 @@ def cmd_summary(_args):
     if top:
         print("Costliest runs:")
         for r in top:
-            print(f"  {r['date']}  {r.get('mode', '?'):<9} {money(cost(r))}  "
-                  f"{r.get('turns', '?')} turns, {r.get('duration_ms', 0) // 1000}s")
+            secs = (r.get("duration_ms") or 0) // 1000
+            detail = (f"{r.get('turns') or '?'} turns, {secs}s" if r.get("duration_ms") is not None
+                      else f"{r.get('provider', '')}/{r.get('model', '?')}".lstrip("/"))
+            print(f"  {r['date']}  {r.get('mode', '?'):<9} {money(cost(r))}  {detail}")
+    models = by_model(st["records"])
+    if models:
+        print("By model: " + ", ".join(
+            f"{m} {money(v['spend_usd'])}" + (f" (+{v['unpriced']} not priced)" if v["unpriced"] else "")
+            for m, v in list(models.items())[:4]))
     print("Interactive sessions aren't counted; see them with /cost and /usage in Claude Code.")
     return 0
 
@@ -153,19 +221,28 @@ def cmd_report(args):
     data.update({"previous_month": prev, "previous_spend_usd": round(prev_spend, 4),
                  "change_pct": change,
                  "by_mode": {m: {"runs": n, "spend_usd": round(c, 4)} for m, (n, c) in sorted(by_mode.items())},
-                 "by_day": {d: round(c, 4) for d, c in sorted(by_day.items())}})
+                 "by_day": {d: round(c, 4) for d, c in sorted(by_day.items())},
+                 "by_model": by_model(st["records"])})
     if args.json:
         print(json.dumps(data, indent=2))
         return 0
+    show = {args.by} if args.by else {"mode", "day", "model"}
     print(f"kit-cost report: {month}: {money(st['spend_usd'])} over {st['runs']} run(s)")
     trend = "no runs recorded" if not prev_spend else f"{change:+.1f}%"
     print(f"Previous month ({prev}): {money(prev_spend)}; change {trend}")
-    print("By run kind:")
-    for m, v in data["by_mode"].items():
-        print(f"  {m:<9} {v['runs']:>3} run(s)  {money(v['spend_usd'])}")
-    print("By day:")
-    for d, c in data["by_day"].items():
-        print(f"  {d}  {money(c)}")
+    if "mode" in show:
+        print("By run kind:")
+        for m, v in data["by_mode"].items():
+            print(f"  {m:<9} {v['runs']:>3} run(s)  {money(v['spend_usd'])}")
+    if "day" in show:
+        print("By day:")
+        for d, c in data["by_day"].items():
+            print(f"  {d}  {money(c)}")
+    if "model" in show:
+        print("By model:")
+        for m, v in data["by_model"].items():
+            extra = f"  ({v['unpriced']} not priced)" if v["unpriced"] else ""
+            print(f"  {m:<28} {v['runs']:>3} use(s)  {money(v['spend_usd'])}{extra}")
     return 0
 
 
@@ -225,18 +302,45 @@ def cmd_record(args):
            "cache_write_tokens": usage.get("cache_creation_input_tokens"),
            "duration_ms": data.get("duration_ms"), "turns": data.get("num_turns"),
            "subtype": data.get("subtype"), "is_error": data.get("is_error")}
+    models = models_from(data)
+    rec["models"] = models
+    rec["model"] = primary_model(models)
     if os.environ.get("KIT_COST_TODAY"):
         rec["date"] = os.environ["KIT_COST_TODAY"] + "T00:00:00"
     try:
-        LEDGER.parent.mkdir(parents=True, exist_ok=True)
-        new = not LEDGER.exists()
-        with open(LEDGER, "a") as f:
-            f.write(json.dumps(rec) + "\n")
-        if new and os.name != "nt":
-            os.chmod(LEDGER, 0o600)
-        log.write(f"== kit-cost: {args.mode} run cost about ${cost(rec):.4f}\n")
+        append(rec)
+        log.write(f"== kit-cost: {args.mode} run cost about ${cost(rec):.4f} ({rec['model']})\n")
     except OSError as e:
         log.write(f"== kit-cost: couldn't write the ledger ({e})\n")
+    return 0
+
+
+def append(rec):
+    LEDGER.parent.mkdir(parents=True, exist_ok=True)
+    new = not LEDGER.exists()
+    with open(LEDGER, "a") as f:
+        f.write(json.dumps(rec) + "\n")
+    if new and os.name != "nt":
+        os.chmod(LEDGER, 0o600)
+
+
+def cmd_record_usage(args):
+    """One line for model use outside Claude Code's own runs (kit-delegate, kit-run)."""
+    c = args.cost
+    rec = {"date": dt.datetime.now().isoformat(timespec="seconds"),
+           "mode": args.mode or args.source, "source": args.source, "provider": args.provider,
+           "model": args.model, "cost_usd": c, "input_tokens": args.input, "output_tokens": args.output,
+           "models": {args.model: {"cost_usd": c, "input_tokens": args.input, "output_tokens": args.output,
+                                   "provider": args.provider}}}
+    if os.environ.get("KIT_COST_TODAY"):
+        rec["date"] = os.environ["KIT_COST_TODAY"] + "T00:00:00"
+    try:
+        append(rec)
+    except OSError as e:
+        print(f"kit-cost: couldn't write the ledger ({e})", file=sys.stderr)
+        return 1
+    priced = f"${c:.4f}" if c is not None else "not priced"
+    print(f"kit-cost: recorded {args.source} use of {args.provider}/{args.model}: {priced}")
     return 0
 
 
@@ -247,6 +351,7 @@ def main(argv):
     r = sub.add_parser("report")
     r.add_argument("--month")
     r.add_argument("--json", action="store_true")
+    r.add_argument("--by", choices=["mode", "day", "model"])
     c = sub.add_parser("check")
     c.add_argument("--mode")
     c.add_argument("--json", action="store_true")
@@ -255,8 +360,17 @@ def main(argv):
     rec.add_argument("--rc", type=int, default=0)
     rec.add_argument("--json-file", required=True)
     rec.add_argument("--log")
+    ru = sub.add_parser("record-usage")
+    ru.add_argument("--source", required=True, choices=["delegate", "kit-run"])
+    ru.add_argument("--provider", required=True)
+    ru.add_argument("--model", required=True)
+    ru.add_argument("--input", type=int)
+    ru.add_argument("--output", type=int)
+    ru.add_argument("--cost", type=float)
+    ru.add_argument("--mode")
     args = ap.parse_args(argv)
-    handler = {"report": cmd_report, "check": cmd_check, "record": cmd_record}.get(args.cmd, cmd_summary)
+    handler = {"report": cmd_report, "check": cmd_check, "record": cmd_record,
+               "record-usage": cmd_record_usage}.get(args.cmd, cmd_summary)
     return handler(args)
 
 

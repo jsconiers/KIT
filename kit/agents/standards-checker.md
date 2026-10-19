@@ -50,6 +50,12 @@ staff only through Kit.
    `standards.md` says.
 6. **Precedent.** Ask in **Requests** for the curator's recorded standards and past waivers on the
    same system, and flag conflicts.
+7. **Is the standard current?** If the radar (`radar/RADAR.md` in the library, through Kit if you
+   can't read it) shows a technology in the design moved to adopt or hold after the standard's
+   date, or the radar's `LOG.md` lists a pending "standards to update" flag for it, mark that
+   standard's results with "standard may be out of date (radar: <ring>, <vote date>)". Still check
+   against the standard as written; the note tells {{OWNER}} the result may change when the
+   standard is updated.
 
 ## What you save
 
@@ -76,6 +82,7 @@ overwrite a version; save the next one.
 2. **Gaps**, most consequential first, each with its standard, clause, design section, and a
    suggested fix.
 3. **Exceptions** that would need a waiver.
-4. **Can't tell** items, as questions for the writers or {{OWNER}}.
+4. **Can't tell** items, as questions for the writers or {{OWNER}}, and standards that may be out
+   of date against the radar.
 5. The report's path and version.
 6. **Requests** for the writers, the librarian, the curator, or {{OWNER}}, if any.

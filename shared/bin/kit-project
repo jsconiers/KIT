@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+"""kit-project: create the folder skeleton for a new project in the library.
+
+  kit-project types                    list the project types and their stages
+  kit-project new <type> <slug>        show what would be created (dry run)
+  kit-project new <type> <slug> --yes  create it
+
+Types: delivery, poc, lab, training, research (see memory/context/project-types.md). The project
+goes in <library root>/artifacts/<slug>/, with the library root from memory/context/library.md
+(or --root). It refuses to touch a project folder that already exists, and writes a README.md
+listing the type, stages, and folders. To undo, delete the new folder.
+"""
+import argparse
+import datetime as dt
+import os
+import pathlib
+import re
+import sys
+
+KIT = pathlib.Path(os.path.expanduser(os.environ.get("KIT_DIR", "~/Claude/Agents/kit")))
+TYPES = {
+    "delivery": (["intake", "ia", "gds", "diagrams", "reviews", "implementation", "changeboard",
+                  "meetings", "status", "estimates", "precedent"],
+                 ["intake", "impact assessment", "design specification", "review",
+                  "implementation plan", "change board", "done"]),
+    "poc": (["poc", "labs", "meetings", "research", "precedent", "status"],
+            ["charter", "lab request and runbook", "test plan", "running", "scoring", "findings", "verdict"]),
+    "lab": (["labs", "meetings", "status"],
+            ["request", "approval", "build", "running", "teardown", "closed"]),
+    "training": (["training", "materials", "labs"],
+                 ["skills gap", "plan", "learning", "checkpoints", "done"]),
+    "research": (["research", "precedent", "meetings"],
+                 ["question", "precedent check", "research", "brief", "decision"]),
+}
+
+
+def library_root():
+    p = KIT / "memory/context/library.md"
+    try:
+        m = re.search(r"\*\*Library root:\*\*\s*`([^`]+)`", p.read_text())
+    except OSError:
+        m = None
+    return pathlib.Path(os.path.expanduser(m.group(1))) if m else None
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-project", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd")
+    sub.add_parser("types")
+    n = sub.add_parser("new")
+    n.add_argument("type", choices=sorted(TYPES))
+    n.add_argument("slug")
+    n.add_argument("--yes", action="store_true", help="create it (without this, nothing is written)")
+    n.add_argument("--root", help="library root (default: from library.md)")
+    a = ap.parse_args(argv)
+    if a.cmd == "types":
+        for t, (folders, stages) in TYPES.items():
+            print(f"{t:9} {' > '.join(stages)}")
+        return 0
+    if a.cmd != "new":
+        ap.print_help()
+        return 1
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,63}", a.slug):
+        sys.exit("kit-project: the slug must be 2 to 64 lowercase letters, digits, or hyphens")
+    root = pathlib.Path(os.path.expanduser(a.root)) if a.root else library_root()
+    if not root:
+        sys.exit("kit-project: no library root; set it in memory/context/library.md or pass --root")
+    if not root.is_dir():
+        sys.exit(f"kit-project: the library root {root} doesn't exist")
+    proj = root / "artifacts" / a.slug
+    if proj.exists():
+        sys.exit(f"kit-project: {proj} already exists; nothing was changed")
+    folders, stages = TYPES[a.type]
+    readme = (f"# {a.slug}\n\nType: {a.type}. Created {dt.date.today():%d-%b-%Y} with kit-project.\n\n"
+              f"## Stages\n\n" + "\n".join(f"{i}. {s}" for i, s in enumerate(stages, 1)) +
+              "\n\n## Folders\n\n" + "\n".join(f"- `{f}/`" for f in folders) +
+              "\n\nSee memory/context/project-types.md in the Kit folder for the agents and templates.\n")
+    print(f"kit-project: {'creating' if a.yes else 'would create'} {proj}")
+    for f in folders:
+        print(f"  {f}/")
+    print("  README.md")
+    if not a.yes:
+        print("Nothing was written. Add --yes to create it.")
+        return 0
+    proj.mkdir(parents=True)
+    for f in folders:
+        (proj / f).mkdir()
+    (proj / "README.md").write_text(readme, encoding="utf-8")
+    print("kit-project: done. To undo, delete the folder.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

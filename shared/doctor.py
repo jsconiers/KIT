@@ -128,8 +128,13 @@ def check_runs():
         mode = None
         for line in log.read_text(errors="ignore").splitlines():
             m = re.match(r"== .* start (\w+)?\s*(\[Test\])?", line)
+            e = re.match(r"== .* end (\w+) rc=", line)
             if m:
                 mode = (m.group(1) or "morning") + (" test" if m.group(2) else "")
+            elif e:
+                # Delivery lines follow the run that just ended; runs can overlap, so the end line,
+                # not the last start line, says whose delivery comes next.
+                mode = e.group(1)
             elif line.startswith("== text failed") and mode:
                 issues.append(f"{day:%a %d-%b} {mode}: text didn't send")
             elif line.startswith("== sent failure notice") and mode:
@@ -261,6 +266,81 @@ def check_cost():
         add("ok", "Cost", f"{spend}; no budget set (kit-cost)")
 
 
+def check_version():
+    """Installed Kit version, and whether the install matches the repo clone's commit."""
+    import json as _json
+    try:
+        v = _json.loads((KIT / ".install/VERSION.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        add("warn", "Kit version", "not recorded yet (rerun the installer)")
+        return
+    label = f"{v.get('version')} ({(v.get('commit') or 'unknown')[:7]}), installed {v.get('installed')}"
+    repo = pathlib.Path(os.environ.get("KIT_REPO", HOME / "KIT")).expanduser()
+    if (repo / ".git").exists():
+        code, out = run(["git", "-C", str(repo), "rev-parse", "HEAD"])
+        head = out.strip() if code == 0 else ""
+        if head and v.get("commit") not in ("unknown", head):
+            add("warn", "Kit version", label + f"; the repo clone is at {head[:7]} "
+                "(rerun the installer, or kit-update --apply)")
+            return
+    add("ok", "Kit version", label)
+
+
+def check_models():
+    """Model config (kit-models): valid, and the installed agents match it."""
+    import importlib.util
+    path = KIT / ".install/shared/kit_models.py"
+    if not path.exists():
+        return
+    spec = importlib.util.spec_from_file_location("kit_models", str(path))
+    km = importlib.util.module_from_spec(spec); spec.loader.exec_module(km)
+    try:
+        cfg = km.load(KIT)
+    except km.ConfigError as e:
+        add("warn", "Models", f"{e} (see: kit-models check)"); return
+    names = sorted(p.stem for p in (KIT / "agents").glob("*.md"))
+    errors, warnings = km.check(cfg, names)
+    if errors:
+        add("warn", "Models", f"{len(errors)} config error(s) (run: kit-models check)"); return
+    drift = []
+    for n in names:
+        want = km.resolve_agent(cfg, n)["model"]
+        line = next((l for l in (KIT / "agents" / f"{n}.md").read_text().split("\n") if l.startswith("model:")), "")
+        if line.split(":", 1)[-1].strip() != want:
+            drift.append(n)
+    if drift:
+        add("warn", "Models", f"{len(drift)} agent(s) don't match models.json (run: kit-models apply)")
+    else:
+        add("ok", "Models", f"default {cfg.get('default_profile', 'built-in opus')}; "
+            f"{len(names)} agents match{'; ' + str(len(warnings)) + ' warning(s)' if warnings else ''}")
+
+
+def check_direct_models():
+    """Phase 2 and 3: which providers direct calls may reach, and whether their credentials are named."""
+    import importlib.util
+    path = KIT / ".install/shared/kit_models.py"
+    if not path.exists():
+        return
+    spec = importlib.util.spec_from_file_location("kit_models", str(path))
+    km = importlib.util.module_from_spec(spec); spec.loader.exec_module(km)
+    try:
+        cfg = km.load(KIT)
+    except km.ConfigError:
+        return
+    phase = km.enabled_phase(cfg)
+    reach = [n for n, p in (cfg.get("providers") or {}).items()
+             if int(p.get("phase", 1 if p.get("kind") == "anthropic" else 2)) <= phase]
+    missing = [n for n in reach if (cfg["providers"][n].get("kind") not in ("ollama", "lmstudio", "local")
+               and cfg["providers"][n].get("credential_required", True)
+               and not (os.environ.get(cfg["providers"][n].get("credential_env") or "")
+                        or cfg["providers"][n].get("keychain_entry")))]
+    # Missing credentials matter only once phase 2 is on; in phase 1 nothing calls a provider directly
+    # unless someone runs kit-delegate or kit-run by hand.
+    add("warn" if missing and phase >= 2 else "ok", "Direct model calls",
+        f"enabled_phase {phase}; reachable: {', '.join(reach) or 'none'}"
+        + (f"; no credential found for {', '.join(missing)} (kit-delegate and kit-run only)" if missing else ""))
+
+
 def fix_agents():
     dest = HOME / ".claude/agents"
     dest.mkdir(parents=True, exist_ok=True)
@@ -356,7 +436,7 @@ def main(argv):
     for fn in (check_import, check_settings, check_index, check_jobs, check_runs, check_tokens,
                check_secrets, check_permissions, check_agents, check_git, check_calendar, check_mail,
                check_guard, check_grammar, check_delivery, check_paused, check_outlook, check_holds,
-               check_cost):
+               check_cost, check_version, check_models, check_direct_models):
         try:
             fn()
         except Exception as e:  # noqa: BLE001

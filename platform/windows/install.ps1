@@ -102,7 +102,7 @@ if (Test-Path -LiteralPath $kitHome -PathType Container) {
     Write-Host "install: note: expected $kitHome after scaffold but didn't find it; skipping the permission lock-down."
 }
 
-# --- Tool shims (kitmail / kitcal) on PATH ---------------------------------------------------
+# --- Tool shims (kitmail, kitcal, and the shared commands) on PATH ---------------------------
 # Mirror the macOS build.sh step that symlinks the mail/calendar tools into ~/.local/bin.
 # Create .cmd shims in a per-user bin dir and add it to the user PATH so Kit can invoke
 # `kitmail` / `kitcal` directly. The tools live under .install after scaffold.
@@ -116,6 +116,18 @@ try {
         -Value "@echo off`r`n$pyCmd `"$mailPy`" %*`r`n"
     Set-Content -LiteralPath (Join-Path $binDir "kitcal.cmd") -Encoding ASCII `
         -Value "@echo off`r`n$pyCmd `"$calPy`" %*`r`n"
+    # The everyday commands from shared\bin (the Mac links the same ones into ~/.local/bin).
+    # kit-outlook is macOS-only, so it has no shim here.
+    $sharedBin = Join-Path $kitHome ".install\shared\bin"
+    foreach ($tool in @("todo", "kit-settings", "kit-update", "kit-version", "kit-pause", "kit-backup",
+                        "kit-retention", "kit-team", "kit-precedent", "kit-cost", "kit-queue",
+                        "kit-models", "kit-labcheck")) {
+        $toolPy = Join-Path $sharedBin $tool
+        if (Test-Path -LiteralPath $toolPy) {
+            Set-Content -LiteralPath (Join-Path $binDir "$tool.cmd") -Encoding ASCII `
+                -Value "@echo off`r`n$pyCmd `"$toolPy`" %*`r`n"
+        }
+    }
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
     if (-not $userPath) { $userPath = "" }
     if ($userPath -notlike "*$binDir*") {
@@ -123,7 +135,7 @@ try {
         Write-Host "install: added $binDir to your user PATH (open a new shell to pick it up)."
     }
 } catch {
-    Write-Host "install: note: couldn't create the kitmail/kitcal PATH shims ($($_.Exception.Message)). You can run the tools with '$pyCmd <path>\kitmail.py' instead."
+    Write-Host "install: note: couldn't create the command shims ($($_.Exception.Message)). You can run the tools with '$pyCmd <path>\kitmail.py' instead."
 }
 
 # --- Classic Outlook check -------------------------------------------------------------------

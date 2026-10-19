@@ -1,0 +1,23 @@
+{
+  "_about": "Kit's model config. Agents and scheduled runs name a profile; profiles name a provider and a model. Change default_profile to change the default for everything. Per-agent files in models/<agent>.json win over the agents map below. After editing, run: kit-models check, then kit-models apply. Phase 1 uses Claude models only; the other providers are placeholders for phases 2 and 3. Move an agent off the default only after it passes its evals on the new profile. See models.example-routing.json for a proposed starting set.",
+  "default_profile": "deep",
+  "enabled_phase": 1,
+  "org_profile": {"non_claude_max_data_class": "public"},
+  "providers": {
+    "anthropic": {"kind": "anthropic", "phase": 1, "max_data_class": "confidential",
+                  "credential_env": "ANTHROPIC_API_KEY"},
+    "approved-api": {"kind": "openai-compatible", "phase": 2, "base_url": "https://llm.example.internal/v1",
+                     "credential_env": "KIT_APPROVED_API_CREDENTIAL", "keychain_entry": "kit-approved-api",
+                     "max_data_class": "internal"},
+    "local-ollama": {"kind": "ollama", "phase": 2, "base_url": "http://localhost:11434/v1",
+                     "credential_required": false, "max_data_class": "confidential"}
+  },
+  "profiles": {
+    "deep": {"provider": "anthropic", "model": "opus"},
+    "standard": {"provider": "anthropic", "model": "sonnet"},
+    "fast": {"provider": "anthropic", "model": "haiku"},
+    "local": {"provider": "local-ollama", "model": "llama3.1:8b", "fallback": "fast"}
+  },
+  "agents": {},
+  "runs": {}
+}

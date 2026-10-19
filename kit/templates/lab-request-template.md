@@ -41,6 +41,7 @@ here), and logging.>
 ## Checks before approval
 
 - [ ] Data rule met, or the data owner's approval cited
+- [ ] `kit-labcheck` run on this request, each finding fixed or explained
 - [ ] Teardown date set, with an owner
 - [ ] Security baseline checked (standards checker, if used)
 - [ ] Cost within the cap, or the cap's owner agreed
@@ -50,3 +51,6 @@ here), and logging.>
 | Role | Decision | Date |
 |---|---|---|
 | Approver | <approved / changes needed / declined> | |
+
+<The lab planner records the decision here, in the lab register, and in its log. No runbook is
+final until a decision of "approved" is recorded.>

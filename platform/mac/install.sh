@@ -30,7 +30,7 @@ umask 077
 "$PY" "$ROOT/shared/kit_setup.py" activate
 # Put the everyday commands on the PATH (~/.local/bin), pointing at Kit's own copy.
 mkdir -p "$HOME/.local/bin"
-for tool in todo kit-settings kit-update kit-pause kit-backup kit-retention kit-outlook kit-team kit-precedent kit-cost kit-queue; do
+for tool in todo kit-settings kit-update kit-pause kit-backup kit-retention kit-outlook kit-team kit-precedent kit-cost kit-queue kit-version kit-models kit-labcheck kit-metrics kit-project kit-delegate kit-run; do
   ln -sf "$HOME/Claude/Agents/kit/.install/shared/bin/$tool" "$HOME/.local/bin/$tool"
 done
 case ":$PATH:" in

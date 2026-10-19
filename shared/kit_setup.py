@@ -18,6 +18,9 @@ import shutil
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import kit_version  # noqa: E402
+
 HOME = Path.home()
 KIT = HOME / "Claude" / "Agents" / "kit"
 INSTALL_DIR = KIT / ".install"
@@ -185,6 +188,7 @@ def cmd_scaffold(args):
                    ".install/backups"):
         (KIT / folder).mkdir(parents=True, exist_ok=True)
     date = today()
+    before = kit_version.inventory(INSTALL_DIR)     # what the last install had, for release notes
     created, kept, newer = [], [], []
     for path in sorted(p for p in src.rglob("*") if p.is_file()):
         rel = path.relative_to(src)
@@ -202,8 +206,9 @@ def cmd_scaffold(args):
     # Keep a complete copy of the whole package under .install, so nothing has to stay in
     # ~/Downloads and the scheduled runners/plists always find tools at a stable nested path.
     if REPO.resolve() != INSTALL_DIR.resolve():
-        if (REPO / "README.md").exists():
-            shutil.copy2(str(REPO / "README.md"), str(INSTALL_DIR / "README.md"))
+        for name in ("README.md", "VERSION", "CHANGELOG.md"):
+            if (REPO / name).exists():
+                shutil.copy2(str(REPO / name), str(INSTALL_DIR / name))
         for sub in ("kit", "shared", "platform"):
             s = REPO / sub
             if s.is_dir():
@@ -217,6 +222,13 @@ def cmd_scaffold(args):
             if p.exists():
                 os.chmod(p, 0o700)
     print(f"Kit's files: {len(created)} created, {len(kept)} kept as they were.")
+    prev, cur = kit_version.record(REPO, INSTALL_DIR)
+    notes = kit_version.write_release_notes(KIT, REPO, prev, cur, before, kit_version.inventory(INSTALL_DIR))
+    if notes:
+        print(f"Kit updated from {prev.get('version')} to {cur['version']} ({cur['commit'][:7]}); "
+              f"release notes in {notes}.")
+    elif not prev:
+        print(f"Kit version {cur['version']} ({cur['commit'][:7]}).")
     if newer:
         print("Kept your KIT.md; the packaged version is KIT.md.new, so compare and merge if you like.")
     return 0

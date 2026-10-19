@@ -1,0 +1,235 @@
+#!/usr/bin/env python3
+"""kit-metrics: a one-page metrics view of how Kit is doing, from data Kit already keeps.
+
+  kit-metrics            write ~/Claude/Agents/kit/metrics.html
+  kit-metrics --open     write it, then open it in the browser
+  kit-metrics --json     print the numbers instead of writing the page
+  kit-metrics --out F    write somewhere else
+
+It reads, and never changes:
+  .install/logs/cost.jsonl          spend by month, by run kind, and by model when recorded
+  .install/logs/YYYY-MM-DD.log      scheduled runs: finished, failed, timed out (last 30 days)
+  QUEUE.md                          open items, and added against closed per week
+  briefs/worklist-*.md              work-list items proposed, approved, and done
+  .install/cache/sprint-history.json  points left per day for each sprint
+  briefs/health.txt, briefs/audit-status.json   today's health warnings and audit findings
+
+Nothing is sent anywhere. Set KIT_DIR to point it at another Kit folder.
+"""
+import argparse
+import datetime as dt
+import html
+import json
+import os
+import pathlib
+import re
+import subprocess
+import sys
+
+KIT = pathlib.Path(os.path.expanduser(os.environ.get("KIT_DIR", "~/Claude/Agents/kit")))
+HERE = pathlib.Path(__file__).resolve().parent
+for cand in (HERE.parent, KIT / ".install/shared"):
+    if (cand / "kit_queue.py").exists():
+        sys.path.insert(0, str(cand))
+        break
+try:
+    import kit_queue
+except ImportError:  # the page still renders without the queue section
+    kit_queue = None
+
+TODAY = dt.date.today()
+
+
+def read_json_lines(path):
+    rows = []
+    try:
+        for ln in path.read_text(errors="ignore").splitlines():
+            try:
+                rows.append(json.loads(ln))
+            except ValueError:
+                pass
+    except OSError:
+        pass
+    return rows
+
+
+def cost():
+    rows = read_json_lines(KIT / ".install/logs/cost.jsonl")
+    by_month, by_mode, by_model = {}, {}, {}
+    for r in rows:
+        c = float(r.get("cost_usd") or 0)
+        month = str(r.get("date", ""))[:7] or "unknown"
+        by_month[month] = by_month.get(month, 0) + c
+        if month == f"{TODAY:%Y-%m}":
+            by_mode[r.get("mode", "unknown")] = by_mode.get(r.get("mode", "unknown"), 0) + c
+            model = r.get("model") or "not recorded"
+            by_model[model] = by_model.get(model, 0) + c
+    return {"runs": len(rows), "by_month": dict(sorted(by_month.items())),
+            "this_month_by_mode": by_mode, "this_month_by_model": by_model}
+
+
+def runs(days=30):
+    out = {"finished": 0, "failed": 0, "timed_out": 0, "skipped": 0, "by_mode": {}}
+    for back in range(days):
+        day = TODAY - dt.timedelta(days=back)
+        try:
+            text = (KIT / f".install/logs/{day:%Y-%m-%d}.log").read_text(errors="ignore")
+        except OSError:
+            continue
+        for m in re.finditer(r"^== .* end (\w+) rc=(\d+)", text, re.M):
+            mode, rc = m.group(1), int(m.group(2))
+            key = "finished" if rc == 0 else ("timed_out" if rc == 142 else "failed")
+            out[key] += 1
+            out["by_mode"].setdefault(mode, {"finished": 0, "failed": 0, "timed_out": 0})[key] += 1
+        out["skipped"] += len(re.findall(r"^== .* run skipped", text, re.M))
+    return out
+
+
+def queue():
+    if kit_queue is None or not (KIT / "QUEUE.md").exists():
+        return None
+    lines = (KIT / "QUEUE.md").read_text().splitlines()
+    items = kit_queue.open_items(lines)
+    return {"open_items": len([i for i in items if not i["parent"]]),
+            "open_sub_items": len([i for i in items if i["parent"]]),
+            "trend": kit_queue.trend(lines, weeks=8)}
+
+
+def worklists():
+    total = {"lists": 0, "proposed": 0, "approved": 0, "done": 0}
+    for f in sorted((KIT / "briefs").glob("worklist-*.md")):
+        if not re.match(r"worklist-\d{4}-\d{2}-\d{2}\.md$", f.name):
+            continue
+        text = f.read_text(errors="ignore")
+        body = text.split("\n## Standby", 1)[0]
+        items = re.findall(r"^\d+\.\s.*$", body, re.M)
+        total["lists"] += 1
+        total["proposed"] += len(items)
+        total["approved"] += sum(1 for i in items if re.search(r"\bapproved\b", i, re.I))
+        total["done"] += sum(1 for i in items if re.search(r"\bdone\b|\[x\]|✓", i, re.I))
+    return total
+
+
+def sprints():
+    try:
+        hist = json.loads((KIT / ".install/cache/sprint-history.json").read_text())
+    except (OSError, ValueError):
+        return []
+    out = []
+    for key, days in hist.items():
+        if not days:
+            continue
+        name, _, start = key.partition("|")
+        vals = [days[d] for d in sorted(days)]
+        out.append({"sprint": name, "start": start, "days": len(vals),
+                    "points_left_first": vals[0], "points_left_last": vals[-1]})
+    return out
+
+
+def health():
+    warns = []
+    try:
+        for ln in (KIT / "briefs/health.txt").read_text(errors="ignore").splitlines():
+            if ln.startswith(("WARN", "FAIL")):
+                warns.append(ln.split(":", 1)[-1].strip()[:140] if ":" in ln else ln[:140])
+    except OSError:
+        pass
+    audit = {}
+    try:
+        a = json.loads((KIT / "briefs/audit-status.json").read_text())
+        audit = {"generated": a.get("generated", ""), **(a.get("severity_counts") or {})}
+    except (OSError, ValueError):
+        pass
+    return {"warnings": warns, "audit": audit}
+
+
+def collect():
+    return {"generated": dt.datetime.now().strftime("%d-%b-%Y %H:%M"), "cost": cost(), "runs": runs(),
+            "queue": queue(), "worklists": worklists(), "sprints": sprints(), "health": health()}
+
+
+def bars(pairs, unit=""):
+    if not pairs:
+        return '<p class="empty">No data yet.</p>'
+    top = max(v for _, v in pairs) or 1
+    rows = []
+    for label, v in pairs:
+        w = max(2, int(260 * v / top))
+        rows.append(f'<tr><th>{html.escape(str(label))}</th><td><span class="bar" style="width:{w}px"></span>'
+                    f' {unit}{v:,.2f}</td></tr>' if isinstance(v, float) else
+                    f'<tr><th>{html.escape(str(label))}</th><td><span class="bar" style="width:{w}px"></span> {v}</td></tr>')
+    return "<table>" + "".join(rows) + "</table>"
+
+
+def render(d):
+    e = html.escape
+    c, r, q, w, h = d["cost"], d["runs"], d["queue"], d["worklists"], d["health"]
+    parts = [f"<h1>Kit metrics</h1><p class=\"meta\">Generated {e(d['generated'])}. Read-only; built from "
+             "data Kit already keeps. Costs are Claude Code's estimates for scheduled runs, not a bill.</p>"]
+    parts.append("<section><h2>Spend by month</h2>" + bars([(k, float(v)) for k, v in c["by_month"].items()], "$")
+                 + "</section>")
+    parts.append("<section><h2>This month by run</h2>" + bars([(k, float(v)) for k, v in c["this_month_by_mode"].items()], "$")
+                 + "<h3>By model</h3>" + bars([(k, float(v)) for k, v in c["this_month_by_model"].items()], "$")
+                 + "</section>")
+    parts.append(f"<section><h2>Scheduled runs, last 30 days</h2><p>{r['finished']} finished, {r['failed']} failed, "
+                 f"{r['timed_out']} timed out, {r['skipped']} skipped.</p><table><tr><th>Run</th><td>finished / failed / "
+                 "timed out</td></tr>" + "".join(
+                     f"<tr><th>{e(m)}</th><td>{v['finished']} / {v['failed']} / {v['timed_out']}</td></tr>"
+                     for m, v in sorted(r["by_mode"].items())) + "</table></section>")
+    if q:
+        parts.append(f"<section><h2>Queue</h2><p>{q['open_items']} open items, {q['open_sub_items']} open sub-items.</p>"
+                     "<table><tr><th>Week of</th><td>added / closed</td></tr>" + "".join(
+                         f"<tr><th>{e(t['week'])}</th><td>{t['added']} / {t['closed']}</td></tr>" for t in q["trend"])
+                     + "</table></section>")
+    parts.append(f"<section><h2>Work lists</h2><p>{w['lists']} lists: {w['proposed']} items proposed, "
+                 f"{w['approved']} marked approved, {w['done']} marked done.</p></section>")
+    sp = d["sprints"]
+    parts.append("<section><h2>Sprints</h2>" + ("<table><tr><th>Sprint</th><td>start, days tracked, points left "
+                 "first to last</td></tr>" + "".join(
+                     f"<tr><th>{e(s['sprint'])}</th><td>{e(s['start'])}, {s['days']} days, {s['points_left_first']} to "
+                     f"{s['points_left_last']}</td></tr>" for s in sp) + "</table>" if sp else
+                 '<p class="empty">No sprint history yet.</p>') + "</section>")
+    a = h["audit"]
+    parts.append("<section><h2>Health and audit today</h2>" + (
+        "<ul>" + "".join(f"<li>{e(x)}</li>" for x in h["warnings"]) + "</ul>" if h["warnings"] else
+        "<p>No health warnings.</p>") + (
+        f"<p>Audit: {a.get('critical', 0)} critical, {a.get('warning', 0)} warning, {a.get('info', 0)} info.</p>"
+        if a else "") + "</section>")
+    css = ("body{font-family:Arial,sans-serif;margin:24px;color:#15202B;background:#fff;max-width:920px}"
+           "h1{margin:0 0 4px}.meta{color:#566573;margin:0 0 18px}section{border-top:1px solid #C9D0D6;padding:10px 0}"
+           "h2{font-size:17px;margin:6px 0}h3{font-size:14px;margin:10px 0 4px}table{border-collapse:collapse}"
+           "th{text-align:left;font-weight:normal;color:#566573;padding:2px 12px 2px 0;white-space:nowrap}"
+           ".bar{display:inline-block;height:10px;background:#1F4E79;vertical-align:middle}.empty{color:#566573}"
+           "@media (prefers-color-scheme:dark){body{background:#11171D;color:#E4EAEE}.bar{background:#6FA8DC}"
+           "th,.meta,.empty{color:#9AA8B4}section{border-color:#2A353F}}")
+    return (f"<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Kit metrics</title>"
+            f"<style>{css}</style></head><body>{''.join(parts)}</body></html>\n")
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-metrics", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--json", action="store_true", help="print the numbers instead of writing the page")
+    ap.add_argument("--out", help="where to write the page (default: metrics.html in the Kit folder)")
+    ap.add_argument("--open", action="store_true", help="open the page after writing it")
+    a = ap.parse_args(argv)
+    d = collect()
+    if a.json:
+        print(json.dumps(d, indent=1, default=str))
+        return 0
+    out = pathlib.Path(a.out).expanduser() if a.out else KIT / "metrics.html"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_name(out.name + ".tmp")
+    tmp.write_text(render(d), encoding="utf-8")
+    os.replace(tmp, out)
+    if os.name != "nt":
+        os.chmod(out, 0o600)
+    print(f"kit-metrics: wrote {out}")
+    if a.open:
+        opener = ["open"] if sys.platform == "darwin" else (["cmd", "/c", "start", ""] if os.name == "nt" else ["xdg-open"])
+        subprocess.run(opener + [str(out)])
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

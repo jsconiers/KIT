@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+"""kit-labcheck: flag production or confidential data in lab requests and runbooks.
+
+  kit-labcheck FILE...           check each file; print one line per finding
+  kit-labcheck --json FILE...    the same, as JSON
+  kit-labcheck --terms           show the terms in use and where they came from
+
+Labs take synthetic, masked, or public data only, unless the data owner approves otherwise in
+writing. This is a first-pass check for that rule, not a guarantee: it looks for words and patterns
+that usually mean real data (production, PII, customer data, confidential, card or social security
+number shapes, hostnames with "prod" in them), and the lab planner or a person reads each finding.
+
+It skips guidance in angle brackets (template text such as <synthetic, masked, or public>) and
+negated mentions such as "no production data" or "non-production". Matched numbers are masked in
+the output, so a real card number found in a runbook isn't repeated on screen.
+
+Extra terms come from the **Data rule check terms:** line in memory/context/labs.md (comma-separated;
+a term in slashes is a regular expression, for example /\\bcorp-db\\d+\\b/). KIT_DIR overrides the
+Kit folder (default ~/Claude/Agents/kit).
+
+Exit codes: 0 nothing found, 1 findings, 2 a file couldn't be read.
+"""
+import argparse
+import json
+import os
+import pathlib
+import re
+import sys
+
+KIT = pathlib.Path(os.path.expanduser(os.environ.get("KIT_DIR", "~/Claude/Agents/kit")))
+LABS = KIT / "memory/context/labs.md"
+
+WORDS = ["production", "prod", "PII", "personal data", "personally identifiable", "customer data",
+         "client data", "cardholder", "confidential", "restricted data", "live data", "real data",
+         "production database", "production data", "prod data", "data extract", "copy of prod"]
+PATTERNS = [
+    ("card number shape", re.compile(r"\b(?:\d[ -]?){13,19}\b")),
+    ("social security number shape", re.compile(r"\b\d{3}-\d{2}-\d{4}\b")),
+    ("IBAN shape", re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b")),
+    ("production hostname", re.compile(r"\b[\w-]*prod[\w-]*\.[a-z0-9.-]+\b", re.I)),
+]
+NEGATIONS = re.compile(r"\b(no|not|non|never|without|nor|zero|excluding|exclude)\b[\s-]*(?:\w+[\s-]+){0,2}$", re.I)
+NONPROD = re.compile(r"\bnon[\s-]?prod(uction)?\b", re.I)
+GUIDANCE = re.compile(r"<[^<>]*>")
+
+
+def luhn(digits):
+    total, alt = 0, False
+    for d in reversed(digits):
+        n = int(d)
+        if alt:
+            n = n * 2 - 9 if n > 4 else n * 2
+        total += n
+        alt = not alt
+    return total % 10 == 0
+
+
+def mask(text):
+    return re.sub(r"\d(?=(?:[ -]?\d){4})", "*", text)
+
+
+def extra_terms():
+    """Terms from the labs.md setup line, as (label, compiled pattern) pairs."""
+    if not LABS.exists():
+        return [], "built-in only (no labs.md)"
+    m = re.search(r"^- \*\*Data rule check terms:\*\*\s*(.+?)(?=^\S|^- \*\*|\Z)", LABS.read_text(errors="ignore"),
+                  re.M | re.S)
+    if not m:
+        return [], f"built-in only ({LABS} has no Data rule check terms line)"
+    raw = " ".join(m.group(1).split())
+    if raw.lower().startswith(("not set", "optional", "none")):
+        return [], f"built-in only (Data rule check terms not set in {LABS})"
+    out = []
+    for t in (x.strip().rstrip(".") for x in raw.split(",")):
+        if not t:
+            continue
+        if len(t) > 2 and t.startswith("/") and t.endswith("/"):
+            try:
+                out.append((t, re.compile(t[1:-1], re.I)))
+            except re.error:
+                continue
+        else:
+            out.append((t, re.compile(r"\b" + re.escape(t.strip("`")) + r"\b", re.I)))
+    return out, f"built-in plus {len(out)} from {LABS}"
+
+
+def rules():
+    words = sorted(set(WORDS), key=len, reverse=True)
+    out = [(w, re.compile(r"\b" + re.escape(w) + r"\b", re.I)) for w in words]
+    extra, _ = extra_terms()
+    return out + extra
+
+
+def negated(line, start):
+    before = line[:start]
+    return bool(NEGATIONS.search(before))
+
+
+def check_line(line, rule_list):
+    hits = []
+    clean = GUIDANCE.sub(lambda m: " " * len(m.group(0)), line)
+    spans = []
+    host_rx = dict(PATTERNS)["production hostname"]
+    for m in host_rx.finditer(clean):
+        if NONPROD.search(m.group(0)) or negated(clean, m.start()):
+            continue
+        spans.append((m.start(), m.end()))
+        hits.append(("production hostname", m.group(0)))
+    for label, rx in rule_list:
+        for m in rx.finditer(clean):
+            if any(a <= m.start() < b for a, b in spans):
+                continue
+            if NONPROD.search(clean[max(0, m.start() - 4):m.end() + 11]) and "prod" in label.lower():
+                continue
+            if negated(clean, m.start()):
+                continue
+            spans.append((m.start(), m.end()))
+            hits.append((label, m.group(0)))
+    for label, rx in PATTERNS:
+        for m in rx.finditer(clean):
+            val = m.group(0)
+            if label == "card number shape":
+                digits = re.sub(r"\D", "", val)
+                if not (13 <= len(digits) <= 19 and luhn(digits)):
+                    continue
+            if label == "production hostname":
+                continue
+            if any(a <= m.start() < b for a, b in spans):
+                continue
+            spans.append((m.start(), m.end()))
+            hits.append((label, mask(val)))
+    return hits
+
+
+def check_file(path, rule_list):
+    text = pathlib.Path(path).read_text(errors="ignore")
+    findings = []
+    for n, line in enumerate(text.splitlines(), 1):
+        for label, match in check_line(line, rule_list):
+            excerpt = mask(" ".join(line.split()))[:120]
+            findings.append({"file": str(path), "line": n, "term": label, "match": match, "excerpt": excerpt})
+    return findings
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-labcheck", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("files", nargs="*")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--terms", action="store_true", help="show the terms in use")
+    a = ap.parse_args(argv)
+    if a.terms:
+        _, where = extra_terms()
+        print(f"kit-labcheck terms: {where}")
+        for label, _ in rules():
+            print(f"  {label}")
+        for label, _ in PATTERNS:
+            print(f"  [{label}]")
+        return 0
+    if not a.files:
+        ap.print_usage()
+        return 2
+    rule_list, findings, errors = rules(), [], []
+    for f in a.files:
+        try:
+            findings += check_file(f, rule_list)
+        except OSError as e:
+            errors.append(f"{f}: {e.strerror or e}")
+    if a.json:
+        print(json.dumps({"findings": findings, "errors": errors}, indent=2))
+    else:
+        for x in findings:
+            print(f"{x['file']}:{x['line']}: {x['term']}: {x['excerpt']}")
+        for e in errors:
+            print(f"kit-labcheck: can't read {e}", file=sys.stderr)
+        print(f"kit-labcheck: {len(findings)} finding(s) in {len(a.files) - len(errors)} file(s)"
+              + ("; a person checks each one against the data rule" if findings else ""))
+    if errors:
+        return 2
+    return 1 if findings else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

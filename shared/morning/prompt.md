@@ -11,6 +11,10 @@ isn't there, and say in one line which steps you skipped.
    line. If briefs/audit-weekly.md is from the last seven days, add its headline under "Audit".
    If this prompt ends with a "Budget:" instruction, follow it: put the budget line in the brief's
    health section and in every short text.
+   If briefs/kit-release-notes.md exists and doesn't start with "Shown in the brief", Kit was
+   updated since the last brief: add a short "What changed in Kit" section (three to five bullets
+   from it) to the brief, copy the file to briefs/kit-release-notes-YYYY-MM-DD.md, then replace
+   its contents with the single line "Shown in the brief for YYYY-MM-DD." so it appears once.
 2. Read QUEUE.md, STATUS.md, and memory/personal/INDEX.md.
    - **To-dos.** From {{OWNER}}'s section, list what's overdue and what's due within three days,
      work and personal items alike, then the rest of his open items in priority order. Items
@@ -27,6 +31,9 @@ isn't there, and say in one line which steps you skipped.
      last day's inbox and pick up to five messages that need {{OWNER}} (a reply, a decision, a
      deadline), skipping newsletters, receipts, and notifications. List each with the sender,
      the subject, and why it matters. Open a message only when the subject isn't enough to judge.
+   - **Meeting actions,** only if briefs/pending-actions.md exists. List the actions in it not yet
+     marked confirmed or dropped: action, owner role, due, project. Don't add them to the queue;
+     end with "To add these, confirm them with Kit in a session."
    - **Pastoral care,** only if care/care-list.md exists. Read it, but don't change it. List
      follow-ups that are overdue or due today: first name, church, and the action only, with no
      diagnoses.
