@@ -45,3 +45,19 @@ model), `ollama`, `lmstudio`, `vllm`, `litellm`. Each takes `base_url`, `timeout
 optional `model_ids` map from a profile's model name to the provider's.
 
 See `.install/shared/KIT-RUN.md` for kit-delegate and kit-run usage and limits.
+
+## The eval gate
+
+Don't move an agent off the default profile on judgment alone. First run its evaluation cases on
+the new profile, and change models.json only if they pass:
+
+```
+kit-evals <agent>                                  # static checks, free
+kit-evals --live <agent> --profile standard        # shows the estimated cost, runs nothing
+kit-evals --live <agent> --profile standard --yes  # runs the cases through Claude Code
+```
+
+Then set the agent's profile in models.json (or `models/<agent>.json`), run `kit-models apply`,
+and install the agents. Cases live in `tests/evals/<agent>.json`; an agent without cases can't
+pass the gate, so write its cases first. The same rule applies to non-Claude profiles once phase 2
+is on, and to kit-run.

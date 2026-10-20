@@ -14,6 +14,10 @@ it current.
 - **Review lessons:** not set. The file where the reviewer keeps one-line rules from findings that
   recur across reviews, which the IA and GDS writers read before every draft. For example
   `<library root>/knowledge/review-lessons.md`.
+- **Quality loop:** min 3, days 90. How often a finding must recur (same category, template, and
+  section, in at least two reviews) within how many days before `kit-quality` proposes a lesson and
+  a template change. Proposals go to `briefs/pending-lessons.md` and
+  `briefs/pending-template-changes.md` for {{OWNER}} to approve.
 - **Output:** not set. The file format for drafts, and how to name them.
 - **Tools:** optional. Document-generation tools the writers may use, and any limits on them.
 - **Implementation documents:** optional. Templates for test plans, change requests, runbooks, and

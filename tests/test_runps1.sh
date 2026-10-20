@@ -30,6 +30,11 @@ cat > "$S/bin/claude" <<EOF
 #!/bin/bash
 printf "%s\\n" "\$@" > "$S/claude-args.txt"
 sleep \${FAKE_SLEEP:-0} || exit 1   # a killed run stops here, as a real claude process would
+[ -n "\${FAKE_FAIL:-}" ] && exit 3
+if [ -n "\${FAKE_FLAKY:-}" ]; then
+  n=\$(cat "$S/flaky-count" 2>/dev/null || echo 0); n=\$((n+1)); echo \$n > "$S/flaky-count"
+  if [ "\$n" -le "\$FAKE_FLAKY" ]; then echo "\${FAKE_ERRMSG:-API Error: 529 Overloaded}" >&2; exit 1; fi
+fi
 echo "Kit test" > "$KIT/briefs/latest-text.txt"
 echo "Kit test" > "$KIT/briefs/worklist-text.txt"
 echo "a warning on stderr" >&2
@@ -92,6 +97,35 @@ echo 999999 > "$KIT/.install/logs/.run.lock/pid"
 fresh; start=$(date +%s); run morning; took=$(( $(date +%s) - start ))
 [ "$took" -lt 12 ] && ! grep -q "waiting for another run" "$LOG" && ok "lock: a dead run's lock is cleared at once" || bad "stale lock ($took s)"
 [ ! -d "$KIT/.install/logs/.run.lock" ] && ok "lock: released when the run ends" || bad "lock not released"
+
+# ---- degraded mode ---------------------------------------------------------------------------
+rm -rf "$KIT/.install/logs/.run.lock"
+cp "$HERE/shared/bin/kit-degraded" "$KIT/.install/shared/bin/"; cp "$HERE/shared/kit_daily.py" "$KIT/.install/shared/"
+BRIEF="$KIT/briefs/$(date +%Y-%m-%d).md"
+printf 'OUTLOOK_CHECK="off"\n' > "$M/config"
+fresh; rm -f "$BRIEF"; FAKE_FAIL=1 run morning
+grep -q "Degraded brief: written without a model" "$BRIEF" 2>/dev/null && grep -q "degraded brief written" "$LOG" \
+  && ok "degraded: a failed morning run still produces a brief" || bad "degraded after failure"
+grep -q "Degraded brief (no model)" "$KIT/briefs/latest-text.txt" 2>/dev/null && ok "degraded: short text written" || bad "degraded text"
+printf 'OUTLOOK_CHECK="off"\nDEGRADED_MODE="off"\n' > "$M/config"
+fresh; rm -f "$BRIEF"; FAKE_FAIL=1 run morning
+[ ! -f "$BRIEF" ] && grep -q "sent failure notice" "$LOG" && ok "degraded: DEGRADED_MODE=off keeps the failure notice" || bad "degraded off"
+rm -f "$KIT/.install/shared/bin/kit-degraded"
+
+# ---- auto-retry -------------------------------------------------------------------------------
+calls() { cat "$S/flaky-count" 2>/dev/null || echo 0; }
+printf 'OUTLOOK_CHECK="off"\nRETRY_DELAY="0"\n' > "$M/config"
+fresh; rm -f "$S/flaky-count"; FAKE_FLAKY=1 run worklist
+grep -q "retrying worklist after transient failure (Overloaded)" "$LOG" && [ "$(calls)" = "2" ] \
+  && ok "retry: an overload is retried once" || bad "retry after overload ($(calls) calls)"
+fresh; rm -f "$S/flaky-count"; FAKE_FLAKY=2 run worklist
+[ "$(grep -c "retrying worklist" "$LOG")" = "1" ] && [ "$(calls)" = "2" ] && ok "retry: only one retry" || bad "one retry ($(calls))"
+fresh; rm -f "$S/flaky-count"; FAKE_FLAKY=1 FAKE_ERRMSG="Error: permission denied" run worklist
+! grep -q "retrying" "$LOG" && ok "retry: a refusal is not retried" || bad "refusal retried"
+printf 'OUTLOOK_CHECK="off"\nRETRY_DELAY="0"\nRETRY_ON="off"\n' > "$M/config"
+fresh; rm -f "$S/flaky-count"; FAKE_FLAKY=1 run worklist
+! grep -q "retrying" "$LOG" && [ "$(calls)" = "1" ] && ok "retry: RETRY_ON=off turns it off" || bad "RETRY_ON off"
+rm -f "$S/flaky-count"
 
 echo "run.ps1 tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

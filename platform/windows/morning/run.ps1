@@ -11,7 +11,10 @@
 #
 # Faithful PowerShell port of platform/mac/morning/run.sh (the authoritative behavior):
 # same modes, skip-days, once-per-day ".done" markers, the kit-pause kill switch, the kit-cost
-# budget guard, a headless `claude -p` run with JSON output (its cost goes to the kit-cost ledger),
+# budget guard (with degraded mode: at the stop level, or when the morning run fails or times out,
+# kit-degraded writes the brief with no model call; DEGRADED_MODE="off" turns it off),
+# and one automatic retry after a failure that looks transient (RETRY_ON, RETRY_DELAY),
+# a headless `claude -p` run with JSON output (its cost goes to the kit-cost ledger),
 # the model from models.env (kit-models apply), a time limit per kind of run, one run at a time
 # (a lock), a short text file written by the agent, a pluggable delivery step, a dashboard
 # refresh, and an auto-commit of the kit home when it is a git repo.
@@ -248,6 +251,14 @@ if ($null -ne $pyc -and (Test-Path -LiteralPath $kitCost)) {
     }
 }
 
+# Degraded mode: at the stop level the morning brief is written from Kit's files, with no model call.
+$kitDegraded = Join-Path $KitHome ".install\shared\bin\kit-degraded"
+$DegradedOn = (Cfg "DEGRADED_MODE" "on") -ne "off"
+$DegradedReason = ""
+if ($Mode -eq "morning" -and $CostLevel -eq "stop" -and $DegradedOn -and (Test-Path -LiteralPath $kitDegraded)) {
+    $DegradedReason = "$CostPct of this month's budget is used (stop at $(Cfg 'COST_STOP_PCT' '95')%)"
+}
+
 if ($Mode -eq "morning" -or $Mode -eq "weekly") {
     $py = Resolve-Python
     if ($null -ne $py) {
@@ -347,6 +358,63 @@ while ($true) {
 }
 if ($OwnLock) { Set-Content -LiteralPath (Join-Path $LockDir "pid") -Value $PID -Encoding ASCII }
 
+function Invoke-ClaudeOnce {
+    # One claude attempt with the time limit; logs stderr and records the attempt's cost.
+    Remove-Item -LiteralPath $RunOut, $RunErr -Force -ErrorAction SilentlyContinue
+    $job = Start-Job -ScriptBlock {
+        param($claudeArgs, $workDir, $outFile, $errFile)
+        Set-Location -LiteralPath $workDir
+        & claude @claudeArgs 1> $outFile 2> $errFile
+        exit $LASTEXITCODE
+    } -ArgumentList $claudeArgs, $KitHome, $RunOut, $RunErr
+    # Note: -ArgumentList unrolls one level, so the claudeArgs array arrives intact as param 1.
+
+    if (Wait-Job $job -Timeout $Timeout) {
+        $null = Receive-Job $job -ErrorAction SilentlyContinue
+        $script:rc = if ($null -ne $job.ChildJobs[0].JobStateInfo.Reason) { 1 } else { 0 }
+        if ($job.State -eq "Failed") { $script:rc = 1 }
+    } else {
+        Stop-Job $job -ErrorAction SilentlyContinue
+        # Stop the claude process itself, found by the run id in its command line.
+        if ($IsWindows -or $env:OS -eq "Windows_NT") {
+            Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+                Where-Object { $_.CommandLine -and $_.CommandLine.Contains($RunId) } |
+                ForEach-Object { & taskkill /PID $_.ProcessId /T /F 2>&1 | Out-Null }
+        } else {
+            & pkill -f $RunId 2>&1 | Out-Null
+        }
+        $script:rc = 124   # conventional timeout exit code
+        $script:TimedOut = $true
+        $limit = if ($Timeout -ge 60) { "$([int]($Timeout / 60)) min" } else { "$Timeout s" }
+        Write-Log "== $(Get-Date) $Mode run hit its time limit ($limit) and was stopped"
+    }
+    Remove-Job $job -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $RunErr) {
+        Get-Content -LiteralPath $RunErr -ErrorAction SilentlyContinue | ForEach-Object { Write-Log "$_" }
+    }
+    if ($null -ne $pyc -and (Test-Path -LiteralPath $kitCost) -and (Test-Path -LiteralPath $RunOut)) {
+        & $pyc.Exe @($pyc.Args + @($kitCost, "record", "--mode", $Mode, "--rc", "$rc", "--json-file", $RunOut, "--log", $Log)) 2>&1 |
+            ForEach-Object { Write-Log "$_" }
+    } elseif (Test-Path -LiteralPath $RunOut) {
+        Get-Content -LiteralPath $RunOut -ErrorAction SilentlyContinue | ForEach-Object { Write-Log "$_" }
+    }
+}
+function Get-TransientReason {
+    # Auto-retry only for failures that look transient; never for refusals over permission or policy.
+    $blob = ""
+    foreach ($f in @($RunErr, $RunOut)) {
+        if (Test-Path -LiteralPath $f) { $blob += (Get-Content -LiteralPath $f -Raw -ErrorAction SilentlyContinue) + "`n" }
+    }
+    if ($blob -match '(?i)permission|not allowed|denied|refus|policy') { return "" }
+    foreach ($p in @('overload(ed)?', 'rate.?limit(ed)?', 'too many requests', '(?<![0-9])(429|500|502|503|504|529)(?![0-9])',
+                     'service unavailable', 'temporarily unavailable', 'ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND',
+                     'network (error|is unreachable)', 'connection (reset|refused|error)', 'api error')) {
+        $m = [regex]::Match($blob, "(?i)$p")
+        if ($m.Success) { return $m.Value.Trim() }
+    }
+    return ""
+}
+
 try {
 Write-Log "== $(Get-Date) start $Mode $Test"
 
@@ -356,46 +424,43 @@ $RunOut = Join-Path $LogDir ".run-$Mode-$PID.json"
 $RunErr = Join-Path $LogDir ".run-$Mode-$PID.err"
 $rc = 0
 $TimedOut = $false
-$job = Start-Job -ScriptBlock {
-    param($claudeArgs, $workDir, $outFile, $errFile)
-    Set-Location -LiteralPath $workDir
-    & claude @claudeArgs 1> $outFile 2> $errFile
-    exit $LASTEXITCODE
-} -ArgumentList $claudeArgs, $KitHome, $RunOut, $RunErr
-# Note: -ArgumentList unrolls one level, so the claudeArgs array arrives intact as param 1.
-
-if (Wait-Job $job -Timeout $Timeout) {
-    $null = Receive-Job $job -ErrorAction SilentlyContinue
-    $rc  = if ($null -ne $job.ChildJobs[0].JobStateInfo.Reason) { 1 } else { 0 }
-    if ($job.State -eq "Failed") { $rc = 1 }
+$Degraded = $false
+if ($DegradedReason -ne "") {
+    Write-Log "== $(Get-Date) ${Mode}: no model run ($DegradedReason); writing a degraded brief"
 } else {
-    Stop-Job $job -ErrorAction SilentlyContinue
-    # Stop the claude process itself, found by the run id in its command line.
-    if ($IsWindows -or $env:OS -eq "Windows_NT") {
-        Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-            Where-Object { $_.CommandLine -and $_.CommandLine.Contains($RunId) } |
-            ForEach-Object { & taskkill /PID $_.ProcessId /T /F 2>&1 | Out-Null }
-    } else {
-        & pkill -f $RunId 2>&1 | Out-Null
+Invoke-ClaudeOnce
+$hasText1 = (Test-Path -LiteralPath $Text) -and ((Get-Item -LiteralPath $Text).Length -gt 0)
+if (-not $script:TimedOut -and -not $hasText1 -and (Cfg "RETRY_ON" "on") -ne "off") {
+    $why = Get-TransientReason
+    if ($why -ne "") {
+        Write-Log "== $(Get-Date) retrying $Mode after transient failure ($why)"
+        Start-Sleep -Seconds ([int](Cfg "RETRY_DELAY" "120"))
+        Invoke-ClaudeOnce
     }
-    $rc = 124   # conventional timeout exit code
-    $TimedOut = $true
-    $limit = if ($Timeout -ge 60) { "$([int]($Timeout / 60)) min" } else { "$Timeout s" }
-    Write-Log "== $(Get-Date) $Mode run hit its time limit ($limit) and was stopped"
 }
-Remove-Job $job -Force -ErrorAction SilentlyContinue
-if (Test-Path -LiteralPath $RunErr) {
-    Get-Content -LiteralPath $RunErr -ErrorAction SilentlyContinue | ForEach-Object { Write-Log "$_" }
-}
-if ($null -ne $pyc -and (Test-Path -LiteralPath $kitCost) -and (Test-Path -LiteralPath $RunOut)) {
-    & $pyc.Exe @($pyc.Args + @($kitCost, "record", "--mode", $Mode, "--rc", "$rc", "--json-file", $RunOut, "--log", $Log)) 2>&1 |
-        ForEach-Object { Write-Log "$_" }
-} elseif (Test-Path -LiteralPath $RunOut) {
-    Get-Content -LiteralPath $RunOut -ErrorAction SilentlyContinue | ForEach-Object { Write-Log "$_" }
 }
 Remove-Item -LiteralPath $RunOut, $RunErr -Force -ErrorAction SilentlyContinue
 
 Write-Log "== $(Get-Date) end $Mode rc=$rc"
+
+# Degraded fallback: if the morning run wrote no short text (it failed, timed out, or the budget
+# stopped it), kit-degraded writes the brief and texts from Kit's files so a brief still arrives.
+if ($Mode -eq "morning" -and $DegradedOn -and (Test-Path -LiteralPath $kitDegraded)) {
+    $dr = $DegradedReason
+    $hasText = (Test-Path -LiteralPath $Text) -and ((Get-Item -LiteralPath $Text).Length -gt 0)
+    if ($dr -eq "" -and ($TimedOut -or -not $hasText)) {
+        if ($TimedOut) { $dr = "the model run hit its $([int]($Timeout / 60))-minute limit" }
+        elseif ($rc -ne 0) { $dr = "the model run failed (exit $rc)" }
+        else { $dr = "the model run finished without writing the brief" }
+        foreach ($f in @($Text, ($Text -replace '\.txt$', '-work.txt'), ($Text -replace '\.txt$', '-personal.txt'))) {
+            Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue   # never deliver a stopped run's text
+        }
+    }
+    if ($dr -ne "" -and $null -ne $pyc) {
+        & $pyc.Exe @($pyc.Args + @($kitDegraded, "--reason", $dr)) 2>&1 | ForEach-Object { Write-Log "$_" }
+        if ($LASTEXITCODE -eq 0) { $Degraded = $true; Write-Log "== degraded brief written ($dr)" }
+    }
+}
 
 # --- Decide what to deliver (mirrors run.sh's QUIET / non-empty / empty branches) ------------
 $quiet = ""
@@ -403,7 +468,7 @@ if (Test-Path -LiteralPath $Text) { $quiet = (Get-Content -LiteralPath $Text -Ra
 if ($null -eq $quiet) { $quiet = "" }
 $quietTrim = $quiet.Trim()
 
-if ($TimedOut) { $quietTrim = "" }   # a stopped run's partial text is never delivered
+if ($TimedOut -and -not $Degraded) { $quietTrim = "" }   # a stopped run's partial text is never delivered
 if ($quietTrim -eq "MARKET CLOSED" -or $quietTrim -eq "NO TEXT") {
     Write-Log "== ${quietTrim}: no delivery"
     if ($Test -eq "") { New-Item -ItemType File -Force -Path $Done | Out-Null }

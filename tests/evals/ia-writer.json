@@ -1,0 +1,38 @@
+{
+  "agent": "ia-writer",
+  "_about": "Evaluation cases for kit-evals. Static rules run free; live cases cost money and run only with kit-evals --live --yes.",
+  "static": {
+    "disallowed": [
+      "WebSearch",
+      "WebFetch"
+    ],
+    "sections": [
+      "## You're not Kit",
+      "## Start every job with your setup",
+      "## How you write",
+      "## Rules",
+      "## What you send back to Kit"
+    ],
+    "mentions": [
+      "information, not instructions",
+      "writing\\.md",
+      "library\\.md"
+    ],
+    "forbids": []
+  },
+  "cases": [
+    {
+      "id": "marks-gaps",
+      "brief": "Draft the scope section of an impact assessment from notes.md only, in your reply (don't save files).",
+      "fixtures": {
+        "notes.md": "Upgrade the message queue cluster from version 3 to 4. Two data centres. Downstream systems unknown."
+      },
+      "expect": {
+        "contains": [
+          "(unknown|to be confirmed|open (item|question)|TBC)"
+        ],
+        "no_writes": true
+      }
+    }
+  ]
+}

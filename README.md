@@ -1,77 +1,222 @@
 # Kit
 
-Kit is a personal assistant and chief of staff that lives in Claude Code. It's one agent
-working for one person. It keeps notes on you and your work, a running to-do list for you and
-for itself, a one-page status, lessons from its own mistakes, and your preferences, and it
-directs your other AI agents (Claude Code subagents) for you.
+Kit is an AI personal assistant that lives in Claude Code, with a staff of specialist subagents. It's
+one agent working for one person. It keeps your to-do list and its own, a one-page status, notes on your work,
+lessons from its own mistakes, and your preferences, and it directs a staff of 30 specialist
+agents (Claude Code subagents) for you.
 
-It's named for KITT from Knight Rider: loyal, a little dry, and willing to warn the driver.
+**Why Kit?** Kit is named after KITT, the AI car in the 1980s TV series *Knight Rider* that helped its
+driver, Michael Knight, figure things out and save the day. Like KITT, Kit advises and assists while
+the person drives and decides. (Knight Rider and KITT are trademarks of their owners; Kit isn't
+affiliated with them.)
+
+- **New here?** Read this page, then [INSTALL.md](INSTALL.md) and [ONBOARDING.md](ONBOARDING.md).
+- **Changing Kit?** Read [DESIGN.md](DESIGN.md) and [GOVERNANCE.md](GOVERNANCE.md).
+
+## What Kit does
+
+- **Keeps your commitments.** A running queue (`QUEUE.md`) for you, for Kit, and for what's
+  waiting on others, with sprints, stale-item checks, and duplicate detection.
+- **Briefs you.** A morning brief on weekdays, a weekly review on Mondays, a daily work list for
+  your approval, and an optional end-of-day wrap-up, delivered as a desktop notification or an
+  Outlook draft (never sent).
+- **Runs your staff.** Routes work to the right agent with a brief, checks what comes back, and
+  reports to you.
+- **Helps with architecture work.** Matches a new demand to published reference architectures,
+  profiles a system from the library's records, sizes a workload, and compares diagram versions.
+- **Prepares your day.** Meeting prep packs, inbox triage suggestions, mail still awaiting a reply,
+  1:1 prep, an accomplishments log, and calendar holds as drafts you open and save.
+- **Asks before acting.** Anything that sends, deletes, installs, commits, pushes, changes
+  settings, touches money, or commits you to someone waits for your yes.
+- **Stays private.** Everything lives in one folder only your account can read. Personal notes
+  stay separate from work notes.
+
+## Kit's staff
+
+Thirty agents in five groups. Each reads its own setup file in `memory/context/`, and
+`memory/context/agents.md` describes them all.
+
+| Group | Agents |
+|---|---|
+| Knowledge and documents | researcher, librarian, curator, precedent finder, onboarding guide, handoff |
+| Writing and review | IA writer, GDS writer, reviewer, standards checker, risk and compliance mapper, diagrammer, deck builder |
+| Delivery and planning | intake triager, dependency mapper, implementation planner, change board prep, cost estimator, PMO estimator, decision recorder, status reporter, meeting scribe |
+| Outside systems and oversight | gateway, demand tracker, auditor, scheduler |
+| Exploration | POC lead, lab planner, training lead, future tech planner |
+
+Work goes through Kit, apart from a few direct pairs listed in `agents.md`. The gateway is the
+agent meant to reach outside systems; the connector guard keeps its calls read-only and logs them.
+
+## Daily rhythm
+
+| When | Run | What you get |
+|---|---|---|
+| Weekdays 07:45 | Morning brief | To-dos, calendar, mail needing you, health and audit issues, queue hygiene |
+| Mon to Thu 09:00 | Work list | What Kit can do on its own today; you approve it in a session |
+| Monday 06:30 | Weekly review | The week, the queue, audit, horizon scan, watch, sprint review, cost, quality, retrospective (first Monday) |
+| Weekdays 17:30 | End-of-day wrap-up (optional) | What moved, what's due tomorrow, commitments not yet in the queue |
+| Weekdays, every 30 minutes (optional) | Meeting prep | A prep pack per upcoming meeting (a plain script; no Claude run) |
+| Daily 12:30 | Backup | An encrypted, checked archive of Kit's folder and history, in the folder you choose |
+| Every 15 minutes | To-do sync | Your queue mirrored to Outlook Tasks or Apple Reminders, and the "Kit Inbox" list pulled in |
+
+Scheduled runs use launchd on macOS and Task Scheduler on Windows. See INSTALL.md. If the
+budget's stop level is reached, or the morning run fails or times out, the brief still arrives:
+`kit-degraded` writes it from Kit's files with no model call, marked as degraded (`DEGRADED_MODE` in
+the config). A run that fails in a way that looks transient (overload, rate limit, network, an API 5xx
+or 529) is retried once after two minutes (`RETRY_ON`, `RETRY_DELAY`); time-outs and refusals are never
+retried. `kit-reliability` tracks every run's outcome, and the health check and the dashboard's
+Reliability panel flag a run type that keeps failing, slows down, or hasn't succeeded lately.
+
+## Command-line tools
+
+The installer links these into `~/.local/bin` (all in `shared/bin/`):
+
+**Your queue and day**
+
+| Tool | What it does |
+|---|---|
+| `todo` | Your to-do list from the shell; shares `QUEUE.md`. Also sprints (`todo sprint ...`). |
+| `kit-queue` | Queue hygiene: stale items, likely duplicates, the trend; applies verdicts you approve |
+| `kit-meetprep` | A prep pack per upcoming meeting: roles, related items, documents, what to decide |
+| `kit-triage` | Suggests reply, decide, delegate, read later, or ignore per inbox message; never acts |
+| `kit-awaiting` | Sent mail that asked for something and got no reply after N days, with draft nudges (needs a mail tool with sent-items commands) |
+| `kit-commitments` | Proposes to-dos from promises in your sent mail or minutes; you confirm |
+| `kit-holds` | Draft calendar holds as .ics files you open and save; Kit never writes to the calendar |
+| `kit-oneonone` | One-page prep for your 1:1 with your manager (by role); `--done` records the date |
+| `kit-wins` | Accomplishments log for reviews and 1:1s: collect, this month, report by theme |
+| `kit-settings` | How briefs reach you and which app your to-dos sync with, work and personal |
+
+**Architecture work**
+
+| Tool | What it does |
+|---|---|
+| `kit-refarch` | Suggests which published reference architectures fit a demand, ranked, with why |
+| `kit-precedent` | Ranked search of the library's indexes and registers for precedent |
+| `kit-sysprofile` | One-page profile of a system from the library's records, every line cited |
+| `kit-sizing` | Rough-order compute, storage, and network sizing, every assumption shown |
+| `kit-diagram-diff` | What changed between two versions of a draw.io or Visio diagram |
+| `kit-labcheck` | Flags production or confidential data in lab requests and runbooks |
+| `kit-lifecycle` | End-of-support early warning from an inventory and sourced dates |
+| `kit-roadmap` | Drafts a 1-to-3-year technology roadmap |
+| `kit-project` | Creates a project's folder skeleton by type (dry run unless `--yes`) |
+| `kit-quality` | Recurring review findings become proposed lessons and template changes |
+
+**Team and sharing**
+
+| Tool | What it does |
+|---|---|
+| `kit-team` | Sharing between Kits: sync, list, search, inbox, send (with your yes), ack, purge, `load` (team demand load), `experts` (who has done X) |
+| `kit-plugin` | Packages agents, templates, shared lessons, and skills as a Claude Code plugin marketplace; checks it before merging; never publishes |
+
+**Models and agents**
+
+| Tool | What it does |
+|---|---|
+| `kit-models` | Which model each agent and run uses, from `models.json`; `apply` writes them |
+| `kit-delegate` | Sends one bounded task to a model profile; also an MCP server (`--mcp`) |
+| `kit-run` | Experimental: runs one of Kit's agents outside Claude Code |
+| `kit-evals` | Agent checks: static (free) and live (`--live --yes`, costs money) |
+
+**Safety and operations**
+
+| Tool | What it does |
+|---|---|
+| `kit-pause` | Kill switch: stops scheduled runs and connector calls until `kit-pause resume` |
+| `kit-connect` | Connector check: guard, credential variables by name, Claude Code health |
+| `kit-backup` | Checked archive of Kit's folder and history to a folder you choose (local or shared), encrypted on request; `verify`, `restore` |
+| `kit-audit-export` | A dated evidence pack of Kit's controls for a compliance or security review |
+| `kit-retention` | Retention rules with legal holds; reports, and only moves files with `--yes` |
+| `kit-outlook` | Checks Outlook answers before a run, retrying; never starts it |
+| `kit-degraded` | The morning brief from Kit's files with no model call (budget stop, failed or timed-out run) |
+| `kit-reliability` | How reliably the scheduled runs work: success rate, duration, cost, and alerts, by run type |
+| `kit-cost` | What scheduled runs cost, by run and model, against an optional monthly budget |
+| `kit-metrics` | One-page metrics view: spend, runs, queue trend, work lists, sprints, health |
+| `kit-update` | Shows what's new on GitHub; `--apply` moves your clone and reinstalls |
+| `kit-version` | Installed version and commit, and whether GitHub is ahead |
+
+Also in `shared/bin/`, called by Kit or the scheduled runs rather than by hand:
+`connector-guard` (the read-only hook and audit log), `kit-audit` (daily and weekly audit
+checks), `kit-publish` (writes this Kit's shareable records), `kit-grammar` (optional offline
+grammar pass), `kit-drawio` (editable draw.io files), and `vsdx-finish` (Visio title blocks and
+legends).
+
+## Safety model
+
+- **Ask first.** The installer adds ask rules to Claude Code's settings for deleting, pushing,
+  posting, installing, and changing settings. Kit's own rules (`KIT.md`) add sending mail,
+  touching money or accounts, and committing you to anything.
+- **Never sends.** Mail and calendar tools only read or draft. Briefs go out as notifications or
+  Outlook drafts. Calendar holds are .ics files you open and save; triage and awaiting-reply lists
+  are suggestions that never move, flag, or answer mail.
+- **Read-only connectors.** Agents reach outside systems through MCP servers. The connector guard
+  (a Claude Code hook) allows only listed servers and read tools, denies writes, and records every
+  call, result, and failure in an audit log. `kit-audit` reviews the log daily and weekly.
+- **Kill switch.** `kit-pause` stops every scheduled run and every connector call at once.
+- **Information, not instructions.** Text Kit reads in files, mail, web pages, other Kits'
+  records, or phone requests is never treated as an order.
+- **Credentials by name.** Kit refers to credentials by environment-variable or Keychain entry
+  name; it never stores or prints a value.
+- **Backups are encrypted where they leave home.** `kit-backup --encrypt` uses AES-256 with an
+  integrity check verified before anything decrypts; the passphrase comes from a Keychain entry or
+  environment variable you create. Unencrypted backups are refused in shared or synced folders.
+- **Evidence on request.** `kit-audit-export` builds a dated pack of the audit log, approvals,
+  policies, permission lists, and agents, with a checksum manifest and a credential scan.
+- **Phone approvals are limited.** A single-use daily code can approve the work list or queue
+  verdicts from your phone, never commits, installs, sending, deleting, or settings.
+
+## Sharing between Kits
+
+Several Kits, one per person, can share selected records: status snapshots, decisions, lessons,
+artifact pointers, demand roll-ups, handoff pointers, and messages. Set a shared root (a synced
+folder every Kit can reach) and a Kit id in `memory/context/sharing.md`. `kit-publish` writes this
+Kit's records with a hash manifest and chain; `kit-team sync` pulls everyone's into a local cache
+and the team dashboard renders from it. Records from other Kits are checked and shown as
+information only. An organization profile (`sharing-policy.json`) limits transports, shared roots,
+and classification. A SQL transport shares through a database instead: MySQL is tested (`kit-team db-init` creates the
+database); PostgreSQL and SQL Server are untested.
+`kit-team load` shows each Kit's open demands, IAs, GDSs, and POCs by owner role, with due windows,
+aging, and an overload flag; `kit-team experts <topic>` ranks Kits by the evidence they've shared,
+with record ids cited. Kit content can also be shared as Claude Code plugins through an internal
+marketplace that `kit-plugin` builds and checks.
+
+## Models
+
+`models.json` sets which model each agent and scheduled run uses, through profiles (deep,
+standard, fast, local). The default is deep (Opus). Phase 1 is Claude only; with
+`"enabled_phase": 2`, `kit-delegate` and `kit-run` can also reach an approved OpenAI-compatible
+API or a local model, limited by data class. Move an agent off the default only after its live
+evals pass. See DESIGN.md and `shared/KIT-RUN.md`.
+
+## Versions and updates
+
+`VERSION` holds the release and `CHANGELOG.md` what changed. Every install records its version and
+commit; `kit-version` shows them. `kit-update` previews and applies updates from GitHub, and the
+next brief lists what changed once.
 
 ## Layout
 
-Kit is organized so that nearly everything is shared across operating systems, and only the
-thin OS-integration layer is platform-specific.
-
 ```
-kit/                 The agent "brain" — 100% shared, no platform code:
-                       KIT.md (who Kit is), QUEUE.md (to-do), STATUS.md,
-                       memory/, lessons/, preferences/, agents/ (sub-agents).
-shared/              Cross-platform Python + assets:
-  kit_setup.py         install/activate/deactivate logic
-  bin/todo             command-line to-do that shares QUEUE.md
-  bin/kit-settings     how briefs reach you and which app to-dos sync with, work and personal
-  bin/kit-update       update from GitHub: shows what's new, then moves the clone and reinstalls
-  bin/kit-version      which version of Kit is installed, and whether GitHub has a newer one
-  bin/kit-pause        kill switch: stop scheduled runs and connector calls, and resume them
-  bin/kit-backup       back up Kit's folder (files and history), check it, and restore it
-  bin/kit-retention    records retention rules with legal holds; reports, never deletes on its own
-  bin/kit-outlook      check Outlook answers before a run, retrying if it's slow; never starts it
-  bin/kit-team         read what the team's Kits share, through a local cache: sync, list, search, inbox
-  bin/kit-precedent    search the library's indexes and registers for precedent, ranked, with file and line
-  bin/kit-cost         what Kit's scheduled runs cost, against a monthly budget; skips extras near it
-  bin/kit-queue        queue hygiene: stale items, likely duplicates, the weekly trend; applies verdicts you approve
-  bin/kit-models       which model each agent and scheduled run uses, from models.json; apply writes them
-  bin/kit-delegate     hand one bounded task to a model profile (phase 2); also an MCP server (--mcp)
-  bin/kit-run          EXPERIMENTAL: run one of Kit's agents outside Claude Code, on any profile (phase 3)
-  bin/kit-labcheck     flag production or confidential data in lab requests and runbooks; masks numbers
-  bin/kit-metrics      a one-page metrics view (spend, runs, queue trend, work lists, sprints, health); read-only
-  bin/kit-project      create a project's folder skeleton in the library by type (dry run unless --yes)
-  bin/connector-guard  read-only guard and audit log for agents that reach outside systems
-  bin/vsdx-finish      fills in title blocks and builds legends in Visio diagrams
-  bin/kit-grammar      optional offline spelling and grammar pass (LanguageTool), skipped if absent
-  bin/kit-drawio       editable draw.io files from a diagram spec or a PowerPoint diagram
-  bin/kit-publish      writes selected records to an outbox for a team dashboard (off by default)
-  bin/kit-audit        daily and weekly checks of the connector audit log, for the brief and dashboard
-  team_dashboard.py    read-only team dashboard built from one or more outboxes
-  templates/           HTML templates for both dashboards; copy one to ~/Claude/Agents/kit/templates/
-                       to restyle it (your copy wins and survives reinstalls)
-  kit_template.py      finds and fills the dashboard templates
-  kit_records.py       record validator and credential checks used by kit-publish
-  records/             shared record formats (JSON Schema) and their rules
-  doctor.py            health check for the install, schedules, notes, secrets
-  dashboard.py         one-page dashboard (to-do, briefs, health, runs)
-  reminders_sync.py    two-way to-do sync (device backend is per-OS)
-  protect_folder.py    keeps Kit out of personal notes inside work folders
-  research/run_ta.py   TradingAgents runner
-  mail/, calendar/     shared config schemas
-  morning/             shared scheduled-run prompts + config.example
-platform/
-  mac/                 macOS integration:
-    install.sh, uninstall.sh
-    mail/kitmail.swift        Apple Mail tool (drafts only, no send)
-    calendar/kitcal.swift     EventKit calendar tool (safe: skips excluded cals & events with attendees)
-    morning/run.sh + *.plist  launchd scheduled runs (brief texted via Messages)
-    research/kit-research
-  windows/             Windows port — planned; see platform/windows/PORTING.md
-install.sh             top-level dispatcher (→ platform/mac/install.sh on macOS)
-install.ps1            top-level dispatcher (→ platform/windows/install.ps1 on Windows)
+README.md  INSTALL.md  DESIGN.md  ONBOARDING.md  GOVERNANCE.md  CHANGELOG.md  DEPENDENCIES.md  VERSION
+kit/          the brain, shared by every platform: KIT.md, QUEUE.md, STATUS.md, agents/,
+              memory/ (setup files in memory/context/), lessons/, preferences/, templates/,
+              models.json
+shared/       cross-platform Python: kit_setup.py (installer logic), doctor.py, dashboard.py,
+              deliver.py, the transport and sync modules, bin/ (the tools above), morning/
+              (scheduled-run prompts and config.example), records/ (shared record schemas),
+              sql/ (SQL transport scripts), templates/ (dashboard HTML), KIT-RUN.md
+platform/mac/      install.sh, uninstall.sh, morning/run.sh and launchd templates, mail and
+                   calendar adapters
+platform/windows/  install.ps1, uninstall.ps1, morning/run.ps1 and Task Scheduler scripts,
+                   Outlook adapters (built on macOS; untested on Windows)
+tests/        test suites (bash tests/test_*.sh) and agent eval cases (tests/evals/)
+install.sh    dispatches to platform/mac/install.sh
+install.ps1   dispatches to platform/windows/install.ps1
 ```
 
-Everything installs into `~/Claude/Agents/kit`, with the package copied to
-`~/Claude/Agents/kit/.install/` and the brain loaded into every Claude Code session through one
-import line in `~/.claude/CLAUDE.md`.
+Kit installs into `~/Claude/Agents/kit`, with the package copied to `.install/` inside it, and
+loads into every Claude Code session through one import line in `~/.claude/CLAUDE.md`.
 
-## Install (macOS)
+## Quick start (macOS)
 
 ```bash
 git clone https://github.com/<you>/KIT.git
@@ -79,194 +224,26 @@ cd KIT
 KIT_OWNER=Alex bash install.sh
 ```
 
-`KIT_OWNER` is the name Kit calls you; without it, Kit uses your account's first name. Then
-start `claude`, run `/context` to confirm `KIT.md` loaded, and say "Kit, introduce yourself."
+Then start `claude`, run `/context` to confirm `KIT.md` loaded, and say "Kit, introduce
+yourself." INSTALL.md covers Windows, scheduled runs, connectors, and the rest.
 
-The installer asks how you want the morning brief delivered and which app your to-dos sync with
-(see Settings below), and puts `todo`, `kit-settings`, `kit-update`, `kit-pause`, `kit-backup`, `kit-retention`,
-`kit-outlook`, `kit-team`, `kit-precedent`, `kit-cost`, `kit-queue`, `kit-version`,
-`kit-models`, `kit-labcheck`, `kit-metrics`, `kit-project`, `kit-delegate`, and `kit-run` in
-`~/.local/bin`. The optional scheduled
-runs (morning brief, post-open market read, weekly review) install as launchd jobs from
-`platform/mac/morning/`. The market reads in the prompts call the author's own MCP server — edit
-or remove those steps to fit your tools.
+## Where to go next
 
-## Install (Windows)
-
-Not yet implemented. The agent brain and the shared Python already run on Windows; the
-integration layer (mail, calendar, reminders, scheduling, folder privacy) still needs a Windows
-backend. See `platform/windows/PORTING.md` for the roadmap, then:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File install.ps1
-```
-
-## Settings
-
-`kit-settings` chooses how the morning brief and weekly review reach you, and which app your to-dos
-sync with. Run it with no arguments to see the current choices; the installer asks the same
-questions once. Your answers go in `~/Claude/Agents/kit/.install/shared/morning/config`, which stays
-on your computer (`shared/morning/config.example` documents every key).
-
-```bash
-kit-settings                                   # show the current choices
-kit-settings delivery local                    # desktop notification (the default)
-kit-settings delivery imessage                 # text to your phone (macOS)
-kit-settings delivery outlook-drafts           # a draft saved in Outlook, never sent
-kit-settings todos apple                       # Apple Reminders (macOS)
-kit-settings todos outlook                     # Outlook Tasks (reaches your phone via Microsoft To Do)
-kit-settings email you@example.com             # where Outlook drafts are addressed
-kit-settings text +15551234567                 # where iMessage texts go
-```
-
-**Work and personal, separately.** A to-do tagged `[work]` (add one with `todo work Review the GDS
-fri`) is a work item; everything else is personal. Each side can use its own channel and app, so
-work stays inside Microsoft 365 while personal items come to your phone:
-
-```bash
-kit-settings delivery personal imessage
-kit-settings delivery work outlook-drafts      # or local, if Outlook isn't set up on this computer
-kit-settings todos personal apple
-kit-settings todos work outlook
-```
-
-With a split, each run writes a personal-only and a work-only short text, and work channels never
-get the full brief. iMessage, SMS, and Apple Reminders run outside Microsoft 365, so `kit-settings`
-refuses them for work items unless you add `--force`. The Outlook channels need classic Outlook
-running with your work account; Kit never starts Outlook and never sends mail. On Windows, run it as
-`python %USERPROFILE%\Claude\Agents\kit\.install\shared\bin\kit-settings`; Windows uses Outlook
-for to-dos.
-
-**Updating.** `kit-update` fetches GitHub and shows the new commits and files without changing
-anything; `kit-update --apply` saves a backup branch, moves your clone onto GitHub's main, and
-reruns the installer. It stops if your clone has uncommitted work or commits GitHub doesn't have.
-
-**Versions and release notes.** `VERSION` holds the package version and `CHANGELOG.md` what each
-release changed. Every install records the version, commit, and date in
-`.install/VERSION.json`, with the last 20 installs; `kit-version` prints it (`--check` fetches
-GitHub first). When an update changes the version or commit, the installer writes
-`briefs/kit-release-notes.md`, and the next morning brief adds a short "What changed in Kit"
-section once. When you change Kit, add a line under **Unreleased** in `CHANGELOG.md`, and bump
-`VERSION` when you cut a release.
-
-**Pausing, backups, and retention.** `kit-pause <reason>` stops every scheduled run and every
-connector call until `kit-pause resume`; add `--hard` to unload the launchd jobs too (it shows the
-commands and needs `--yes`). `kit-backup` writes a checked archive of Kit's folder and history to
-BACKUP_DIR; `kit-backup restore <archive> --to <empty folder>` brings it back. `kit-retention`
-keeps everything until you set rules from your records policy in
-`memory/context/retention.json`; legal holds (`kit-retention hold <project> --reason ...`) override
-every rule and show in the brief and on the dashboard. Before the morning brief and weekly
-review, `kit-outlook` checks Outlook answers and retries; if it still doesn't, the brief marks
-calendar and mail stale and asks you to restart Outlook.
-
-**Cost.** Every scheduled run records its estimated cost (Claude Code's own figure, not your bill)
-in `.install/logs/cost.jsonl`; `kit-cost` shows this month's spend, the projection, and the
-costliest runs (each line also records the cost and tokens for every model the run used, so
-`kit-cost report --by model` shows spend by model; kit-delegate and kit-run record through
-`kit-cost record-usage`, and lines without a price count as "not priced"), and `kit-cost report` breaks a month down by run kind and day. Set
-COST_BUDGET_MONTHLY in the config to add a budget: from COST_WARN_PCT the brief says how much is
-used, and from COST_STOP_PCT only the morning brief (COST_ESSENTIAL_MODES) runs. Interactive
-sessions aren't counted; see those with /cost and /usage in Claude Code.
-
-**Models.** `models.json` in the Kit folder sets which model each agent and each scheduled run uses.
-Agents and runs name a profile (deep, standard, fast); profiles name a provider and model, and
-default_profile is deep (Opus), so everything runs on Opus until you change it. A file in
-`models/<agent>.json` wins over models.json for that agent. `kit-models` shows the result and where
-each choice came from, `kit-models check` validates the config, and `kit-models apply` writes each
-agent's `model:` line and the runs' models (then install with `doctor.py --fix-agents`). Phase 1 is
-Claude models only; profiles on other providers are refused and fall back. Move an agent off Opus
-only after it passes its evals; `models.example-routing.json` holds a proposed starting set.
-
-**Calling models directly.** `kit-delegate` sends one bounded task to a profile and prints the
-answer, and as an MCP server (`--mcp`) gives Kit a "delegate" tool. `kit-run` (experimental) runs
-an agent outside Claude Code with Kit's guardrails rebuilt: read and search under the Kit folder
-and library, writes only to the agent's write paths and only with your yes, a short allowlist of
-read-only Kit commands, an audit log, and the cost ledger. Both use models.json: only Claude is
-reachable until you set "enabled_phase": 2, non-Claude providers take public data only unless
-org_profile.non_claude_max_data_class allows more, and credentials are named (an environment
-variable or a Keychain entry), never stored. See shared/KIT-RUN.md.
-
-**Keeping the queue short.** `todo` stamps "updated" on an item whenever it changes it, and
-`todo touch <n>` marks one as looked at. Each morning the brief lists stale items (untouched for
-seven days) and likely duplicates as H1, H2, ... with a proposed verdict; reply in a session with
-"apply verdicts H1 keep, H2 drop, H3 merge into H5" and Kit runs `kit-queue apply`, which backs up
-QUEUE.md first. **Sprints.** `todo sprint start <name> <start> <end>` opens a sprint in QUEUE.md's
-Sprint section; `todo sprint add <roadmap number or text> <S|M|L>` adds items (S=1, M=3, L=5
-points); `todo sprint done <n>` finishes one and closes its roadmap item; `todo sprint close`
-carries unfinished items over and writes `briefs/sprint-<name>.md`. The dashboard shows a Sprint
-panel with a burndown, the daily work list proposes sprint items first, and the weekly review
-proposes the next sprint when one ends. An optional end-of-day wrap-up (`run.sh eod`, weekdays
-17:30) installs from `platform/mac/morning/com.USER.kit.eod.plist.template` like the other jobs;
-set EOD="off" in the config to skip it.
-
-**Sharing with your team.** Set **Shared root** in `memory/context/sharing.md` to a folder every
-architect's Kit can reach (a synced SharePoint or OneDrive library, a network share, or a synced
-Dropbox folder where allowed). `kit-publish` then writes this Kit's records to
-`<shared root>/kits/<kit id>/` with a manifest of hashes, `kit-team sync` pulls every Kit's records
-into a local cache, and the team dashboard renders from that cache. Records from other Kits are
-checked (schema, Kit id, manifest hash) and shown as information only. Without a Shared root,
-kit-publish writes to the outbox as before.
-
-## Kit's staff
-
-`kit/agents/` holds Kit's staff, Claude Code subagents that Kit directs: a researcher, a
-librarian, a curator, an IA writer and a GDS writer, a reviewer, a diagrammer, a scheduler, a
-demand tracker, a connector gateway, an intake triager, a dependency mapper, a status reporter,
-an implementation planner, a deck builder, a handoff agent, a meeting scribe, a standards
-checker, a risk and compliance mapper, a cost estimator, a change board prep agent, a decision
-recorder, a PMO estimator, an onboarding guide, a POC lead, a training lead, a future tech planner, a lab
-planner, a precedent finder, and an auditor. They work
-through Kit, apart from a few direct pairings listed in `memory/context/agents.md`. The gateway
-is the agent meant to reach outside systems: `shared/bin/connector-guard` runs as a hook on it
-to keep connectors read-only and record every request in an audit log.
-Each reads a setup file in `memory/context/`, and `memory/context/agents.md` describes them all.
-
-The installer copies the agents into `~/Claude/Agents/kit/agents/`. To make them available
-in Claude Code, copy them into `~/.claude/agents/`:
-
-```bash
-python3 ~/Claude/Agents/kit/.install/shared/doctor.py --fix-agents
-```
-
-For the diagrammer, draw.io Desktop works well: its command line exports PNG, SVG, and PDF
-without opening a window. JGraph's draw.io skill (`plugins/claude-code/skills/drawio` in
-github.com/jgraph/drawio-mcp) can be copied into `~/.claude/skills/drawio/`. It fetches
-reference files from GitHub, so keep local copies next to it for agents without web access.
-
-## Optional: grammar checks
-
-The reviewer runs an offline spelling and grammar pass when LanguageTool and Java are installed, and
-skips it, saying so, when they aren't. Nothing else changes either way. On macOS:
-
-```bash
-brew install languagetool    # brings a Java runtime with it
-python3 ~/Claude/Agents/kit/.install/shared/bin/kit-grammar --where
-```
-
-`kit-grammar` looks in Homebrew's folder, then `~/Claude/Agents/kit/tools/LanguageTool*`, and on
-Windows in Program Files, AppData, and Scoop. Set `KIT_LANGUAGETOOL` to the folder holding
-`languagetool-commandline.jar` if it's elsewhere. LanguageTool 6 and later needs Java 17 or later.
-The health check reports whether it's available, and never counts its absence as a problem.
-
-## Sharing with a team (preview)
-
-Several Kits, one per architect, can share selected records for a team dashboard and shared
-lessons. Turn it on in `memory/context/sharing.md`: set a Kit id (not your name), your role, and
-the record types to publish. Nothing is shared until you do.
-
-```bash
-python3 ~/Claude/Agents/kit/.install/shared/bin/kit-publish --dry-run   # see what would be shared
-python3 ~/Claude/Agents/kit/.install/shared/bin/kit-publish             # write records to the outbox
-python3 ~/Claude/Agents/kit/.install/shared/team_dashboard.py --source <outbox> --source <teammate outbox> --open
-```
-
-Records are small JSON summaries, never document text, credentials, or personal notes. Lessons
-are shared only when tagged `share: team`. Formats and rules: `shared/records/README.md`. Syncing
-outboxes through a shared folder comes later; for now, copy them.
+| Document | For |
+|---|---|
+| [INSTALL.md](INSTALL.md) | Installing, configuring, updating, troubleshooting |
+| [ONBOARDING.md](ONBOARDING.md) | Your first day and first week with Kit |
+| [DESIGN.md](DESIGN.md) | How Kit is built and how to extend it |
+| [GOVERNANCE.md](GOVERNANCE.md) | Who owns Kit and how changes are made (draft) |
+| [CHANGELOG.md](CHANGELOG.md) | What each release changed |
+| [DEPENDENCIES.md](DEPENDENCIES.md) | What each agent and tool needs, and what happens without it |
+| [shared/KIT-RUN.md](shared/KIT-RUN.md) | Running agents outside Claude Code, and its limits |
+| `shared/records/README.md` | Shared record formats and trust rules |
+| `shared/sql/README.md` | The SQL transport (MySQL tested; PostgreSQL and SQL Server untested) |
 
 ## Privacy
 
-Kit's notes stay on your machine in a folder only you can read (POSIX `chmod 700` on macOS;
-NTFS ACLs on Windows once implemented). Personal notes live in `memory/personal/` and don't
-load on their own, and `protect_folder.py` keeps them out of work folders. Your settings,
-including where Kit texts you, go in `shared/morning/config`, which git ignores.
+Kit's notes stay on your computer in a folder only you can read (`chmod 700` on macOS, owner-only
+NTFS permissions on Windows). Personal notes live in `memory/personal/` and don't load on their
+own, and `protect_folder.py` keeps them out of work folders. Your settings stay in
+`.install/shared/morning/config`, which git ignores.

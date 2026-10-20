@@ -42,6 +42,12 @@ import sys
 import tempfile
 import time
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+try:
+    import kit_inbox  # phone approval codes and OneDrive publishing (phone and remote, phase 1)
+except ImportError:
+    kit_inbox = None
+
 HOME = pathlib.Path.home()
 KIT = HOME / "Claude/Agents/kit"
 CONFIG = KIT / ".install/shared/morning/config"
@@ -418,6 +424,20 @@ def main(argv=None):
     if not ctx["text"] and ctx["brief"]:
         ctx["text"] = ctx["brief"].strip()
 
+    # A single-use code for approving this work list (or the brief's hygiene verdicts) from the
+    # phone. It goes in the brief file only, never in the notification text, which can show on a
+    # locked screen. PHONE_APPROVALS="off" turns it off.
+    if (kit_inbox and not a.test and a.brief and pathlib.Path(a.brief).is_file()
+            and a.mode in kit_inbox.CODE_SCOPES and cfg.get("PHONE_APPROVALS", "on").lower() != "off"):
+        try:
+            section = kit_inbox.code_section(a.mode, kit_inbox.issue_code(a.mode))
+            with open(a.brief, "a", encoding="utf-8") as f:
+                f.write(section)
+            ctx["brief"] += section
+            say("phone approval code added to the brief")
+        except Exception as ex:  # noqa: BLE001
+            say(f"phone approval code skipped: {ex}")
+
     split = not a.channels and ("DELIVERY_PERSONAL" in cfg or "DELIVERY_WORK" in cfg)
     if not split:
         wanted = (a.channels or cfg.get("DELIVERY", "") or "local").lower().split()
@@ -431,6 +451,14 @@ def main(argv=None):
             side_ctx = dict(ctx, text=text, brief="" if side == "work" else ctx["brief"],
                             side=side)
             results.update(deliver_group(names, side_ctx, label=f"{side}/"))
+
+    # Publish for the phone (ONEDRIVE_PUBLISH_DIR); a failure here never fails the delivery.
+    if kit_inbox and not a.test and (cfg.get("ONEDRIVE_PUBLISH_DIR") or "").strip():
+        try:
+            ok, msg = kit_inbox.publish(a.brief, a.mode, cfg)
+            say(f"onedrive: {msg}")
+        except Exception as ex:  # noqa: BLE001
+            say(f"onedrive: skipped: {ex}")
 
     for name, ok in results.items():
         say(f"result {name}: {'ok' if ok else 'FAILED'}")

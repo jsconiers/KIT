@@ -1,0 +1,238 @@
+#!/usr/bin/env python3
+"""kit-degraded: write the morning brief from Kit's files alone, with no model call.
+
+  kit-degraded --reason "why"            write today's brief and short texts
+  kit-degraded --reason "why" --calendar-json FILE
+                                         use a calendar JSON file (`kitmail calendar --json` format)
+  kit-degraded --reason "why" --no-calendar
+                                         leave the calendar out (for example when Outlook is down)
+  kit-degraded --reason "why" --print    print the brief instead of writing it
+
+run.sh uses it when the budget's stop level is reached (DEGRADED_MODE="on", the default) and when
+the morning model run fails or times out, so a brief still arrives. It reads QUEUE.md, today's
+calendar (CALENDAR_JSON_CMD in Kit's config, unless --no-calendar or --calendar-json), and the
+files the run already wrote (briefs/health.txt, briefs/audit.txt), plus the pending proposals and
+phone approvals. It writes briefs/YYYY-MM-DD.md only if no brief exists for today, and the short
+texts (briefs/latest-text.txt, -work.txt, -personal.txt) only if the run didn't write them. The
+privacy rules match the model brief's short texts: personal to-dos are counted, never named, and
+nothing comes from memory/personal/. It never sends anything; delivery is run.sh's job.
+"""
+import argparse
+import json
+import os
+import pathlib
+import re
+import shlex
+import subprocess
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import kit_daily as kd  # noqa: E402
+
+WEEKDAYS = "Mon Tue Wed Thu Fri Sat Sun".split()
+WORK = "[work]"
+
+
+def todo_counts(lines):
+    """Open top-level items in the owner's section, split into work (named) and personal (counted)."""
+    sec = kd.owner_section(lines)
+    out = {"overdue_work": [], "today_work": [], "other_work": 0,
+           "overdue_personal": 0, "today_personal": 0, "other_personal": 0}
+    if not sec:
+        return out
+    t = kd.today()
+    for it in kd.items(lines, sec):
+        if it["done"] or it["sub"]:
+            continue
+        work = WORK in it["line"]
+        due = kd.due_of(it["line"])
+        when = "overdue" if due and due < t else "today" if due == t else "other"
+        if work:
+            if when == "other":
+                out["other_work"] += 1
+            else:
+                out[f"{when}_work"].append((it["title"], due))
+        else:
+            out[f"{when}_personal"] += 1
+    return out
+
+
+def waiting(lines):
+    rows = []
+    for it in kd.items(lines, "Waiting on others"):
+        if it["done"] or it["sub"]:
+            continue
+        m = re.search(r":\s*([^,(]+?),?\s*since (\d{1,2}-[A-Z][a-z]{2}-\d{4})", it["line"])
+        who, since = (m.group(1).strip(), m.group(2)) if m else ("", "")
+        rows.append((it["title"], who, since))
+    return rows
+
+
+def sprint(lines):
+    sec = kd.section(lines, "Sprint")
+    head = next((ln for ln in sec if ln.startswith("Sprint ")), "")
+    if not head:
+        return ""
+    open_n = sum(1 for ln in sec if ln.startswith("- [ ]"))
+    done_n = sum(1 for ln in sec if re.match(r"- \[[xX]\]", ln))
+    return f"{head.strip()} ({done_n} done, {open_n} open)"
+
+
+def calendar(args):
+    if args.no_calendar:
+        return None, "left out (Outlook check failed or --no-calendar)"
+    raw = ""
+    if args.calendar_json:
+        raw = kd.read(args.calendar_json)
+    else:
+        m = re.search(r'^CALENDAR_JSON_CMD="([^"]*)"', kd.read(kd.CONFIG), re.M)
+        if not m or not m.group(1).strip():
+            return None, "no calendar command set"
+        try:
+            cmd = [os.path.expanduser(p) for p in shlex.split(m.group(1))]
+            raw = subprocess.run(cmd, capture_output=True, text=True, timeout=120).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            return None, "the calendar command didn't answer"
+    try:
+        events = json.loads(raw or "[]")
+    except ValueError:
+        return None, "the calendar output wasn't readable"
+    t = kd.today().isoformat()
+    out = []
+    for e in events if isinstance(events, list) else []:
+        start = str(e.get("start") or "")
+        if not start.startswith(t):
+            continue
+        if str(e.get("my_response") or "").lower() in ("declined", "decline"):
+            continue
+        title = kd.clip(e.get("title") or e.get("subject") or "(no title)", 70)
+        when = "all day" if e.get("all_day") else start[11:16]
+        out.append((when, title))
+    out.sort(key=lambda r: (r[0] != "all day", r[0]))
+    return out, ""
+
+
+def first_lines(path, n, skip_ok=True):
+    lines = [ln.rstrip() for ln in kd.read(path).splitlines() if ln.strip()]
+    if skip_ok:
+        lines = [ln for ln in lines if not ln.startswith(("OK", "ok "))]
+    return lines[:n]
+
+
+def count_rows(path, word):
+    return sum(1 for ln in kd.read(path).splitlines() if ln.startswith("|") and re.search(rf"\|\s*{word}\s*\|", ln))
+
+
+def pending():
+    b = kd.BRIEFS
+    t = kd.fmt(kd.today())
+    return {
+        "commitments": count_rows(b / "pending-commitments.md", "proposed"),
+        "meeting actions": count_rows(b / "pending-actions.md", "proposed"),
+        "lessons to approve": kd.read(b / "pending-lessons.md").count("<!-- kit-quality:"),
+        "phone approvals today": sum(1 for ln in kd.read(b / "phone-approvals.md").splitlines() if t in ln),
+        "phone requests today": sum(1 for ln in kd.read(b / "requests.md").splitlines() if t in ln),
+    }
+
+
+def build(args):
+    lines = kd.queue_lines()
+    t = kd.today()
+    td = todo_counts(lines)
+    wait = waiting(lines)
+    spr = sprint(lines)
+    cal, cal_note = calendar(args)
+    health = first_lines(kd.BRIEFS / "health.txt", 5)
+    audit = first_lines(kd.BRIEFS / "audit.txt", 2, skip_ok=False)
+    pend = pending()
+    date = kd.fmt(t)
+    md = [f"# Kit brief: {WEEKDAYS[t.weekday()]} {date}", "",
+          f"> **Degraded brief: written without a model because {args.reason}.** It covers what Kit's "
+          "files show; mail triage, the trading read, and judgment calls are missing. The next normal "
+          "run fills them in.", ""]
+    md += ["## Health", ""]
+    md += [f"- {h}" for h in health] or ["- No problems in briefs/health.txt."]
+    if audit:
+        md += ["", "## Audit", ""] + [f"- {a}" for a in audit]
+    md += ["", "## To-dos", ""]
+    for label, key in (("Overdue", "overdue_work"), ("Due today", "today_work")):
+        for title, due in td[key]:
+            md.append(f"- {label}: **{title}** [work] (due {kd.fmt(due)})")
+    if td["overdue_personal"] or td["today_personal"]:
+        md.append(f"- Personal: {td['overdue_personal']} overdue, {td['today_personal']} due today "
+                  "(counted, not named)")
+    md.append(f"- Other open items: {td['other_work']} work, {td['other_personal']} personal")
+    md += ["", "## Calendar today", ""]
+    if cal is None:
+        md.append(f"- Calendar {cal_note}.")
+    elif not cal:
+        md.append("- Nothing on the calendar today.")
+    else:
+        md += [f"- {when}  {title}" for when, title in cal]
+    md += ["", "## Waiting on others", ""]
+    md += [f"- {title}" + (f": {who}" if who else "") + (f", since {since}" if since else "")
+           for title, who, since in wait] or ["- Nothing waiting."]
+    if spr:
+        md += ["", "## Sprint", "", f"- {spr}"]
+    if any(pend.values()):
+        md += ["", "## Waiting for your decision", ""]
+        md += [f"- {k.capitalize()}: {v}" for k, v in pend.items() if v]
+    md += ["", "done (degraded)", ""]
+
+    first = f"Kit · {WEEKDAYS[t.weekday()]} {t.day:02d}-{kd.MONTHS[t.month - 1]}"
+    last = f"Full brief: briefs/{t.isoformat()}.md"
+    tag = "Degraded brief (no model)"
+    meet = ""
+    if cal:
+        timed = [w for w, _ in cal if w != "all day"]
+        meet = f"Meetings: {len(cal)}" + (f", first {timed[0]}" if timed else "")
+    n_work = len(td["overdue_work"]) + len(td["today_work"])
+    n_pers = td["overdue_personal"] + td["today_personal"]
+    work_lines = [f"To-dos: {len(td['overdue_work'])} overdue, {len(td['today_work'])} due today (work)"]
+    if meet:
+        work_lines.append(meet)
+    if audit and re.search(r"critical|warning", audit[0], re.I):
+        work_lines.append("Audit issue: see the brief")
+    if wait:
+        work_lines.append(f"Waiting on others: {len(wait)}")
+    if pend["commitments"]:
+        work_lines.append(f"Commitments to confirm: {pend['commitments']}")
+    pers_lines = [f"Personal to-dos: {td['overdue_personal']} overdue, {td['today_personal']} due today"] if n_pers else []
+    texts = {
+        "latest-text.txt": [first, tag] + [f"To-dos: {n_work + td['overdue_personal'] + td['today_personal']} overdue or due today ({n_pers} personal)"]
+                           + work_lines[1:] + [last],
+        "latest-text-work.txt": [first, tag] + work_lines + [last],
+        "latest-text-personal.txt": [first, tag] + (pers_lines or ["Nothing today."]) + [last],
+    }
+    return "\n".join(md), {k: "\n".join(v)[:599] + "\n" for k, v in texts.items()}
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-degraded", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--reason", required=True, help="why there's no model run, for the banner")
+    ap.add_argument("--calendar-json", help="a calendar JSON file instead of CALENDAR_JSON_CMD")
+    ap.add_argument("--no-calendar", action="store_true", help="leave the calendar out")
+    ap.add_argument("--print", action="store_true", help="print the brief; write nothing")
+    args = ap.parse_args(argv)
+    brief, texts = build(args)
+    if args.print:
+        print(brief)
+        return 0
+    path = kd.BRIEFS / f"{kd.today().isoformat()}.md"
+    if path.exists() and path.stat().st_size > 0:
+        print(f"kit-degraded: {path.name} already exists; left it alone")
+    else:
+        kd.write(path, brief + "\n")
+        print(f"kit-degraded: wrote {path}")
+    for name, text in texts.items():
+        p = kd.BRIEFS / name
+        if p.exists() and p.stat().st_size > 0:
+            continue
+        kd.write(p, text)
+    print("kit-degraded: short texts ready")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

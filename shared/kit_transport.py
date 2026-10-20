@@ -7,6 +7,8 @@
   sharing_settings(kit)                   Transport, Shared root, Kit id, and Outbox from sharing.md
   for_publishing(kit, ...)                where kit-publish writes
   sources(kit)                            what kit-team and the team dashboard read
+  kit_sql_transport.SQLTransport          PostgreSQL, SQL Server, or MySQL (Transport: sql; MySQL tested)
+  load_policy(kit), policy_check(rec, t)  the organization profile, and its verdict on a record
 
 Two folder layouts:
 
@@ -31,9 +33,28 @@ Rules every reader follows:
 The cache is a SQLite file in this Kit's folder (.install/cache/team.db), readable only by you. It
 never goes in the shared folder: synced folders corrupt SQLite files that several people write.
 
-Not built yet: the message record type and its approval rules (roadmap item 7; inbox items carry
-an existing record type until then), and the organization profile that limits which transports
-and classifications are allowed (item 6; see policy_check).
+The organization profile (memory/context/sharing-policy.json; see policy_check) limits which
+transports and shared roots records may leave by and how classified they may be; it applies to
+publishing and to sending. Without the file, internal records may leave and confidential never do.
+
+Messages (the message record type): kit-team send drafts one, the owner approves it, and the
+sending Kit publishes it in its own records (so its manifest and hash chain cover it) and drops an
+identical copy into each recipient's inbox. A recipient accepts an inbox message only when it
+passes its schema, names the Kit whose name starts the file and is its sender, lists the recipient,
+and matches the sender's manifest hash for that message, with the sender's hash chain intact.
+Messages are information: nothing in one is ever run or followed. Expired messages move to an
+archive in the local cache; the sender's files are never deleted. Older inbox items (the
+inbox_version "0" wrapper) are still read.
+
+Hash chain: each Kit's manifest records every add, change, and removal of a record file as a chained
+entry (seq, op, path, sha256, prev, hash). A reader recomputes the chain and replays it; a removed,
+reordered, or edited entry, or a file list that doesn't match the replay, breaks it, and that Kit's
+records are skipped and reported. The cache remembers each Kit's last head, so a chain rewritten
+from scratch (history replaced) is reported too.
+
+Retention in the cache: kit-retention's legal holds and an optional "team_cache" rule in
+retention.json (older_than_days) apply to cached team records. A purge moves records into a holding
+table; it never deletes them, and records in a held project are never purged.
 """
 import datetime as dt
 import hashlib
@@ -51,7 +72,9 @@ DEFAULT_DB = KIT / ".install/cache/team.db"
 MAX_BYTES = 256 * 1024
 KIT_ID = re.compile(r"[a-z0-9][a-z0-9-]{2,39}")
 CONFLICT = re.compile(r"conflicted copy|-DESKTOP-|\s\(\d+\)\.json$|^~\$|\.tmp$", re.I)
-INBOX_VERSION = "0"    # placeholder wrapper until the message record type (item 7)
+INBOX_VERSION = "0"    # the older inbox wrapper, still read
+MESSAGE_FILE = re.compile(r"^([a-z0-9][a-z0-9-]{2,39})--message--([a-z0-9][a-z0-9._-]{0,95})\.json$")
+GENESIS = "0" * 64
 
 
 class TransportError(Exception):
@@ -84,11 +107,159 @@ def local_id(rec):
     return parts[2] if len(parts) == 3 else ""
 
 
-def policy_check(rec, transport):
-    """The organization profile's verdict on publishing rec through transport: None to allow, or a
-    reason to refuse. TODO (roadmap item 6): allowed transports and classification limits from the
-    organization profile; until then everything kit-publish already accepts is allowed."""
+# ---------- the hash chain in each Kit's manifest ----------
+
+def chain_hash(prev, seq, op, path, digest):
+    return sha256(f"{prev}|{seq}|{op}|{path}|{digest}".encode("utf-8"))
+
+
+def extend_chain(chain, old_files, new_files):
+    """Append an entry for every record file added, changed, or removed since old_files."""
+    chain = list(chain or [])
+    prev = chain[-1]["hash"] if chain else GENESIS
+    events = []
+    for path in sorted(set(old_files) | set(new_files)):
+        a, b = old_files.get(path), new_files.get(path)
+        if a == b:
+            continue
+        events.append(("add" if a is None else "remove" if b is None else "change", path, b or ""))
+    for op, path, digest in events:
+        seq = len(chain) + 1
+        h = chain_hash(prev, seq, op, path, digest)
+        chain.append({"seq": seq, "op": op, "path": path, "sha256": digest, "prev": prev, "hash": h})
+        prev = h
+    return chain
+
+
+def verify_chain(manifest):
+    """Problems with a manifest's hash chain (empty when it's intact and matches the file list)."""
+    chain = manifest.get("chain")
+    if not isinstance(chain, list):
+        return ["no chain"]
+    prev, state = GENESIS, {}
+    for i, e in enumerate(chain, 1):
+        if not isinstance(e, dict):
+            return [f"entry {i} isn't an object"]
+        if e.get("seq") != i:
+            return [f"entry {i} has seq {e.get('seq')!r} (entries removed or reordered)"]
+        if e.get("prev") != prev:
+            return [f"entry {i} doesn't follow entry {i - 1}"]
+        if e.get("op") not in ("add", "change", "remove"):
+            return [f"entry {i} has an unknown op"]
+        if chain_hash(prev, i, e["op"], e.get("path", ""), e.get("sha256", "")) != e.get("hash"):
+            return [f"entry {i} was edited (its hash doesn't match)"]
+        if e["op"] == "remove":
+            state.pop(e.get("path"), None)
+        else:
+            state[e.get("path")] = e.get("sha256")
+        prev = e["hash"]
+    if manifest.get("head", prev) != prev:
+        return ["the head doesn't match the last entry"]
+    if state != manifest.get("files"):
+        return ["the file list doesn't match the chain (records changed outside the chain)"]
+    return []
+
+
+# ---------- the organization profile (sharing policy) ----------
+
+LEVELS = {"public": 0, "internal": 1, "confidential": 2}
+POLICY_FILE = "memory/context/sharing-policy.json"
+DEFAULT_POLICY = {
+    "allowed_transports": ["folder"],   # transports records may leave by
+    "allowed_roots": [],                # shared roots must start with one of these (empty: any)
+    "blocked_root_patterns": [],        # a shared root containing one of these is refused
+    "max_classification": {"folder": "internal"},
+    "allow_confidential": False,        # confidential records never leave unless this is true
+    "outbox_counts_as_leaving": True,   # the outbox is copied to the team by hand, so it's checked too
+}
+
+
+def load_policy(kit=None):
+    """The organization profile from memory/context/sharing-policy.json, merged over the defaults.
+    A missing file means the defaults (confidential never leaves; internal may). A file that can't be
+    read refuses everything, so a broken policy never opens the door."""
+    kit = pathlib.Path(kit) if kit else KIT
+    pol = dict(DEFAULT_POLICY)
+    path = kit / POLICY_FILE
+    if not path.exists():
+        pol["_source"] = "defaults (no sharing-policy.json)"
+        return pol
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("not a JSON object")
+    except (OSError, ValueError) as ex:
+        return {"_broken": f"{path} can't be read ({ex}); nothing is shared until it's fixed",
+                "_source": str(path)}
+    pol.update({k: v for k, v in data.items() if not k.startswith("_")})
+    pol["_source"] = str(path)
+    return pol
+
+
+def _norm(path):
+    return os.path.normcase(str(pathlib.Path(os.path.expanduser(str(path))).resolve()))
+
+
+def root_verdict(transport, policy=None):
+    """Whether the organization profile allows this transport and shared root at all: None or a
+    reason. Only the shared layout is a place records leave by."""
+    pol = policy or load_policy()
+    if pol.get("_broken"):
+        return pol["_broken"]
+    kind = getattr(transport, "kind", "folder")
+    if kind not in [t.lower() for t in pol.get("allowed_transports") or []]:
+        return f"transport {kind!r} isn't in allowed_transports ({pol['_source']})"
+    if getattr(transport, "layout", "shared") != "shared" or kind != "folder":
+        return None
+    root = _norm(transport.root)
+    for pat in pol.get("blocked_root_patterns") or []:
+        if str(pat).lower() in str(transport.root).lower() or str(pat).lower() in root.lower():
+            return f"shared root {transport.root} matches blocked pattern {pat!r} ({pol['_source']})"
+    allowed = pol.get("allowed_roots") or []
+    if allowed and not any(root == _norm(a) or root.startswith(_norm(a).rstrip(os.sep) + os.sep)
+                           for a in allowed):
+        return (f"shared root {transport.root} isn't under an allowed root "
+                f"({', '.join(map(str, allowed))}; {pol['_source']})")
     return None
+
+
+def policy_check(rec, transport, policy=None):
+    """The organization profile's verdict on rec leaving through transport: None to allow, or a
+    reason to refuse. Checks the transport and shared root, then the record's classification against
+    the transport's ceiling; confidential records never leave unless allow_confidential is true."""
+    pol = policy or load_policy()
+    if pol.get("_broken"):
+        return pol["_broken"]
+    if getattr(transport, "layout", "shared") == "outbox" and not pol.get("outbox_counts_as_leaving", True):
+        return None
+    why = root_verdict(transport, pol)
+    if why:
+        return why
+    cls = str(rec.get("classification") or "internal").lower()
+    if cls not in LEVELS:
+        return f"unknown classification {cls!r}"
+    if cls == "confidential" and not pol.get("allow_confidential"):
+        return "confidential records never leave this Kit (allow_confidential is false)"
+    kind = getattr(transport, "kind", "folder")
+    ceiling = str((pol.get("max_classification") or {}).get(kind, "internal")).lower()
+    if LEVELS.get(cls, 9) > LEVELS.get(ceiling, 1):
+        return f"classification {cls} is above this transport's limit ({ceiling})"
+    return None
+
+
+def describe_policy(policy=None):
+    """One line for kit-team status and the health check."""
+    pol = policy or load_policy()
+    if pol.get("_broken"):
+        return "BROKEN: " + pol["_broken"]
+    bits = [f"transports {', '.join(pol.get('allowed_transports') or ['none'])}",
+            f"up to {(pol.get('max_classification') or {}).get('folder', 'internal')}",
+            "confidential allowed" if pol.get("allow_confidential") else "confidential never leaves"]
+    if pol.get("allowed_roots"):
+        bits.append(f"{len(pol['allowed_roots'])} allowed root(s)")
+    if pol.get("blocked_root_patterns"):
+        bits.append("blocked: " + ", ".join(map(str, pol["blocked_root_patterns"])))
+    return "; ".join(bits) + f" ({pol['_source']})"
 
 
 # ---------- the folder transport ----------
@@ -100,6 +271,7 @@ class FolderTransport:
         self.root = pathlib.Path(root).expanduser()
         self.kit_id = kit_id
         self.layout = layout
+        self.kind = "folder"
         self.origin = f"{layout}:{self.root}"
 
     def __repr__(self):
@@ -195,10 +367,16 @@ class FolderTransport:
         files = {p.relative_to(base).as_posix(): sha256(p.read_bytes()) for p in sorted(self.own_record_files())}
         mpath = self.manifest_path(self.kit_id)
         old = self.read_path(mpath) if mpath.exists() else None
-        if old and old.get("files") == files:
+        old = old if isinstance(old, dict) else None
+        if old and old.get("files") == files and isinstance(old.get("chain"), list):
             return False
+        if old and isinstance(old.get("chain"), list) and not verify_chain(old):
+            chain = extend_chain(old["chain"], old.get("files") or {}, files)
+        else:
+            chain = extend_chain([], {}, files)   # first chain (or a manifest from before chains)
         self._guard_own(mpath)
-        atomic_write(mpath, json.dumps({"kit_id": self.kit_id, "updated": kr.now_iso(), "files": files},
+        atomic_write(mpath, json.dumps({"kit_id": self.kit_id, "updated": kr.now_iso(), "files": files,
+                                        "chain": chain, "head": chain[-1]["hash"] if chain else GENESIS},
                                        indent=2, sort_keys=True) + "\n")
         return True
 
@@ -221,7 +399,15 @@ class FolderTransport:
             warnings.append(("manifest", kit, "manifest unreadable or not this Kit's (still syncing?): "
                                               "records shown unverified"))
             return None
-        return m["files"]
+        if "chain" not in m:
+            warnings.append(("unchained", kit, "manifest has no hash chain yet (an older Kit): its history "
+                                               "can't be checked"))
+            return m
+        problems = verify_chain(m)
+        if problems:
+            warnings.append(("chain", kit, f"hash chain broken: {problems[0]}; this Kit's records are skipped"))
+            return False
+        return m
 
     def scan(self, schemas, kit_id=None, type=None, since=None):
         """Every acceptable record, as (record, info) pairs, plus warnings as (kind, where, message).
@@ -232,7 +418,10 @@ class FolderTransport:
             if kit_id and kit != kit_id:
                 continue
             base, rdir = self.kit_dir(kit), self.records_dir(kit)
-            manifest = self._manifest(kit, warnings)
+            m = self._manifest(kit, warnings)
+            if m is False:
+                continue
+            manifest = m["files"] if m else None
             seen = set()
             for f in sorted(rdir.rglob("*.json")) if rdir.is_dir() else []:
                 rel = f.relative_to(base).as_posix()
@@ -302,8 +491,8 @@ class FolderTransport:
 
     # inboxes (shared layout only)
     def send(self, to_kit, rec, schemas):
-        """Drop a copy of one of this Kit's records into another Kit's inbox. TODO (item 7): the
-        message record type and the owner's approval to send replace this placeholder wrapper."""
+        """Drop a copy of one of this Kit's records into another Kit's inbox, in the older wrapper.
+        Messages go through send_message (kit-team send) instead, with the owner's approval."""
         self._need_kit()
         if not KIT_ID.fullmatch(to_kit or ""):
             raise TransportError(f"no such Kit id {to_kit!r}")
@@ -315,6 +504,9 @@ class FolderTransport:
         hits = kr.secret_hits(canonical(rec))
         if hits:
             raise TransportError(f"record looks like it holds a {', '.join(hits)}")
+        why = policy_check(rec, self)
+        if why:
+            raise TransportError(f"organization profile refuses sending {rec.get('id')!r}: {why}")
         stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         name = f"{self.kit_id}--{rec['schema']}--{local_id(rec)}--{stamp}.json"
         path = self.inbox_dir(to_kit) / name
@@ -324,16 +516,107 @@ class FolderTransport:
                                        "sent": kr.now_iso(), "record": rec}, indent=2, sort_keys=True) + "\n")
         return path
 
-    def inbox(self, schemas):
-        """This Kit's inbox items, checked: (items, warnings). Items are information only."""
+    def chain_heads(self):
+        """{kit: (seq, head hash, [entry hashes])} for Kits whose chain is intact (shared layout)."""
+        out = {}
+        if self.layout != "shared":
+            return out
+        for kit in self.kits():
+            m = self._manifest(kit, [])
+            if m and isinstance(m.get("chain"), list):
+                out[kit] = (len(m["chain"]), m.get("head", GENESIS), [e["hash"] for e in m["chain"]])
+        return out
+
+    def send_message(self, rec, schemas):
+        """Publish an approved message in this Kit's records, then drop an identical copy into each
+        recipient's inbox. The caller must have the owner's approval; this never asks. Returns the
+        inbox paths written."""
+        self._need_kit()
+        self._need_shared("messages")
+        body = rec.get("body") or {}
+        if rec.get("schema") != "message":
+            raise TransportError("only message records are sent")
+        if rec.get("kit_id") != self.kit_id or body.get("from_kit") != self.kit_id:
+            raise TransportError("a message must come from this Kit")
+        to = body.get("to") or []
+        if not to or any(not KIT_ID.fullmatch(k or "") for k in to) or self.kit_id in to:
+            raise TransportError(f"bad recipients {to!r}")
+        problems = kr.validate(rec, schemas)
+        if problems:
+            raise TransportError("message isn't valid: " + "; ".join(problems[:3]))
+        hits = kr.secret_hits(canonical(rec))
+        if hits:
+            raise TransportError(f"message looks like it holds a {', '.join(hits)}")
+        why = policy_check(rec, self)
+        if why:
+            raise TransportError(f"organization profile refuses this message: {why}")
+        self.publish(rec)
+        self.finish()
+        text, paths = canonical(rec), []
+        for kit in to:
+            path = self.inbox_dir(kit) / f"{self.kit_id}--message--{local_id(rec)}.json"
+            if not self._inside(path, self.inbox_dir(kit)):
+                raise TransportError("refusing to write outside that Kit's inbox")
+            if path.exists() and path.read_text(encoding="utf-8", errors="ignore") != text:
+                raise TransportError(f"{kit}'s inbox already has a different message with this id")
+            atomic_write(path, text)
+            paths.append(path)
+        return paths
+
+    def _check_message(self, f, data, schemas):
+        """(record, '') or (None, why) for one message file in this Kit's inbox."""
+        m = MESSAGE_FILE.match(f.name)
+        if not m:
+            return None, "file name isn't <sender>--message--<id>.json"
+        sender, local = m.groups()
+        try:
+            rec = json.loads(data.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return None, "unreadable (still syncing?)"
+        if not isinstance(rec, dict) or rec.get("schema") != "message":
+            return None, "not a message record"
+        ok, why = kr.accept(rec, schemas)
+        if not ok:
+            return None, why
+        body = rec.get("body") or {}
+        if rec.get("kit_id") != sender or body.get("from_kit") != sender or local_id(rec) != local:
+            return None, "sender doesn't match the file it came in (spoofed?)"
+        if self.kit_id not in (body.get("to") or []):
+            return None, "this Kit isn't a recipient"
+        mw = []
+        man = self._manifest(sender, mw)
+        if man is False:
+            return None, "the sender's hash chain is broken"
+        if not man:
+            return None, "the sender has no manifest, so the message can't be verified"
+        if man["files"].get(f"records/message/{local}.json") != sha256(data):
+            return None, "doesn't match the sender's manifest (changed, or not really sent by that Kit)"
+        return rec, ""
+
+    def inbox(self, schemas, now=None):
+        """This Kit's inbox items, checked: (items, warnings). Items are information only. Message
+        items carry expired=True once past their expiry."""
         self._need_kit()
         items, warnings = [], []
+        now = now or dt.datetime.now(dt.timezone.utc)
         d, acks = self.inbox_dir(self.kit_id), self.ack_dir(self.kit_id)
         for f in sorted(d.glob("*.json")) if d.is_dir() else []:
             if f.name.startswith("."):
                 continue
             if CONFLICT.search(f.name):
                 warnings.append(("conflict", f"inbox/{f.name}", "sync-conflict or temporary copy: skipped"))
+                continue
+            if "--message--" in f.name:
+                data = f.read_bytes() if f.stat().st_size <= MAX_BYTES else b""
+                rec, why = self._check_message(f, data, schemas) if data else (None, "too large")
+                if why:
+                    warnings.append(("rejected", f"inbox/{f.name}", why))
+                    continue
+                ack = self.read_path(acks / f.name) if (acks / f.name).exists() else None
+                exp = kr.parse_iso(rec["body"]["expires"])
+                items.append({"name": f.name, "from": rec["kit_id"], "sent": rec["created"], "record": rec,
+                              "ack": (ack or {}).get("state", ""), "kind": "message",
+                              "expired": bool(exp and exp < now)})
                 continue
             item = self.read_path(f) if f.stat().st_size <= MAX_BYTES else None
             sender = f.name.split("--", 1)[0]
@@ -352,7 +635,7 @@ class FolderTransport:
                 continue
             ack = self.read_path(acks / f.name) if (acks / f.name).exists() else None
             items.append({"name": f.name, "from": sender, "sent": item.get("sent", ""), "record": item["record"],
-                          "ack": (ack or {}).get("state", "")})
+                          "ack": (ack or {}).get("state", ""), "kind": "wrapped", "expired": False})
         return items, warnings
 
     def ack(self, name, state="seen"):
@@ -426,20 +709,52 @@ def for_publishing(kit=KIT, kit_id=None, outbox=None, shared_root=None):
     kid = kit_id or s["kit_id"]
     if outbox:
         return FolderTransport(outbox, kid, "outbox")
+    if s["transport"] == "sql" and not shared_root:
+        return _sql(kit, kid)
     root = pathlib.Path(shared_root).expanduser() if shared_root else s["shared_root"]
-    if root and s["transport"] == "folder":
+    if root and s["transport"] in ("folder", "sql"):
         return FolderTransport(root, kid, "shared")
     if s["transport"] != "folder":
-        raise TransportError(f"transport {s['transport']!r} isn't built yet; only folder is")
+        raise TransportError(f"unknown transport {s['transport']!r} (folder or sql)")
     return FolderTransport(s["outbox"], kid, "outbox")
+
+
+def _sql(kit, kid):
+    """The SQL server transport (MySQL tested; see kit_sql_transport)."""
+    import kit_sql_transport
+    return kit_sql_transport.SQLTransport.from_settings(kit, kid)
 
 
 def sources(kit=KIT):
     """What to read: the shared root when set, else this Kit's own outbox."""
     s = sharing_settings(kit)
+    if s["transport"] == "sql":
+        return [_sql(kit, s["kit_id"])]
     if s["shared_root"] and s["transport"] == "folder":
         return [FolderTransport(s["shared_root"], s["kit_id"], "shared")]
     return [FolderTransport(s["outbox"], s["kit_id"], "outbox")]
+
+
+def team_retention(kit=None):
+    """(older_than_days or None, holds dict) for cached team records: the "team_cache" rule in
+    retention.json and the legal holds kit-retention keeps. Unreadable files mean keep everything
+    and, for holds, treat everything as held."""
+    kit = pathlib.Path(kit) if kit else KIT
+    days, holds = None, {}
+    try:
+        rules = json.loads((kit / "memory/context/retention.json").read_text())
+        days = (rules.get("team_cache") or {}).get("older_than_days")
+    except (OSError, ValueError, AttributeError):
+        days = None
+    hp = kit / "memory/context/legal-holds.json"
+    if hp.exists():
+        try:
+            holds = json.loads(hp.read_text())
+            if not isinstance(holds, dict):
+                holds = {"all": {"reason": "holds file isn't an object"}}
+        except (OSError, ValueError):
+            holds = {"all": {"reason": "holds file can't be read"}}
+    return days, holds
 
 
 # ---------- the local cache ----------
@@ -460,6 +775,12 @@ class Cache:
             CREATE INDEX IF NOT EXISTS records_project ON records(project);
             CREATE TABLE IF NOT EXISTS warnings (kind TEXT, location TEXT, message TEXT, seen TEXT);
             CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+            CREATE TABLE IF NOT EXISTS chain_heads (origin TEXT, kit_id TEXT, seq INTEGER, head TEXT,
+                PRIMARY KEY (origin, kit_id));
+            CREATE TABLE IF NOT EXISTS inbox_archive (name TEXT PRIMARY KEY, from_kit TEXT, id TEXT,
+                expires TEXT, archived TEXT, json TEXT);
+            CREATE TABLE IF NOT EXISTS records_holding (id TEXT PRIMARY KEY, sha256 TEXT, project TEXT,
+                updated TEXT, reason TEXT, moved TEXT, json TEXT);
         """)
 
     def close(self):
@@ -481,6 +802,9 @@ class Cache:
                         continue
                     seen[rec["id"]] = (rec, info)
                 for rid, (rec, info) in seen.items():
+                    held = self.db.execute("SELECT sha256 FROM records_holding WHERE id = ?", (rid,)).fetchone()
+                    if held and held[0] == info["sha256"]:
+                        continue                   # purged into holding; unchanged at the source
                     row = self.db.execute("SELECT sha256 FROM records WHERE id = ?", (rid,)).fetchone()
                     state = "unchanged" if row and row[0] == info["sha256"] else "changed" if row else "new"
                     counts[state] += 1
@@ -489,6 +813,14 @@ class Cache:
                         (rid, rec["kit_id"], rec["schema"], rec["project"], rec["classification"],
                          rec["schema_version"], rec["created"], rec["updated"], info["sha256"], t.origin,
                          info["ref"], int(info["verified"]), now, json.dumps(rec, sort_keys=True)))
+                for kit, (seq, head, hashes) in (t.chain_heads().items() if hasattr(t, "chain_heads") else []):
+                    known = self.db.execute("SELECT seq, head FROM chain_heads WHERE origin = ? AND kit_id = ?",
+                                            (t.origin, kit)).fetchone()
+                    if known and (known[0] > seq or hashes[known[0] - 1] != known[1]):
+                        all_warnings.append(("history", kit, f"hash chain was rewritten since the last sync "
+                                             f"(had {known[0]} entries, head {known[1][:12]}; now {seq}): "
+                                             "its history was replaced"))
+                    self.db.execute("INSERT OR REPLACE INTO chain_heads VALUES (?,?,?,?)", (t.origin, kit, seq, head))
                 read_kits = t.kits()
                 for (rid,) in self.db.execute(
                         f"SELECT id FROM records WHERE origin = ? AND kit_id IN ({','.join('?' * len(read_kits))})",
@@ -503,6 +835,61 @@ class Cache:
                             (json.dumps([t.origin for t in transports]),))
         counts["warnings"] = len(all_warnings)
         return counts
+
+    # expired messages
+    def archive_expired(self, items):
+        """Move expired inbox messages into the archive table (the sender's file is never touched).
+        Returns how many were newly archived."""
+        n, now = 0, kr.now_iso()
+        with self.db:
+            for i in items:
+                if not i.get("expired"):
+                    continue
+                if self.db.execute("SELECT 1 FROM inbox_archive WHERE name = ?", (i["name"],)).fetchone():
+                    continue
+                r = i["record"]
+                self.db.execute("INSERT INTO inbox_archive VALUES (?,?,?,?,?,?)",
+                                (i["name"], i["from"], r["id"], r["body"].get("expires", ""), now,
+                                 json.dumps(r, sort_keys=True)))
+                n += 1
+        return n
+
+    def archived_names(self):
+        return {r[0] for r in self.db.execute("SELECT name FROM inbox_archive")}
+
+    # retention and legal holds
+    def purge_candidates(self, older_than_days, holds):
+        """Cached records older than the rule, minus any in a held project: [(id, project, updated)]."""
+        if not older_than_days:
+            return []
+        cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=int(older_than_days))
+        out = []
+        for rid, project, updated in self.db.execute("SELECT id, project, updated FROM records ORDER BY updated"):
+            u = kr.parse_iso(updated or "")
+            if not u or u >= cutoff:
+                continue
+            if holds and ("all" in holds or project in holds):
+                continue
+            out.append((rid, project, updated))
+        return out
+
+    def purge(self, ids, reason):
+        """Move records into the holding table (never deleted). Returns how many moved."""
+        n, now = 0, kr.now_iso()
+        with self.db:
+            for rid in ids:
+                row = self.db.execute("SELECT sha256, project, updated, json FROM records WHERE id = ?",
+                                      (rid,)).fetchone()
+                if not row:
+                    continue
+                self.db.execute("INSERT OR REPLACE INTO records_holding VALUES (?,?,?,?,?,?,?)",
+                                (rid, row[0], row[1], row[2], reason, now, row[3]))
+                self.db.execute("DELETE FROM records WHERE id = ?", (rid,))
+                n += 1
+        return n
+
+    def holding(self):
+        return [tuple(r) for r in self.db.execute("SELECT id, project, moved, reason FROM records_holding")]
 
     def records(self, type=None, project=None, kit=None, text=None):
         sql, args = "SELECT json FROM records WHERE 1=1", []

@@ -1,0 +1,279 @@
+#!/usr/bin/env python3
+"""kit-quality: the quality loop. Reviewer findings become proposed lessons and template changes.
+
+  kit-quality                        tally findings, flag recurring ones, and write the proposals
+  kit-quality --json                 print the tally and trend as JSON and write nothing
+  kit-quality --no-write             print the summary as text and write nothing
+  kit-quality --min N                how many times a finding must recur to count (default 3)
+  kit-quality --days N               the window it must recur in (default 90)
+  kit-quality --root DIR             a library root other than the one in library.md
+  kit-quality --today YYYY-MM-DD     pretend it's another day (for checks and tests)
+
+Input: the reviewer's review notes in the library, artifacts/<project>/reviews/*.md. Each note has
+a "Findings" table, the format reviewer.md sets out:
+
+  | ID | Severity | Category | Template | Section | Finding | Fix |
+
+Severity is critical, major, or minor. Category is one of template, style, source, risk,
+precedent, grammar, accuracy, or other. Template names the document type (IA, GDS, ...) and
+Section the template section, such as "4.2 Security". The review's date comes from a "Date:" line,
+else a date in the file name, else the file's modification date. Notes without the table are
+skipped and counted.
+
+A finding recurs when the same category, template, and section turn up in --min findings or more,
+across at least two reviews, within --days days. For each recurring one it proposes:
+
+  briefs/pending-lessons.md            a lesson (rule, Why, How to apply) for the owner to approve;
+                                       kit-quality never writes in lessons/ itself
+  briefs/pending-template-changes.md   a change to the named template section, for the template's
+                                       owner to approve
+
+Proposals already in either file, or already covered by a lesson (each proposal carries a
+"quality-key" marker), aren't proposed again. It also writes briefs/quality.json: findings by
+month, category, severity, and template, and the recurring list, for the weekly review and the
+metrics page.
+
+Read-only on the library and on lessons/. Settings: the "Quality loop" line in
+memory/context/writing.md can set "min N, days N".
+"""
+import argparse
+import collections
+import datetime as dt
+import json
+import pathlib
+import re
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import kit_radar as kr  # noqa: E402
+
+CATEGORIES = ("template", "style", "source", "risk", "precedent", "grammar", "accuracy", "other")
+SEVERITIES = ("critical", "major", "minor")
+BRIEFS = kr.KIT / "briefs"
+LESSONS = kr.KIT / "lessons"
+
+
+def settings():
+    """min and days from writing.md's "Quality loop" line, if set."""
+    f = kr.CONTEXT / "writing.md"
+    out = {}
+    if f.exists():
+        m = re.search(r"\*\*Quality loop:\*\*([^\n]*)", f.read_text(errors="ignore"))
+        if m:
+            for k in ("min", "days"):
+                n = re.search(rf"\b{k}\s*(\d+)", m.group(1))
+                if n:
+                    out[k] = int(n.group(1))
+    return out
+
+
+def review_date(path, text):
+    m = re.search(r"^\**Date:?\**\s*:?\s*([0-9A-Za-z -]+)$", text, re.M)
+    if m:
+        d = kr.parse_date(m.group(1).strip())
+        if d:
+            return d
+    m = re.search(r"(\d{4}-\d{2}-\d{2})", path.name)
+    if m:
+        d = kr.parse_date(m.group(1))
+        if d:
+            return d
+    return dt.date.fromtimestamp(path.stat().st_mtime)
+
+
+def section_key(s):
+    """A section's number if it has one ("4.2 Security" -> "4.2"), else its words."""
+    s = kr.norm(s).strip("§ ")
+    m = re.match(r"(\d+(?:\.\d+)*)", s)
+    return m.group(1) if m else re.sub(r"[^a-z0-9 ]", "", s)
+
+
+def read_findings(root):
+    """Every finding row in every review note, with its project, review file, and date."""
+    found, skipped = [], []
+    for note in sorted((root / "artifacts").glob("*/reviews/*.md")):
+        text = note.read_text(errors="ignore")
+        rows = kr.rows_with(text, "severity", "category", "finding")
+        if not rows:
+            skipped.append(str(note.relative_to(root)))
+            continue
+        when = review_date(note, text)
+        project = note.parent.parent.name
+        for r in rows:
+            cat = kr.norm(kr.pick(r, "category")) or "other"
+            sev = kr.norm(kr.pick(r, "severity")) or "minor"
+            found.append({
+                "id": kr.pick(r, "id"),
+                "severity": sev if sev in SEVERITIES else "minor",
+                "category": cat if cat in CATEGORIES else "other",
+                "template": kr.pick(r, "template").upper() or "ANY",
+                "section": kr.pick(r, "section"),
+                "finding": kr.pick(r, "finding"),
+                "fix": kr.pick(r, "fix"),
+                "project": project,
+                "review": str(note.relative_to(root)),
+                "date": when.isoformat(),
+            })
+    return found, skipped
+
+
+def key_of(f):
+    return f"{f['category']}|{f['template'].lower()}|{section_key(f['section'])}"
+
+
+def recurring(findings, today, days, minimum):
+    since = today - dt.timedelta(days=days)
+    groups = collections.defaultdict(list)
+    for f in findings:
+        if dt.date.fromisoformat(f["date"]) >= since:
+            groups[key_of(f)].append(f)
+    out = []
+    for k, fs in groups.items():
+        reviews = {f["review"] for f in fs}
+        if len(fs) >= minimum and len(reviews) >= 2:
+            fs.sort(key=lambda f: f["date"])
+            out.append({"key": k, "findings": fs, "reviews": sorted(reviews)})
+    out.sort(key=lambda g: (-len(g["findings"]), g["key"]))
+    return out
+
+
+def common(texts):
+    """The most frequent non-empty text, as written the first time it appears."""
+    seen = collections.Counter(kr.norm(t) for t in texts if t)
+    if not seen:
+        return ""
+    top = seen.most_common(1)[0][0]
+    return next(t for t in texts if t and kr.norm(t) == top)
+
+
+def proposal(g):
+    fs = g["findings"]
+    f0 = fs[0]
+    cat, tmpl = f0["category"], f0["template"]
+    section = common([f["section"] for f in fs]) or "(no section)"
+    fix = common([f["fix"] for f in fs]) or common([f["finding"] for f in fs])
+    first, last = kr.fmt(dt.date.fromisoformat(fs[0]["date"])), kr.fmt(dt.date.fromisoformat(fs[-1]["date"]))
+    projects = sorted({f["project"] for f in fs})
+    sev = collections.Counter(f["severity"] for f in fs)
+    sev_text = ", ".join(f"{sev[s]} {s}" for s in SEVERITIES if sev[s])
+    return {
+        "key": g["key"], "category": cat, "template": tmpl, "section": section, "fix": fix,
+        "count": len(fs), "reviews": len(g["reviews"]), "projects": projects,
+        "first": first, "last": last, "severity": sev_text,
+        "examples": [f["finding"] for f in fs[:3] if f["finding"]],
+    }
+
+
+def lesson_text(p, today):
+    return (
+        f"## {p['template']} {p['section']}: {p['category']} (proposed {kr.fmt(today)})\n"
+        f"<!-- quality-key: {p['key']} -->\n\n"
+        f"{p['fix'].rstrip('.')}.\n\n"
+        f"**Why:** the reviewer found this {p['count']} times in {p['reviews']} reviews between "
+        f"{p['first']} and {p['last']} ({p['severity']}), across {', '.join(p['projects'])}.\n\n"
+        f"**How to apply:** writers check {p['template']} section {p['section']} against this before "
+        f"each draft; the reviewer checks it on every {p['template']} review.\n\n"
+        f"Approve to keep it (Kit writes it to lessons/ and the review-lessons file), or drop it.\n"
+    )
+
+
+def template_text(p, today):
+    return (
+        f"## {p['template']} template, section {p['section']} (proposed {kr.fmt(today)})\n"
+        f"<!-- quality-key: {p['key']} -->\n\n"
+        f"- **Change:** add guidance or a checklist line to this section: \"{p['fix'].rstrip('.')}.\"\n"
+        f"- **Evidence:** {p['count']} {p['category']} findings in {p['reviews']} reviews, "
+        f"{p['first']} to {p['last']} ({p['severity']}).\n"
+        + "".join(f"- **Example finding:** {e}\n" for e in p["examples"])
+        + "- **Decision:** the template's owner approves, changes, or rejects it.\n"
+    )
+
+
+def known_keys():
+    keys = set()
+    for f in [BRIEFS / "pending-lessons.md", BRIEFS / "pending-template-changes.md"] + sorted(LESSONS.glob("*.md")):
+        if f.exists():
+            keys |= set(re.findall(r"quality-key:\s*([^\s>]+)", f.read_text(errors="ignore")))
+    return keys
+
+
+def trend(findings):
+    by_month = collections.defaultdict(lambda: collections.Counter())
+    for f in findings:
+        by_month[f["date"][:7]][f["category"]] += 1
+    return {
+        "by_month": {m: dict(c) for m, c in sorted(by_month.items())},
+        "by_category": dict(collections.Counter(f["category"] for f in findings)),
+        "by_severity": dict(collections.Counter(f["severity"] for f in findings)),
+        "by_template": dict(collections.Counter(f["template"] for f in findings)),
+    }
+
+
+def append(path, header, blocks):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = path.read_text() if path.exists() else header
+    path.write_text(text.rstrip("\n") + "\n\n" + "\n".join(blocks))
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-quality", description=__doc__.split("\n")[0])
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--no-write", action="store_true")
+    ap.add_argument("--min", type=int)
+    ap.add_argument("--days", type=int)
+    ap.add_argument("--root")
+    ap.add_argument("--today")
+    a = ap.parse_args(argv)
+    cfg = settings()
+    minimum = a.min or cfg.get("min", 3)
+    days = a.days or cfg.get("days", 90)
+    today = kr.parse_date(a.today) if a.today else dt.date.today()
+    root = kr.expand(a.root) if a.root else kr.library_root()
+    if not root or not root.exists():
+        print("kit-quality: no library root (set it in memory/context/library.md, or use --root)", file=sys.stderr)
+        return 2
+
+    findings, skipped = read_findings(root)
+    groups = recurring(findings, today, days, minimum)
+    props = [proposal(g) for g in groups]
+    known = known_keys()
+    new = [p for p in props if p["key"] not in known]
+    summary = {
+        "generated": today.isoformat(), "window_days": days, "min": minimum,
+        "reviews": len({f["review"] for f in findings}), "findings": len(findings),
+        "skipped_notes": skipped, "trend": trend(findings),
+        "recurring": [{k: p[k] for k in ("key", "category", "template", "section", "count", "reviews",
+                                          "first", "last", "severity", "fix")} for p in props],
+        "new_proposals": [p["key"] for p in new],
+    }
+    if a.json:
+        print(json.dumps(summary, indent=2))
+        return 0
+
+    print(f"kit-quality: {summary['findings']} finding(s) in {summary['reviews']} review(s); "
+          f"{len(props)} recurring (>= {minimum} in {days} days); {len(new)} new proposal(s)")
+    for p in props:
+        mark = "new" if p in new else "already proposed"
+        print(f"  {p['template']} {p['section']} [{p['category']}]: {p['count']} in {p['reviews']} reviews ({mark})")
+    if skipped:
+        print(f"  skipped {len(skipped)} note(s) with no Findings table")
+    if a.no_write:
+        return 0
+
+    BRIEFS.mkdir(parents=True, exist_ok=True)
+    if new:
+        append(BRIEFS / "pending-lessons.md",
+               "# Proposed lessons\n\nFrom recurring review findings (kit-quality). Each needs the owner's "
+               "approval before it goes in lessons/.\n",
+               [lesson_text(p, today) for p in new])
+        append(BRIEFS / "pending-template-changes.md",
+               "# Proposed template changes\n\nFrom recurring review findings (kit-quality). The template's "
+               "owner approves, changes, or rejects each.\n",
+               [template_text(p, today) for p in new])
+    (BRIEFS / "quality.json").write_text(json.dumps(summary, indent=2) + "\n")
+    print(f"kit-quality: wrote briefs/quality.json" + (", pending-lessons.md, pending-template-changes.md" if new else ""))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

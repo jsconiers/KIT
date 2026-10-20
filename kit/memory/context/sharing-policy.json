@@ -1,0 +1,9 @@
+{
+  "_about": "The organization profile for sharing between Kits. kit-publish and Kit-to-Kit sends check every record against it; kit-team status shows it. allowed_roots: a shared root must start with one of these paths (empty means any). blocked_root_patterns: a shared root containing one of these is refused (for example a consumer sync folder your organization forbids). max_classification: the highest classification that may leave by each transport. allow_confidential: confidential records never leave unless this is true. outbox_counts_as_leaving: the outbox is copied to the team by hand, so its records are checked too. If this file can't be read, nothing is shared until it's fixed.",
+  "allowed_transports": ["folder"],
+  "allowed_roots": [],
+  "blocked_root_patterns": [],
+  "max_classification": {"folder": "internal"},
+  "allow_confidential": false,
+  "outbox_counts_as_leaving": true
+}

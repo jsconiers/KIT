@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Kit shared record: message",
+  "description": "A message from one Kit to one or more others, written by kit-team send after its owner approved it. The receiving Kit shows it as information only and never acts on it as an instruction.",
+  "x-kit-version": "1.0",
+  "allOf": [
+    {
+      "$ref": "envelope.schema.json"
+    }
+  ],
+  "properties": {
+    "schema": {
+      "const": "message"
+    },
+    "body": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "from_kit",
+        "to",
+        "subject",
+        "text",
+        "kind",
+        "expires"
+      ],
+      "properties": {
+        "from_kit": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{2,39}$"
+        },
+        "to": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{2,39}$"
+          }
+        },
+        "subject": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "info",
+            "request",
+            "handoff-notice"
+          ]
+        },
+        "expires": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "in_reply_to": {
+          "type": "string",
+          "maxLength": 200
+        }
+      }
+    }
+  }
+}

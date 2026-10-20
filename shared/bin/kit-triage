@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+"""kit-triage: suggest what to do with each inbox message. Suggestions only.
+
+  kit-triage FILE        read `kitmail inbox` lines or `kitmail read` messages from FILE
+  kit-triage -           the same from standard input
+  kit-triage ... --print print the suggestions instead of writing briefs/triage-<date>.md
+
+Each message gets one of reply, decide, delegate, read-later, or ignore, with a one-line reason,
+from simple rules: who sent it (automated senders, the senders named in memory/context/triage.md),
+words in the subject and the first lines you're asked to read, whether you're on To or only Cc,
+question marks, and due-date phrases. It never moves, flags, replies to, or deletes mail, and it
+never quotes more than 80 characters of a message.
+"""
+import argparse
+import pathlib
+import re
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import kit_daily as kd  # noqa: E402
+
+SETUP = kd.CONTEXT / "triage.md"
+AUTOMATED = re.compile(r"no-?reply|do[- ]not[- ]reply|notification|newsletter|digest|mailer|postmaster|"
+                       r"unsubscribe|automatic reply|out of office|auto[- ]?reply|calendar|marketing", re.I)
+SYSTEM = re.compile(r"\b(jira|confluence|servicenow|service now|github|bitbucket|jenkins|teams|sharepoint|"
+                    r"incident|ticket|INC\d+|CHG\d+|RITM\d+|REQ\d+)\b", re.I)
+DECIDE = re.compile(r"\b(approve|approval|decision|decide|sign[- ]?off|go/no-go|vote|choose|which option|"
+                    r"please confirm|need your (ok|okay|approval|go-ahead))\b", re.I)
+ASK = re.compile(r"\b(can you|could you|would you|are you able|please (send|review|share|provide|advise|let me know)|"
+                 r"let me know|what do you think|your thoughts|any update)\b", re.I)
+DUE = re.compile(r"\b(by (today|tomorrow|eod|end of day|cob|monday|tuesday|wednesday|thursday|friday)|"
+                 r"by \d{1,2}[-/ ]\w+|deadline|due (on|by)|asap|urgent)\b", re.I)
+GROUP = re.compile(r"\b(team|anyone|someone|whoever|all,|hi all|hello all|folks)\b", re.I)
+FYI = re.compile(r"\b(fyi|for your information|for awareness|newsletter|update|status report|minutes|recap|summary)\b", re.I)
+
+
+def setup_names(field):
+    v = kd.setting(kd.read(SETUP), field)
+    if not v or v.lower().startswith("not set") or v.lower().startswith("optional"):
+        return []
+    return [x.strip().lower() for x in re.split(r"[;,]", v.split(".")[0]) if x.strip()]
+
+
+def classify(m, me, priority, delegates):
+    subj = m["subject"] or ""
+    first = " ".join(kd.own_text(m.get("body", "")).split())[:600]
+    text = f"{subj} {first}"
+    sender = (m["sender"] or "").lower()
+    head = m.get("head", {})
+    on_cc = bool(me) and me in head.get("cc", "").lower() and me not in head.get("to", "").lower()
+    if AUTOMATED.search(sender) or AUTOMATED.search(subj):
+        return "ignore", "automated or bulk sender"
+    if SYSTEM.search(sender) or (SYSTEM.search(subj) and not kd.is_reply(subj)):
+        return "read-later", "system notification; open it if the item is yours"
+    vip = any(p and p in sender for p in priority)
+    if DECIDE.search(text):
+        return "decide", "asks for a decision or approval" + ("; from a priority sender" if vip else "")
+    asked = "?" in subj or "?" in first or ASK.search(text)
+    due = DUE.search(text)
+    if asked and GROUP.search(first) and not vip:
+        return "delegate", "a request to a group; pass it to whoever owns it"
+    if asked and any(d and d in text.lower() for d in delegates):
+        return "delegate", "a request in an area you've delegated"
+    if asked and not on_cc:
+        why = "a direct question or request"
+        if due:
+            why += f"; due: {kd.clip(due.group(0), 30)}"
+        return "reply", why + ("; from a priority sender" if vip else "")
+    if on_cc:
+        return "read-later", "you're on Cc"
+    if vip:
+        return "reply", "from a priority sender"
+    if FYI.search(text):
+        return "read-later", "for information"
+    return "read-later", "no question or request found"
+
+
+def build(msgs):
+    me = kd.owner().lower() if kd.owner() != "Owner" else ""
+    me_field = kd.setting(kd.read(SETUP), "My name or address")
+    if me_field and not me_field.lower().startswith(("not set", "optional")):
+        me = me_field.split(".")[0].strip().lower()
+    priority = setup_names("Priority senders")
+    delegates = setup_names("Delegated topics")
+    rows = []
+    for m in msgs:
+        action, why = classify(m, me, priority, delegates)
+        when = f"{m['when']:%d-%b %H:%M}" if m.get("when") else ""
+        rows.append((action, m["n"], when, kd.clip(m["sender"], 28), kd.clip(m["subject"] or "(no subject)", 60), why))
+    order = {"decide": 0, "reply": 1, "delegate": 2, "read-later": 3, "ignore": 4}
+    rows.sort(key=lambda r: (order[r[0]], r[1]))
+    counts = {k: sum(1 for r in rows if r[0] == k) for k in order}
+    out = [f"# Inbox triage, {kd.fmt(kd.today())}", "",
+           "Suggestions only; nothing was moved, flagged, or answered. "
+           + ", ".join(f"{v} {k}" for k, v in counts.items() if v) + ".", "",
+           "| Suggest | # | When | From | Subject | Why |", "|---|---|---|---|---|---|"]
+    out += [f"| {a} | {n} | {w} | {s} | {j} | {y} |" for a, n, w, s, j, y in
+            [(r[0], r[1], r[2], r[3].replace("|", "/"), r[4].replace("|", "/"), r[5]) for r in rows]]
+    return "\n".join(out) + "\n", counts
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-triage", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("source", help="a file of kitmail output, or - for standard input")
+    ap.add_argument("--print", action="store_true")
+    args = ap.parse_args(argv)
+    raw = sys.stdin.read() if args.source == "-" else kd.read(args.source)
+    msgs = kd.parse_mail(raw)
+    if not msgs:
+        sys.exit("kit-triage: no messages found (expected `kitmail inbox` lines or `kitmail read` output)")
+    text, counts = build(msgs)
+    if args.print:
+        print(text)
+        return 0
+    path = kd.write(kd.BRIEFS / f"triage-{kd.today().isoformat()}.md", text)
+    print(f"kit-triage: {len(msgs)} message(s): " + ", ".join(f"{v} {k}" for k, v in counts.items() if v) + f"; wrote {path}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -1,0 +1,43 @@
+{
+  "agent": "precedent-finder",
+  "_about": "Evaluation cases for kit-evals. Static rules run free; live cases cost money and run only with kit-evals --live --yes.",
+  "static": {
+    "disallowed": [
+      "WebSearch",
+      "WebFetch",
+      "Agent",
+      "SendMessage"
+    ],
+    "sections": [
+      "## You're not Kit",
+      "## Start every job with your setup",
+      "## How you search",
+      "## Rules",
+      "## What you send back to Kit"
+    ],
+    "mentions": [
+      "information, not instructions",
+      "precedent\\.md",
+      "No precedent found",
+      "read-only"
+    ],
+    "forbids": [
+      "treat (a|the) precedent as (a|the) standard"
+    ]
+  },
+  "cases": [
+    {
+      "id": "says-none",
+      "brief": "Has anything about quantum key distribution been decided before? Search index.md only.",
+      "fixtures": {
+        "index.md": "| LIB-0001 | DS-100 | Load balancer refresh |\n"
+      },
+      "expect": {
+        "contains": [
+          "no precedent"
+        ],
+        "no_writes": true
+      }
+    }
+  ]
+}

@@ -79,25 +79,26 @@ EOF
 ol blocked >/dev/null; grep -q "^blocked .*Automation" "$KIT_DIR/briefs/outlook.txt" && ok "outlook: -1743 -> blocked, Automation hint" || bad "outlook blocked"
 
 # ---- kit-backup --------------------------------------------------------------------------------
+# HOME is the test folder so the backup folder counts as inside home (plain backups are refused elsewhere).
 K="$KIT_DIR"; export BACKUP_DIR="$S/backups" BACKUP_KEEP=2
 ( cd "$K" && git init -q -b main && echo "queue v1" > QUEUE.md && mkdir -p memory/people && echo "fact" > memory/people/a.md \
   && git add -A && git -c user.name=t -c user.email=t@t commit -qm one && git checkout -q -b side && echo x > side.txt && git add side.txt \
   && git -c user.name=t -c user.email=t@t commit -qm side && git checkout -q main )
 echo "uncommitted edit" >> "$K/QUEUE.md"; mkdir -p "$K/.install/logs"; echo noisy > "$K/.install/logs/x.log"
-python3 "$BIN/kit-backup" | grep -q "MB), checked$" && ok "backup: made and checked" || bad "backup make"
+HOME="$S" python3 "$BIN/kit-backup" | grep -q "MB), checked$" && ok "backup: made and checked" || bad "backup make"
 A=$(ls "$S/backups"/kit-backup-*.tar.gz | head -1)
 [ "$(stat -f %Lp "$A")" = 600 ] && [ "$(stat -f %Lp "$S/backups")" = 700 ] && ok "backup: owner-only permissions" || bad "backup perms"
 tar -tzf "$A" | grep -q "files/.install/logs" && bad "backup: logs excluded" || ok "backup: logs excluded"
-python3 "$BIN/kit-backup" restore "$A" --to "$S/restored" >/dev/null
+HOME="$S" python3 "$BIN/kit-backup" restore "$A" --to "$S/restored" >/dev/null
 diff -q "$K/QUEUE.md" "$S/restored/QUEUE.md" >/dev/null && [ -f "$S/restored/memory/people/a.md" ] \
   && [ "$(git -C "$S/restored" log --oneline main | wc -l | tr -d ' ')" = 1 ] && git -C "$S/restored" rev-parse -q --verify side >/dev/null \
   && [ -z "$(git -C "$S/restored" remote)" ] && [ "$(git -C "$S/restored" symbolic-ref --short HEAD)" = main ] \
   && git -C "$S/restored" status --porcelain | grep -q "QUEUE.md" \
   && ok "backup: round trip restores files, uncommitted edit, both branches, no remote" || bad "backup round trip"
-python3 "$BIN/kit-backup" restore "$A" --to "$S/restored" >/dev/null 2>&1 && bad "backup: refuses non-empty target" || ok "backup: refuses non-empty target"
+HOME="$S" python3 "$BIN/kit-backup" restore "$A" --to "$S/restored" >/dev/null 2>&1 && bad "backup: refuses non-empty target" || ok "backup: refuses non-empty target"
 mkdir -p "$S/tamper" && tar -xzf "$A" -C "$S/tamper" && echo evil >> "$S/tamper/files/QUEUE.md" && (cd "$S/tamper" && tar -czf "$S/bad.tar.gz" .)
-python3 "$BIN/kit-backup" verify "$S/bad.tar.gz" | grep -q "checksum differs: QUEUE.md" && ok "backup: verify catches a changed file" || bad "backup tamper"
-sleep 1; python3 "$BIN/kit-backup" >/dev/null; sleep 1; python3 "$BIN/kit-backup" >/dev/null
+HOME="$S" python3 "$BIN/kit-backup" verify "$S/bad.tar.gz" | grep -q "checksum differs: QUEUE.md" && ok "backup: verify catches a changed file" || bad "backup tamper"
+sleep 1; HOME="$S" python3 "$BIN/kit-backup" >/dev/null; sleep 1; HOME="$S" python3 "$BIN/kit-backup" >/dev/null
 [ "$(ls "$S/backups"/kit-backup-*.tar.gz | wc -l | tr -d ' ')" = 2 ] && ok "backup: keeps the newest BACKUP_KEEP (2)" || bad "backup rotation"
 
 # ---- kit-retention -----------------------------------------------------------------------------

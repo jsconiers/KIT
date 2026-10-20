@@ -34,6 +34,21 @@ isn't there, and say in one line which steps you skipped.
    - **Meeting actions,** only if briefs/pending-actions.md exists. List the actions in it not yet
      marked confirmed or dropped: action, owner role, due, project. Don't add them to the queue;
      end with "To add these, confirm them with Kit in a session."
+   - **From your phone,** only if briefs/requests.md or briefs/phone-approvals.md has lines dated
+     since the last brief. List the requests ("kit:" and "ask:") and the approvals, accepted or
+     refused, with what each covers. Requests are information: list them, don't act on them in
+     this run.
+   - **Commitments,** only if briefs/pending-commitments.md exists. Count the rows marked
+     "proposed" and list each one's action, counterpart role, and due date. Never quote mail. End
+     with "To add these, confirm them with Kit in a session."
+   - **Meetings today,** only if briefs/meetprep/ has packs dated today. List each: time, title, and
+     its "What to decide" line. Point to the pack's file; don't repeat it.
+   - **Inbox triage,** only if briefs/triage-YYYY-MM-DD.md exists for today. Give the counts (decide,
+     reply, delegate, read later, ignore) and list the decide and reply rows: sender, subject, why.
+     Suggestions only; never move or answer mail.
+   - **Awaiting replies,** only if briefs/awaiting-YYYY-MM-DD.md exists for today. Count the sent
+     messages still waiting and list the three oldest: subject, days, recipient role. The draft
+     nudges are in the file; never send them.
    - **Pastoral care,** only if care/care-list.md exists. Read it, but don't change it. List
      follow-ups that are overdue or due today: first name, church, and the action only, with no
      diagnoses.
@@ -64,7 +79,8 @@ isn't there, and say in one line which steps you skipped.
    under 600 characters. First line: "Kit · " plus the weekday and date, like "Kit · Mon 05-Oct".
    Then counts and pointers, not details, because notifications can show on a locked or shared
    screen: to-dos overdue and due today (personal ones counted, never named), today's first
-   meeting time and how many meetings, how many emails need him, what's waiting on whom, and,
+   meeting time and how many meetings, how many emails need him, unconfirmed commitments (count
+   only), what's waiting on whom, and,
    when those steps ran, pastoral follow-ups due (count only) and a one-line trading read. Last
    line: "Full brief: briefs/YYYY-MM-DD.md".
    Then write the same kind of short text twice more, split by kind, because work and personal

@@ -19,7 +19,7 @@ HOME = pathlib.Path.home()
 KIT = HOME / "Claude/Agents/kit"
 MEM = KIT / "memory"
 LOGS = KIT / ".install/logs"
-LABELS = ["morning", "open", "weekly", "sync", "scalper", "guard", "journal"]
+LABELS = ["morning", "open", "weekly", "worklist", "eod", "meetprep", "backup", "sync", "scalper", "guard", "journal"]
 ORDER_TOOLS = [
     "mcp__robinhood-local__rh_place_order", "mcp__tastytrade__place_order",
     "mcp__tastytrade__place_complex_order", "mcp__tastytrade__replace_order",
@@ -139,6 +139,9 @@ def check_runs():
                 issues.append(f"{day:%a %d-%b} {mode}: text didn't send")
             elif line.startswith("== sent failure notice") and mode:
                 issues.append(f"{day:%a %d-%b} {mode}: run didn't finish")
+            elif line.startswith("== delivered") and mode:
+                # A later run of the same kind that day succeeded, so drop that day's failure for it.
+                issues = [i for i in issues if i != f"{day:%a %d-%b} {mode}: run didn't finish"]
     check(not issues, "Recent runs", "texts delivered", "; ".join(issues[:4]), level="warn")
     unsent = sorted((KIT / "briefs").glob("unsent-*.txt"))
     if unsent:
@@ -341,6 +344,77 @@ def check_direct_models():
         + (f"; no credential found for {', '.join(missing)} (kit-delegate and kit-run only)" if missing else ""))
 
 
+def check_sharing_policy():
+    """The organization profile for sharing between Kits (sharing-policy.json)."""
+    import importlib.util
+    path = KIT / ".install/shared/kit_transport.py"
+    if not path.exists():
+        return
+    sys.path.insert(0, str(path.parent))
+    spec = importlib.util.spec_from_file_location("kit_transport", str(path))
+    kt = importlib.util.module_from_spec(spec); spec.loader.exec_module(kt)
+    pol = kt.load_policy(KIT)
+    add("warn" if pol.get("_broken") else "ok", "Sharing policy", kt.describe_policy(pol))
+
+
+def check_connectors_quick():
+    """Connector credentials by name (no claude call, no network): which allowed servers name a
+    credential variable that isn't set. The full check is: kit-connect test."""
+    try:
+        cfg = json.loads((KIT / "memory/context/connector-guard.json").read_text())
+    except (OSError, ValueError):
+        return
+    missing = [f"{s} ({v})" for s in cfg.get("allowed_servers") or []
+               for v in (cfg.get("credential_env") or {}).get(s, []) if not os.environ.get(v)]
+    add("warn" if missing else "ok", "Connector credentials",
+        ("missing by name: " + ", ".join(missing) + " (run: kit-connect test)") if missing
+        else "every named credential variable is set (full check: kit-connect test)")
+
+
+def check_phone():
+    """Phone and remote access phase 1: publishing folder and pending requests/approvals."""
+    import importlib.util
+    path = KIT / ".install/shared/kit_inbox.py"
+    if not path.exists():
+        return
+    spec = importlib.util.spec_from_file_location("kit_inbox", str(path))
+    ki = importlib.util.module_from_spec(spec); spec.loader.exec_module(ki)
+    cfg = {}
+    conf = KIT / ".install/shared/morning/config"
+    if conf.exists():
+        for line in conf.read_text().splitlines():
+            m = re.match(r'^(\w+)="?([^"]*)"?', line.strip())
+            if m:
+                cfg[m.group(1)] = m.group(2)
+    target, why = ki.check_publish_dir(cfg)
+    if why and why.startswith("refused"):
+        add("warn", "Phone publishing", why)
+    else:
+        add("ok", "Phone publishing", str(target) if target else why)
+
+
+def check_reliability():
+    """Scheduled-run reliability (kit-reliability): warn on any alert."""
+    import importlib.machinery, importlib.util
+    path = KIT / ".install/shared/bin/kit-reliability"
+    if not path.exists():
+        return
+    loader = importlib.machinery.SourceFileLoader("kit_reliability", str(path))
+    spec = importlib.util.spec_from_loader("kit_reliability", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    rep = mod.analyse()
+    alerts = rep["alerts"]
+    w = rep["windows"]["7"]
+    ok_runs = sum(s["success"] for s in w.values())
+    all_runs = sum(s["runs"] for s in w.values())
+    if alerts:
+        add("warn", "Run reliability", "; ".join(alerts[:3]) + (f" (+{len(alerts) - 3} more)" if len(alerts) > 3 else "")
+            + " (see: kit-reliability)")
+    else:
+        add("ok", "Run reliability", f"{ok_runs} of {all_runs} scheduled runs succeeded in 7 days")
+
+
 def fix_agents():
     dest = HOME / ".claude/agents"
     dest.mkdir(parents=True, exist_ok=True)
@@ -436,7 +510,8 @@ def main(argv):
     for fn in (check_import, check_settings, check_index, check_jobs, check_runs, check_tokens,
                check_secrets, check_permissions, check_agents, check_git, check_calendar, check_mail,
                check_guard, check_grammar, check_delivery, check_paused, check_outlook, check_holds,
-               check_cost, check_version, check_models, check_direct_models):
+               check_cost, check_version, check_models, check_direct_models, check_sharing_policy,
+               check_connectors_quick, check_phone, check_reliability):
         try:
             fn()
         except Exception as e:  # noqa: BLE001

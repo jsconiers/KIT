@@ -9,3 +9,6 @@ has this blank template.
 - **Currency:** not set. The currency every estimate is stated in.
 - **Contingency:** not set. The rule, for example a percentage by estimate confidence.
 - **Term:** optional. How many years to show recurring costs over. Three, unless you set another.
+- **Sizing:** `kit-sizing` gives rough-order compute, storage, and network figures (low, likely,
+  high) with every assumption listed, as input to estimates; template
+  `~/Claude/Agents/kit/templates/sizing-template.md`, an example to adapt.

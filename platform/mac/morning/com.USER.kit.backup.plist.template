@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.{{USER}}.kit.backup</string>
+  <!-- Daily backup of Kit's folder and history at 12:30, with the settings in
+       .install/shared/morning/config (BACKUP_DIR, BACKUP_KEEP, BACKUP_ENCRYPT, BACKUP_KEY_*).
+       If the Mac is asleep at 12:30, launchd runs it when the Mac wakes. -->
+  <key>ProgramArguments</key>
+  <array><string>/bin/zsh</string><string>-c</string><string>export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"; echo "== $(date) backup" ; exec python3 "$HOME/Claude/Agents/kit/.install/shared/bin/kit-backup"</string></array>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>12</integer><key>Minute</key><integer>30</integer></dict>
+  <key>StandardOutPath</key><string>{{HOME}}/Claude/Agents/kit/.install/logs/backup.log</string>
+  <key>StandardErrorPath</key><string>{{HOME}}/Claude/Agents/kit/.install/logs/backup.log</string>
+</dict>
+</plist>

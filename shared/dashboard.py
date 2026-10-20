@@ -44,7 +44,7 @@ FALLBACK = """<!doctype html>
 $audit_banner<div>$hero</div>$lane_you $lane_kit $lane_wait
 <section><h2>Today</h2>$schedule</section><section><h2>Briefs</h2>$briefs</section>
 <section><h2>Health</h2><ul>$health_checks</ul><table><thead><tr><th></th>$runs_head</tr></thead><tbody>$runs_rows</tbody></table></section>
-<section><h2>Sprint</h2>$sprint</section><section><h2>Audit</h2>$audit</section><section><h2>Kit's staff</h2><ul>$staff</ul></section>
+<section><h2>Sprint</h2>$sprint</section><section><h2>Reliability</h2>$reliability</section><section><h2>Audit</h2>$audit</section><section><h2>Kit's staff</h2><ul>$staff</ul></section>
 </body></html>
 """
 
@@ -327,6 +327,37 @@ def burndown_svg(sp, total, hist):
             f'{sp["end"]:%d-%b}</text></svg>')
 
 
+def reliability_panel():
+    """Run reliability for the last 7 days, from kit-reliability (read-only)."""
+    import importlib.machinery, importlib.util
+    path = KIT / ".install/shared/bin/kit-reliability"
+    if not path.exists():
+        path = pathlib.Path(__file__).resolve().parent / "bin/kit-reliability"
+    if not path.exists():
+        return '<p class="empty">kit-reliability isn\'t installed.</p>'
+    try:
+        loader = importlib.machinery.SourceFileLoader("kit_reliability", str(path))
+        spec = importlib.util.spec_from_loader("kit_reliability", loader)
+        kr_mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(kr_mod)
+        rep = kr_mod.analyse()
+    except Exception as ex:  # noqa: BLE001
+        return f'<p class="empty">Reliability couldn\'t be read: {e(str(ex)[:120])}</p>'
+    w = rep["windows"]["7"]
+    rows = ""
+    for mode, s in sorted(w.items()):
+        rate = s["success_rate"]
+        rate_text = "-" if rate is None else f"{rate:g}%"
+        late = " late" if rate is not None and rate < 90 else ""
+        rows += (f'<li class="strip"><p class="strip-title">{e(mode)}</p><div class="meta">'
+                 f'<span class="tag{late}">{rate_text} of {s["runs"]}</span>'
+                 f'<span class="tag">median {e(kr_mod.fmt_secs(s["median_seconds"]))}</span></div></li>')
+    rows = rows or '<li class="empty">No scheduled runs in the last 7 days.</li>'
+    alerts = "".join(f"<li>{e(a)}</li>" for a in rep["alerts"])
+    return (f'<ul class="strips">{rows}</ul>'
+            + (f'<p class="meta">Alerts:</p><ul>{alerts}</ul>' if alerts else '<p class="meta">No reliability alerts.</p>'))
+
+
 def sprint_panel():
     """The Sprint panel; also saves today's points-left snapshot for the burndown."""
     path = KIT / "QUEUE.md"
@@ -409,7 +440,7 @@ def main(argv):
                           "Nobody owes you anything."),
         "schedule": schedule(), "briefs": brief_text(), "health_checks": health_html,
         "runs_head": head, "runs_rows": rows, "audit": audit_html, "staff": staff(),
-        "sprint": sprint_panel(),
+        "sprint": sprint_panel(), "reliability": reliability_panel(),
     }
     tpl = kit_template.find("dashboard.html", template_arg, "KIT_DASHBOARD_TEMPLATE")
     page = kit_template.render(tpl.read_text(encoding="utf-8") if tpl else FALLBACK, values,

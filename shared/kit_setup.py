@@ -206,9 +206,12 @@ def cmd_scaffold(args):
     # Keep a complete copy of the whole package under .install, so nothing has to stay in
     # ~/Downloads and the scheduled runners/plists always find tools at a stable nested path.
     if REPO.resolve() != INSTALL_DIR.resolve():
-        for name in ("README.md", "VERSION", "CHANGELOG.md"):
+        for name in ("README.md", "INSTALL.md", "DESIGN.md", "VERSION", "CHANGELOG.md", "GOVERNANCE.md",
+                     "ONBOARDING.md"):
             if (REPO / name).exists():
                 shutil.copy2(str(REPO / name), str(INSTALL_DIR / name))
+        if (REPO / "tests/evals").is_dir():   # kit-evals reads its cases from here in the live Kit
+            shutil.copytree(str(REPO / "tests/evals"), str(INSTALL_DIR / "tests/evals"), dirs_exist_ok=True)
         for sub in ("kit", "shared", "platform"):
             s = REPO / sub
             if s.is_dir():

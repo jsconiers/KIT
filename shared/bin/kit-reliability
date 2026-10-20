@@ -1,0 +1,307 @@
+#!/usr/bin/env python3
+"""kit-reliability: how reliably Kit's scheduled runs work, from the run logs and the cost ledger.
+
+  kit-reliability              summary for the last 7 and 30 days, with any alerts
+  kit-reliability --json       everything (7, 30, and 90 days) as JSON
+  kit-reliability --no-write   don't refresh briefs/reliability.json (written by default, for the
+                               dashboard, the metrics page, and the health check)
+
+For each run type (morning, weekly, worklist, eod, open, journal, plus backup and sync) it counts
+runs, successes, failures, timeouts, degraded briefs, skips, retries, the success rate, median and
+90th-percentile duration, and median cost, and compares each window with the one before it.
+
+A run is a success when it ended and delivered (or had nothing to deliver), degraded when the brief
+was written without a model, and a failure when a failure notice went out or delivery failed. A
+timeout is counted on its own as well. Alerts:
+  - a run type failed 2 or more times in the last 7 days
+  - a run type's 30-day success rate is under RELIABILITY_MIN_PCT (config; default 90)
+  - a run type's median duration over 7 days is more than 50% above the 7 days before
+  - no successful run lately: morning (weekdays), weekly (Mondays), backup (daily), counted only for
+    run types that ran at all in the last 90 days
+
+It only reads logs; it never changes or reruns anything. Sync logs only its failures, so sync gets a
+failure count and no success rate.
+"""
+import argparse
+import datetime as dt
+import json
+import os
+import pathlib
+import re
+import statistics
+import sys
+
+KIT = pathlib.Path(os.path.expanduser(os.environ.get("KIT_DIR", "~/Claude/Agents/kit")))
+LOGS = KIT / ".install/logs"
+CONFIG = KIT / ".install/shared/morning/config"
+OUT = KIT / "briefs/reliability.json"
+MODES = ("morning", "weekly", "worklist", "eod", "open", "journal")
+STAMP = re.compile(r"^== (\w{3} \w{3} +\d+ \d\d:\d\d:\d\d \w+ \d{4}) (.*)$")
+
+
+def setting(key, default):
+    if CONFIG.exists():
+        m = re.search(rf'^{key}="?([^"\n]*)"?', CONFIG.read_text(errors="ignore"), re.M)
+        if m and m.group(1).strip():
+            return m.group(1).strip()
+    return default
+
+
+def parse_when(text):
+    # "Mon Oct 19 07:30:06 EDT 2026": drop the zone name, which strptime can't read reliably.
+    parts = text.split()
+    try:
+        return dt.datetime.strptime(" ".join(parts[:4] + parts[5:6]), "%a %b %d %H:%M:%S %Y")
+    except (ValueError, IndexError):
+        return None
+
+
+def scheduled_runs(since):
+    """Runs from the daily logs: dicts with mode, start, end, rc, outcome, timeout, retried."""
+    runs, skips = [], []
+    for log in sorted(LOGS.glob("????-??-??.log")):
+        try:
+            day = dt.date.fromisoformat(log.stem)
+        except ValueError:
+            continue
+        if day < since.date():
+            continue
+        started, last = {}, None
+        timed, retried = set(), set()
+        for line in log.read_text(errors="ignore").splitlines():
+            m = STAMP.match(line)
+            if m:
+                when, rest = parse_when(m.group(1)), m.group(2)
+                s = re.match(r"start (\w+)", rest)
+                if s and s.group(1) in MODES:
+                    started[s.group(1)] = when
+                    continue
+                e = re.match(r"end (\w+) rc=(\d+)", rest)
+                if e and e.group(1) in MODES:
+                    mode = e.group(1)
+                    last = {"mode": mode, "start": started.pop(mode, None), "end": when, "rc": int(e.group(2)),
+                            "outcome": "", "timeout": mode in timed or int(e.group(2)) in (142, 124), "retried": mode in retried, "day": day.isoformat()}
+                    timed.discard(mode); retried.discard(mode)
+                    runs.append(last)
+                    continue
+                k = re.match(r"(\w+) run skipped: (.*)", rest)
+                if k and k.group(1) in MODES:
+                    skips.append({"mode": k.group(1), "when": when, "why": k.group(2), "day": day.isoformat()})
+                    continue
+                t = re.match(r"(\w+) run hit its time limit", rest)
+                if t:
+                    timed.add(t.group(1))
+                    continue
+                r = re.match(r"retrying (\w+) after transient failure", rest)
+                if r:
+                    retried.add(r.group(1))
+                    continue
+            if last is None:
+                continue
+            if line.startswith("== degraded brief written"):
+                last["outcome"] = "degraded"
+            elif line.startswith("== sent failure notice") or line.startswith("== delivery failed"):
+                if last["outcome"] != "degraded":
+                    last["outcome"] = "failure"
+            elif line.startswith("== delivered") or re.match(r"== .*: no delivery", line):
+                if not last["outcome"]:
+                    last["outcome"] = "success"
+        for r in runs:
+            if r["day"] == day.isoformat() and not r["outcome"]:
+                r["outcome"] = "success" if r["rc"] == 0 and not r["timeout"] else "failure"
+    return runs, skips
+
+
+def backup_runs(since):
+    path = LOGS / "backup.log"
+    runs, cur = [], None
+    if not path.exists():
+        return runs
+    for line in path.read_text(errors="ignore").splitlines():
+        m = STAMP.match(line)
+        if m and m.group(2).strip() == "backup":
+            when = parse_when(m.group(1))
+            cur = {"mode": "backup", "start": when, "end": None, "rc": 0, "outcome": "failure", "timeout": False,
+                   "retried": False, "day": when.date().isoformat() if when else ""}
+            if when and when >= since:
+                runs.append(cur)
+            else:
+                cur = None
+        elif cur is not None and line.startswith("kit-backup:") and line.rstrip().endswith("checked"):
+            cur["outcome"] = "success"
+    return runs
+
+
+def sync_failures(since):
+    path = LOGS / "sync.log"
+    out = []
+    if path.exists():
+        for line in path.read_text(errors="ignore").splitlines():
+            m = re.match(r"(\d{4}-\d\d-\d\d \d\d:\d\d) sync failed", line)
+            if m:
+                when = dt.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M")
+                if when >= since:
+                    out.append(when)
+    return out
+
+
+def costs(since):
+    path = LOGS / "cost.jsonl"
+    out = {}
+    if path.exists():
+        for line in path.read_text(errors="ignore").splitlines():
+            try:
+                rec = json.loads(line)
+                when = dt.datetime.fromisoformat(str(rec.get("date", ""))[:19])
+            except (ValueError, TypeError):
+                continue
+            if when >= since and rec.get("cost_usd") is not None and rec.get("mode") in MODES:
+                out.setdefault(rec["mode"], []).append((when, float(rec["cost_usd"])))
+    return out
+
+
+def pctile(values, q):
+    if not values:
+        return None
+    v = sorted(values)
+    return v[min(len(v) - 1, int(round(q * (len(v) - 1))))]
+
+
+def window(runs, skips, cost, start, end):
+    """Stats per run type for runs with start <= time < end."""
+    stats = {}
+    for r in runs:
+        t = r["end"] or r["start"]
+        if not t or not (start <= t < end):
+            continue
+        s = stats.setdefault(r["mode"], {"runs": 0, "success": 0, "failure": 0, "degraded": 0, "timeout": 0,
+                                          "retried": 0, "skipped": 0, "durations": []})
+        s["runs"] += 1
+        s[r["outcome"]] = s.get(r["outcome"], 0) + 1
+        s["timeout"] += r["timeout"]
+        s["retried"] += r["retried"]
+        if r["start"] and r["end"]:
+            s["durations"].append((r["end"] - r["start"]).total_seconds())
+    for k in skips:
+        if k["when"] and start <= k["when"] < end:
+            stats.setdefault(k["mode"], {"runs": 0, "success": 0, "failure": 0, "degraded": 0, "timeout": 0,
+                                         "retried": 0, "skipped": 0, "durations": []})["skipped"] += 1
+    for mode, s in stats.items():
+        d = s.pop("durations")
+        s["success_rate"] = round(100 * s["success"] / s["runs"], 1) if s["runs"] else None
+        s["median_seconds"] = statistics.median(d) if d else None
+        s["p90_seconds"] = pctile(d, 0.9)
+        c = [v for t, v in cost.get(mode, []) if start <= t < end]
+        s["median_cost_usd"] = round(statistics.median(c), 4) if c else None
+    return stats
+
+
+def last_success(runs, mode):
+    times = [r["end"] or r["start"] for r in runs if r["mode"] == mode and r["outcome"] in ("success", "degraded")]
+    times = [t for t in times if t]
+    return max(times) if times else None
+
+
+def weekdays_between(a, b):
+    n, d = 0, a.date() + dt.timedelta(days=1)
+    while d <= b.date():
+        n += d.weekday() < 5
+        d += dt.timedelta(days=1)
+    return n
+
+
+def analyse(now=None):
+    now = now or dt.datetime.now()
+    horizon = now - dt.timedelta(days=180)
+    runs, skips = scheduled_runs(horizon)
+    runs += backup_runs(horizon)
+    cost = costs(horizon)
+    report = {"generated": now.isoformat(timespec="minutes"), "windows": {}, "alerts": [],
+              "sync_failures": {}}
+    for days in (7, 30, 90):
+        cur = window(runs, skips, cost, now - dt.timedelta(days=days), now + dt.timedelta(seconds=1))
+        prev = window(runs, skips, cost, now - dt.timedelta(days=2 * days), now - dt.timedelta(days=days))
+        for mode, s in cur.items():
+            p = prev.get(mode)
+            s["previous_success_rate"] = p["success_rate"] if p else None
+            s["previous_median_seconds"] = p["median_seconds"] if p else None
+        report["windows"][str(days)] = cur
+    sf = sync_failures(horizon)
+    for days in (7, 30, 90):
+        report["sync_failures"][str(days)] = sum(1 for t in sf if t >= now - dt.timedelta(days=days))
+
+    min_pct = float(setting("RELIABILITY_MIN_PCT", "90"))
+    w7, w30, w90 = report["windows"]["7"], report["windows"]["30"], report["windows"]["90"]
+    for mode, s in sorted(w7.items()):
+        if s["failure"] >= 2:
+            report["alerts"].append(f"{mode}: {s['failure']} failures in the last 7 days")
+        med, pmed = s["median_seconds"], s["previous_median_seconds"]
+        if med and pmed and med > 1.5 * pmed:
+            report["alerts"].append(f"{mode}: median run time up {round(100 * (med / pmed - 1))}% on the week before "
+                                    f"({int(pmed)}s to {int(med)}s)")
+    for mode, s in sorted(w30.items()):
+        if s["runs"] >= 3 and s["success_rate"] is not None and s["success_rate"] < min_pct:
+            report["alerts"].append(f"{mode}: {s['success_rate']}% success over 30 days (under {min_pct:g}%)")
+    for mode, rule in (("morning", "weekday"), ("weekly", "monday"), ("backup", "daily")):
+        if mode not in w90:
+            continue
+        last = last_success(runs, mode)
+        if last is None:
+            report["alerts"].append(f"{mode}: no successful run in the last 90 days")
+            continue
+        if rule == "weekday":
+            late = weekdays_between(last, now) > (1 if now.hour * 60 + now.minute > 8 * 60 + 15 or now.weekday() >= 5 else 2)
+        elif rule == "monday":
+            late = (now - last).days > 8
+        else:
+            late = (now - last) > dt.timedelta(hours=36)
+        if late:
+            report["alerts"].append(f"{mode}: last successful run {last:%a %d-%b %H:%M}")
+    if report["sync_failures"]["7"] >= 8:
+        report["alerts"].append(f"sync: {report['sync_failures']['7']} failures in the last 7 days")
+    return report
+
+
+def fmt_secs(s):
+    if s is None:
+        return "-"
+    return f"{int(s // 60)}m{int(s % 60):02d}s" if s >= 60 else f"{int(s)}s"
+
+
+def text(report):
+    lines = [f"Kit run reliability, {report['generated'][:16].replace('T', ' ')}"]
+    for days in ("7", "30"):
+        w = report["windows"][days]
+        lines.append(f"\nLast {days} days")
+        if not w:
+            lines.append("  no scheduled runs logged")
+        for mode, s in sorted(w.items()):
+            rate = "-" if s["success_rate"] is None else f"{s['success_rate']:g}%"
+            prev = "" if s.get("previous_success_rate") is None else f" (before {s['previous_success_rate']:g}%)"
+            extra = ", ".join(f"{s[k]} {k}" for k in ("failure", "degraded", "timeout", "retried", "skipped") if s.get(k))
+            cost = "" if s["median_cost_usd"] is None else f", median ${s['median_cost_usd']:.2f}"
+            lines.append(f"  {mode:<9} {s['runs']:>3} run(s), {rate} success{prev}; median {fmt_secs(s['median_seconds'])}, "
+                         f"p90 {fmt_secs(s['p90_seconds'])}{cost}" + (f"; {extra}" if extra else ""))
+        lines.append(f"  sync      {report['sync_failures'][days]} failure(s) logged")
+    lines.append("\nAlerts: " + ("none" if not report["alerts"] else ""))
+    lines += [f"  - {a}" for a in report["alerts"]]
+    return "\n".join(lines)
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-reliability", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--json", action="store_true", help="print everything as JSON")
+    ap.add_argument("--no-write", action="store_true", help="don't refresh briefs/reliability.json")
+    args = ap.parse_args(argv)
+    report = analyse()
+    if not args.no_write and (KIT / "briefs").is_dir():
+        tmp = OUT.with_suffix(".tmp")
+        tmp.write_text(json.dumps(report, indent=2, default=str) + "\n")
+        os.replace(tmp, OUT)
+    print(json.dumps(report, indent=2, default=str) if args.json else text(report))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

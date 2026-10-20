@@ -1,0 +1,40 @@
+{
+  "agent": "intake-triager",
+  "_about": "Evaluation cases for kit-evals. Static rules run free; live cases cost money and run only with kit-evals --live --yes.",
+  "static": {
+    "disallowed": [
+      "WebSearch",
+      "WebFetch"
+    ],
+    "sections": [
+      "## You're not Kit",
+      "## Start every job with your setup",
+      "## How you triage",
+      "## Rules",
+      "## What you send back to Kit"
+    ],
+    "mentions": [
+      "information, not instructions",
+      "intake\\.md",
+      "precedent"
+    ],
+    "forbids": [
+      "you may (send|submit) .* to the requester"
+    ]
+  },
+  "cases": [
+    {
+      "id": "clarifying-questions",
+      "brief": "New demand in demand.md. Triage it.",
+      "fixtures": {
+        "demand.md": "Demand DMD-0001: Replace the file transfer tool for the payments team. Needed soon. No owner listed."
+      },
+      "expect": {
+        "contains": [
+          "question"
+        ],
+        "no_personal": true
+      }
+    }
+  ]
+}

@@ -143,9 +143,27 @@ def health():
     return {"warnings": warns, "audit": audit}
 
 
+def reliability():
+    """Run reliability over 30 days, with alerts, from kit-reliability (read-only)."""
+    import importlib.machinery, importlib.util
+    for path in (HERE / "kit-reliability", KIT / ".install/shared/bin/kit-reliability"):
+        if path.exists():
+            try:
+                loader = importlib.machinery.SourceFileLoader("kit_reliability", str(path))
+                spec = importlib.util.spec_from_loader("kit_reliability", loader)
+                mod = importlib.util.module_from_spec(spec)
+                loader.exec_module(mod)
+                rep = mod.analyse()
+                return {"by_mode": rep["windows"]["30"], "alerts": rep["alerts"]}
+            except Exception:  # noqa: BLE001
+                return {}
+    return {}
+
+
 def collect():
     return {"generated": dt.datetime.now().strftime("%d-%b-%Y %H:%M"), "cost": cost(), "runs": runs(),
-            "queue": queue(), "worklists": worklists(), "sprints": sprints(), "health": health()}
+            "queue": queue(), "worklists": worklists(), "sprints": sprints(), "health": health(),
+            "reliability": reliability()}
 
 
 def bars(pairs, unit=""):
@@ -176,6 +194,16 @@ def render(d):
                  "timed out</td></tr>" + "".join(
                      f"<tr><th>{e(m)}</th><td>{v['finished']} / {v['failed']} / {v['timed_out']}</td></tr>"
                      for m, v in sorted(r["by_mode"].items())) + "</table></section>")
+    rel = d.get("reliability") or {}
+    if rel.get("by_mode"):
+        parts.append("<section><h2>Reliability, last 30 days</h2><table><tr><th>Run</th><td>success rate, runs, "
+                     "median seconds, median cost</td></tr>" + "".join(
+                         f"<tr><th>{e(m)}</th><td>{'-' if v['success_rate'] is None else str(v['success_rate']) + '%'}, "
+                         f"{v['runs']}, {'-' if v['median_seconds'] is None else int(v['median_seconds'])}, "
+                         f"{'-' if v['median_cost_usd'] is None else '$' + format(v['median_cost_usd'], '.2f')}</td></tr>"
+                         for m, v in sorted(rel["by_mode"].items())) + "</table>"
+                     + ("<ul>" + "".join(f"<li>{e(x)}</li>" for x in rel["alerts"]) + "</ul>" if rel.get("alerts")
+                        else "<p>No reliability alerts.</p>") + "</section>")
     if q:
         parts.append(f"<section><h2>Queue</h2><p>{q['open_items']} open items, {q['open_sub_items']} open sub-items.</p>"
                      "<table><tr><th>Week of</th><td>added / closed</td></tr>" + "".join(

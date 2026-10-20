@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""kit-awaiting: sent mail that asked for something and hasn't had a reply.
+
+  kit-awaiting --sent FILE --inbox FILE [--days N] [--print]
+
+--sent takes `kitmail sent-dump` or `kitmail sent-read` output (headers, a dashed line, the body;
+several messages separated by '=== message' lines). --inbox takes `kitmail inbox` lines or `kitmail
+read` messages. Either may be - for standard input.
+
+NEEDS THE KITMAIL SENT-ITEMS CHANGE: kitmail reads only the inbox today. The proposed `sent`,
+`sent-read`, and `sent-dump` commands (proposals/kitmail-sent-items.md in the live Kit) produce the
+--sent input. Until they're added, pass a file you've saved yourself.
+
+A sent message counts as asking when your own text (quoted replies left out) has a question mark or
+a request ("can you", "please confirm", "let me know", "any update"). It's answered when an inbox
+message with the same subject (Re:, Fwd:, and [External] prefixes ignored) arrived after it. Asks
+older than N days with no answer are listed with a draft nudge; N comes from "Awaiting reply after"
+in memory/context/meetings.md (default 3). Writes briefs/awaiting-<date>.md. Never sends anything.
+"""
+import argparse
+import datetime as dt
+import pathlib
+import re
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import kit_daily as kd  # noqa: E402
+
+ASK = re.compile(r"\b(can you|could you|would you|will you|are you able|please (send|confirm|review|share|"
+                 r"provide|advise|approve|let me know|get back)|let me know|any update|when can|"
+                 r"what do you think|your thoughts)\b", re.I)
+NOT_ASK = re.compile(r"let me know if (you )?(have|need) (any )?(questions|anything)|"
+                     r"let me know if (there'?s|there is) anything", re.I)
+
+
+def threshold(arg):
+    if arg is not None:
+        return arg
+    m = re.search(r"(\d+)", kd.setting(kd.read(kd.CONTEXT / "meetings.md"), "Awaiting reply after") or "")
+    return int(m.group(1)) if m else 3
+
+
+def asks(text):
+    own = kd.own_text(text)
+    cleaned = NOT_ASK.sub("", own)
+    sentences = re.split(r"(?<=[.?!])\s+|\n+", cleaned)
+    for s in sentences:
+        if "?" in s or ASK.search(s):
+            return " ".join(s.split())
+    return ""
+
+
+def find(sent, inbox, days, base):
+    out = []
+    for m in sent:
+        ask = asks(m["body"])
+        if not ask or not m["when"]:
+            continue
+        subj = kd.norm_subject(m["subject"])
+        answered = any(kd.norm_subject(r["subject"]) == subj and r.get("when") and r["when"] > m["when"]
+                       for r in inbox)
+        age = (base - m["when"].date()).days
+        if answered or age < days:
+            continue
+        role = m["head"].get("role") or "recipient"
+        nudge = (f"Following up on my note of {kd.fmt(m['when'].date())} about \"{kd.clip(m['subject'], 60)}\": "
+                 f"{kd.clip(ask, 80)} Could you let me know where this stands?")
+        out.append({"when": m["when"], "age": age, "role": role, "subject": kd.clip(m["subject"], 70),
+                    "ask": kd.clip(ask, 80), "nudge": nudge})
+    out.sort(key=lambda r: -r["age"])
+    return out
+
+
+def build(rows, days):
+    out = [f"# Awaiting replies, {kd.fmt(kd.today())}", "",
+           f"Sent mail that asked for something and has no reply after {days} day(s). The nudges are "
+           "drafts for you to send, or not; Kit never sends mail.", ""]
+    if not rows:
+        return "\n".join(out + ["Nothing outstanding.", ""])
+    out += ["| Sent | Days | To (role) | Subject | Asked |", "|---|---|---|---|---|"]
+    out += [f"| {kd.fmt(r['when'].date())} | {r['age']} | {r['role']} | {r['subject'].replace('|', '/')} | "
+            f"{r['ask'].replace('|', '/')} |" for r in rows]
+    out += ["", "## Draft nudges", ""] + [f"- **{r['subject']}:** {r['nudge']}" for r in rows] + [""]
+    return "\n".join(out)
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-awaiting", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--sent", required=True)
+    ap.add_argument("--inbox", required=True)
+    ap.add_argument("--days", type=int)
+    ap.add_argument("--print", action="store_true")
+    args = ap.parse_args(argv)
+    if args.sent == "-" and args.inbox == "-":
+        ap.error("only one of --sent and --inbox can read standard input")
+    rd = lambda s: sys.stdin.read() if s == "-" else kd.read(s)  # noqa: E731
+    sent = kd.parse_messages(rd(args.sent))
+    inbox = kd.parse_mail(rd(args.inbox))
+    if not sent:
+        sys.exit("kit-awaiting: no sent messages found (expected `kitmail sent-dump` output; "
+                 "kitmail needs the sent-items change first)")
+    days = threshold(args.days)
+    rows = find(sent, inbox, days, kd.today())
+    text = build(rows, days)
+    if args.print:
+        print(text)
+        return 0
+    path = kd.write(kd.BRIEFS / f"awaiting-{kd.today().isoformat()}.md", text)
+    print(f"kit-awaiting: {len(rows)} awaiting a reply (of {len(sent)} sent); wrote {path}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

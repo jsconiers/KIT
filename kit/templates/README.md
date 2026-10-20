@@ -14,6 +14,8 @@ in `memory/context/writing.md`; none ship here.
 | Decisions | `adr-template.md` | decision recorder | `decisions.md` |
 | Decisions | `build-buy-partner-template.md` | Kit, cost estimator, decision recorder | `decisions.md` |
 | Projects | `stakeholder-map-template.md` | status reporter, scheduler | `status.md` |
+| Systems | `system-profile-template.md` | curator, Kit (`kit-sysprofile`) | `knowledge.md` |
+| Costs | `sizing-template.md` | cost estimator, Kit (`kit-sizing`) | `costs.md` |
 | POC | `poc-charter-template.md` | POC lead | `poc.md` |
 | POC | `poc-test-plan-template.md` | POC lead | `poc.md` |
 | POC | `poc-scorecard-template.md` | POC lead | `poc.md` |
@@ -29,6 +31,8 @@ in `memory/context/writing.md`; none ship here.
 | Future tech | `radar-ballot-template.md` | future tech planner | `future-tech.md` |
 | Future tech | `tech-lifecycle-review-template.md` | future tech planner | `future-tech.md` |
 | Future tech | `strategy-brief-template.md` | future tech planner | `future-tech.md` |
+| Future tech | `tech-roadmap-template.md` | future tech planner (`kit-roadmap` drafts) | `future-tech.md` |
+| Future tech | `regulatory-watch-template.md` | weekly review, future tech planner, risk and compliance mapper | `future-tech.md` |
 | Future tech | `tech-debt-register-template.md` | future tech planner | `future-tech.md` |
 | Future tech | `vendor-landscape-template.md` | future tech planner | `future-tech.md` |
 | Future tech | `radar-view-template.md` | future tech planner | `future-tech.md` |

@@ -1,0 +1,186 @@
+#!/usr/bin/env python3
+"""kit-meetprep: a prep pack for each meeting that starts soon.
+
+  kit-meetprep --json FILE         use a calendar JSON file (`kitmail calendar --json` format)
+  kit-meetprep --json -            read the JSON from standard input
+  kit-meetprep --from-config       run CALENDAR_JSON_CMD from Kit's config to get today's events
+  kit-meetprep ... --minutes 120   meetings starting within this many minutes (default 120)
+  kit-meetprep ... --force         rewrite packs that already exist
+  kit-meetprep --today             list today's packs
+
+Each pack goes to briefs/meetprep/<date>-<HHMM>-<slug>.md: the title and time, who's there by role
+(the organizer, invited attendees, and the roles in a matching project's stakeholder map; never
+names or addresses), related queue items, pending meeting actions and commitments, related library
+documents (kit-precedent), and what to decide. All-day events, events you declined, and events with
+no attendees are skipped. A pure script: no Claude run, no network, nothing sent.
+"""
+import argparse
+import datetime as dt
+import json
+import os
+import pathlib
+import re
+import shlex
+import subprocess
+import sys
+
+BIN = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(BIN.parent))
+import kit_daily as kd  # noqa: E402
+
+OUT = kd.BRIEFS / "meetprep"
+DECIDE = re.compile(r"\b(decide|decision|approve|approval|sign[- ]?off|choose|go/no-go|vote|confirm)\b", re.I)
+
+
+def load_events(args):
+    if args.json:
+        raw = sys.stdin.read() if args.json == "-" else kd.read(args.json)
+    else:
+        m = re.search(r'^CALENDAR_JSON_CMD="([^"]*)"', kd.read(kd.CONFIG), re.M)
+        if not m or not m.group(1).strip():
+            sys.exit("kit-meetprep: no CALENDAR_JSON_CMD in Kit's config; pass --json FILE")
+        cmd = [os.path.expanduser(p) for p in shlex.split(m.group(1))]
+        try:
+            raw = subprocess.run(cmd, capture_output=True, text=True, timeout=180).stdout
+        except (OSError, subprocess.TimeoutExpired) as e:
+            sys.exit(f"kit-meetprep: the calendar command failed: {e}")
+    try:
+        events = json.loads(raw or "[]")
+    except ValueError:
+        sys.exit("kit-meetprep: the calendar output wasn't JSON")
+    out = []
+    for e in events if isinstance(events, list) else []:
+        try:
+            start = dt.datetime.fromisoformat(str(e.get("start")))
+            end = dt.datetime.fromisoformat(str(e.get("end"))) if e.get("end") else start
+        except ValueError:
+            continue
+        out.append(dict(e, start=start.replace(tzinfo=None), end=end.replace(tzinfo=None)))
+    return out
+
+
+def wanted(e):
+    if e.get("all_day") or not e.get("has_attendees"):
+        return False
+    return str(e.get("my_response") or "").lower() not in ("declined", "decline")
+
+
+def stakeholder_roles(title):
+    root = kd.library_root()
+    if not root or not (root / "artifacts").is_dir():
+        return [], None
+    tw = kd.words(title)
+    for proj in sorted((root / "artifacts").iterdir()):
+        sm = proj / "stakeholders.md"
+        if not sm.is_file() or not (kd.words(proj.name.replace("-", " ")) & tw):
+            continue
+        roles = []
+        for ln in kd.read(sm).splitlines():
+            cells = [c.strip() for c in ln.strip().strip("|").split("|")] if ln.strip().startswith("|") else []
+            if cells and cells[0] and cells[0].lower() not in ("role",) and not re.fullmatch(r":?-+:?", cells[0]) \
+                    and not cells[0].startswith("<"):
+                roles.append(cells[0])
+        return roles[:12], proj.name
+    return [], None
+
+
+def related_queue(title):
+    tw = kd.words(title)
+    lines = kd.queue_lines()
+    hits = []
+    for name in kd.sections(lines):
+        if name in ("Done", "Someday"):
+            continue
+        for it in kd.items(lines, name):
+            if it["done"]:
+                continue
+            score = len(kd.words(it["title"]) & tw)
+            if score:
+                hits.append((score, name, it["title"]))
+    hits.sort(key=lambda h: -h[0])
+    return [(n, t) for _, n, t in hits[:6]]
+
+
+def pending(title, fname):
+    tw = kd.words(title)
+    out = []
+    for ln in kd.read(kd.BRIEFS / fname).splitlines():
+        if ln.strip().startswith(("|", "- ")) and "dropped" not in ln.lower() and "confirmed" not in ln.lower() \
+                and len(kd.words(ln) & tw) >= 1 and not re.fullmatch(r"[|\s:-]+", ln):
+            out.append(kd.clip(ln.strip("-| "), 140))
+    return out[:5]
+
+
+def documents(title):
+    tool = BIN / "kit-precedent"
+    terms = sorted(kd.words(title), key=len, reverse=True)[:4]
+    if not tool.exists() or not terms:
+        return []
+    try:
+        r = subprocess.run([sys.executable, str(tool), "--json", "--limit", "5", *terms],
+                           capture_output=True, text=True, timeout=60, env=dict(os.environ))
+        hits = json.loads(r.stdout or "{}").get("hits", [])
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return []
+    return [f"{pathlib.Path(h['file']).name}:{h['line']}  {kd.clip(h['text'], 110)}" for h in hits]
+
+
+def pack(e):
+    title = kd.mask(e.get("subject") or "(no subject)")
+    resp = str(e.get("my_response") or "").lower()
+    roles = ["you (organizer)" if resp == "organizer" else "organizer", "invited attendees"]
+    sroles, proj = stakeholder_roles(title)
+    queue = related_queue(title)
+    actions = pending(title, "pending-actions.md")
+    commits = pending(title, "pending-commitments.md")
+    docs = documents(title)
+    decide = [t for _, t in queue if DECIDE.search(t)]
+    where = kd.clip(e.get("location") or "", 80)
+    when = f"{e['start']:%a %d-%b-%Y %H:%M}-{e['end']:%H:%M}"
+    out = [f"# Meeting prep: {title}", "", f"- **When:** {when}" + (f"  \n- **Where:** {where}" if where else ""),
+           f"- **Who (by role):** {', '.join(roles)}" + (f"; stakeholder map ({proj}): {', '.join(sroles)}" if sroles else ""),
+           "", "## Related queue items", ""]
+    out += [f"- {t} ({n})" for n, t in queue] or ["- none found"]
+    out += ["", "## Pending actions and commitments", ""]
+    out += [f"- {a}" for a in actions + commits] or ["- none"]
+    out += ["", "## Related documents", ""]
+    out += [f"- {d}" for d in docs] or ["- none found in the library's indexes"]
+    out += ["", "## What to decide", ""]
+    out += [f"- {d}" for d in decide] or ["- Set the decision you want from this meeting before it starts."]
+    out += ["", f"_Prepared {kd.fmt(kd.today())} by kit-meetprep. Information only; nothing was sent._", ""]
+    return "\n".join(out)
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-meetprep", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--json", metavar="FILE")
+    ap.add_argument("--from-config", action="store_true")
+    ap.add_argument("--minutes", type=int, default=120)
+    ap.add_argument("--force", action="store_true")
+    ap.add_argument("--today", action="store_true")
+    args = ap.parse_args(argv)
+    if args.today:
+        packs = sorted(OUT.glob(f"{kd.today().isoformat()}-*.md"))
+        print(f"kit-meetprep: {len(packs)} pack(s) for today")
+        for p in packs:
+            print(f"  {p.name}")
+        return 0
+    if not args.json and not args.from_config:
+        ap.error("give --json FILE, --json -, --from-config, or --today")
+    t0 = kd.now()
+    t1 = t0 + dt.timedelta(minutes=args.minutes)
+    soon = [e for e in load_events(args) if wanted(e) and t0 <= e["start"] <= t1]
+    made = 0
+    for e in soon:
+        path = OUT / f"{e['start']:%Y-%m-%d-%H%M}-{kd.slug(e.get('subject'))}.md"
+        if path.exists() and not args.force:
+            continue
+        kd.write(path, pack(e))
+        made += 1
+        print(f"kit-meetprep: wrote {path}")
+    print(f"kit-meetprep: {len(soon)} meeting(s) in the next {args.minutes} min; {made} new pack(s)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

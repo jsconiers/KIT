@@ -29,7 +29,8 @@ Anything that needs {{OWNER}} goes in the review.
    double bookings, and anything scheduled on a rest day (skip if no calendar command is set).
 8. Horizon scan, only if the radar exists (the radar folder in memory/context/future-tech.md,
    under the library root in library.md; skip in one line if it doesn't). Read RADAR.md, LOG.md,
-   and lifecycle/. List:
+   and lifecycle/, starting with lifecycle/summary.md from kit-lifecycle (say how old it is if it's
+   more than 30 days old). List:
    - radar entries whose review date falls in the next 30 days, and ballots waiting for a vote;
    - lifecycle reviews with end of support within 12 months (urgent) or 24 months (warning);
    - votes decided this week, with the ring.
@@ -41,13 +42,23 @@ Anything that needs {{OWNER}} goes in the review.
    due list, then the researcher's findings, each with its source and confidence, kept apart from
    your own inferences. Propose radar ballots or lifecycle re-reviews for {{OWNER}} to approve;
    never change the radar yourself. Count it as work in the split texts.
-9. Trading, only if the traders-edge tools are available and respond: call weekly_review and discipline_backtest.
+9. Regulatory and industry watch, only if future-tech.md has a watch list and the researcher agent
+   is available; skip in one line otherwise, or if this prompt says to keep the run lean. Ask the
+   researcher, in one brief, what changed in the last week on the watch list's topics, from public
+   sources only, each cited with its confidence. Give it the topics and sources, never anything
+   about the company's systems, projects, or documents. Write the result from regulatory-watch-template.md
+   to the radar folder's watch/<YYYY-WW>.md (if you can't write there, write
+   briefs/watch-<YYYY-WW>.md and say so). Flag items that may touch controls for the risk and
+   compliance mapper, and items that may move a technology as radar candidates for the future tech
+   planner; draw no compliance conclusions. Add a "Watch" section to the review with the top three
+   items and the file's path. Count it as work in the split texts.
+10. Trading, only if the traders-edge tools are available and respond: call weekly_review and discipline_backtest.
    Report fee-inclusive P&L against the weekly target, round trips, and any rule breaks,
    plainly. Run `kit-scalper stats` for the bot's dry-run record toward 257 trades. Read this week's
    journals in journal/ and sum them up: rule breaks by day, and {{OWNER}} against the scalper's
    dry runs. Structure
    and risk only; never call a tool that places, changes, or cancels an order.
-10. Monthly retrospective, only on the first Monday of the month (today's day of the month is 7 or
+11. Monthly retrospective, only on the first Monday of the month (today's day of the month is 7 or
    less). Look back over the previous calendar month and write briefs/retro-YYYY-MM.md for that
    month, from the files alone:
    - **What Kit did:** queue items you finished (Done section and earlier weekly reviews), work
@@ -64,24 +75,34 @@ Anything that needs {{OWNER}} goes in the review.
      change preferences, lessons, or the queue yourself.
    Keep it to one page. Add a "Retrospective" section to the review with the three most
    important points and the file's path. Personal topics appear only as "personal item".
-11. Sprint review, only if QUEUE.md's Sprint section has a sprint whose end date falls within the
+12. Sprint review, only if QUEUE.md's Sprint section has a sprint whose end date falls within the
    seven days starting today. Give: the sprint's name and dates, items done and points done
    against the total, items carried over with their status and why they slipped (from the work
    lists and briefs), and a proposal for the next sprint (name, dates, and items from the roadmap
    and the carry-over, each sized S, M, or L, about the same points as were done this sprint). Put
    it in a "Sprint review" section. Never start, close, or change a sprint yourself; {{OWNER}}
    approves, then runs `todo sprint close` and `todo sprint start`, or asks Kit to in a session.
-12. Cost, only if `python3 ~/Claude/Agents/kit/.install/shared/bin/kit-cost report --json` is in the
+13. Cost, only if `python3 ~/Claude/Agents/kit/.install/shared/bin/kit-cost report --json` is in the
    allowed tools and the ledger has runs. Give the week's and the month's spend for scheduled
    runs, the share of the budget used (or "no budget set"), the projection for the month, the
    three costliest runs this week with their kind, and the trend against last month. If the run
    prompt says the budget is at the warning level or above, say which runs are being kept lean or
    skipped. Suggest one way to spend less if a kind of run costs much more than the others.
    Figures are estimates; interactive sessions aren't counted.
-13. Write the review to briefs/weekly-YYYY-MM-DD.md, and a text version to
+14. Quality loop. Run `python3 ~/Claude/Agents/kit/.install/shared/bin/kit-quality` (it reads the
+   reviewer's review notes in the library and writes briefs/quality.json, and, when a finding has
+   recurred, proposals to briefs/pending-lessons.md and briefs/pending-template-changes.md). Add a
+   "Quality" section to the review: findings this week by category and severity, the recurring
+   findings, and any new proposals by title. Don't approve or apply any proposal; {{OWNER}} decides
+   in a session, and Kit writes approved lessons to lessons/ and the review-lessons file and passes
+   approved template changes to the template's owner. Count it as work in the split texts.
+15. Accomplishments. Run `python3 ~/Claude/Agents/kit/.install/shared/bin/kit-wins collect` and add a
+   "Wins this week" section to the review: the entries it added, by theme. Work items only. Count it
+   as work in the split texts.
+16. Write the review to briefs/weekly-YYYY-MM-DD.md, and a text version to
    briefs/weekly-text.txt: plain text, no markdown, under 700 characters, first line
    "Kit · week of " plus the date, like "Kit · week of 10-Oct". Then write two more versions,
    split by kind for separate delivery: briefs/weekly-text-work.txt with only work items (to-dos
-   tagged [work], work meetings, audit findings, the horizon scan, the sprint review, cost) and briefs/weekly-text-personal.txt with the rest
+   tagged [work], work meetings, audit findings, the horizon scan, the quality loop, wins, the watch, the sprint review, cost) and briefs/weekly-text-personal.txt with the rest
    (personal to-dos, pastoral care, trading). Same first line; "Nothing this week." if one is empty.
-14. Finish with one line: "done", or what went wrong.
+17. Finish with one line: "done", or what went wrong.

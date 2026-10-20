@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+"""kit-wins: a running log of finished work, for reviews and 1:1s.
+
+  kit-wins                         this month's entries
+  kit-wins collect [--dry-run]     add new entries from the sources below
+  kit-wins report --from D --to D  a summary grouped by theme (dates DD-Mmm-YYYY or YYYY-MM-DD)
+
+Sources: QUEUE.md's Done section (Kit's own items, and the owner's items tagged [work]), finished
+sprint items, accepted ADRs (decisions/INDEX.md in the library), POC verdicts (poc/INDEX.md),
+documents added to the library (LOG.md), and Kit's own release notes (briefs/kit-release-notes-*).
+Entries go to memory/accomplishments.md, one dated line each, never twice. Work only: an owner's
+item without the [work] tag is skipped, and nothing under memory/personal/ is read.
+"""
+import argparse
+import datetime as dt
+import pathlib
+import re
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import kit_daily as kd  # noqa: E402
+
+LOG = kd.KIT / "memory/accomplishments.md"
+HEADER = ("# Accomplishments\n\nFinished work, one line each: date, theme, what, and where it came from.\n"
+          "Written by `kit-wins collect`; edit freely.\n\n")
+THEMES = [
+    ("Decisions", r"\bADR\b|decision|decided"),
+    ("POCs and labs", r"\bPOC\b|proof of concept|\blab\b|runbook"),
+    ("Design documents", r"\bIA\b|\bGDS\b|impact assessment|design spec|design doc|overview|guide|deck|doc\b|document"),
+    ("Kit and automation", r"\bkit\b|agent|tool|script|automation|dashboard|sync|patch|install"),
+    ("Delivery and meetings", r"meeting|minutes|change|cutover|release|delivered|status"),
+]
+LINE = re.compile(r"^- (?P<date>\d{2}-[A-Z][a-z]{2}-\d{4}) \[(?P<theme>[^\]]+)\] (?P<text>.*?)(?: \((?P<src>[^()]*)\))?$")
+LOG_VERBS = re.compile(r"\b(added|filed|saved|drafted|published|catalogued|cataloged|wrote|issued)\b", re.I)
+
+
+def theme(text):
+    for name, pat in THEMES:
+        if re.search(pat, text, re.I):
+            return name
+    return "Other"
+
+
+def key(text):
+    return " ".join(sorted(kd.words(text)))
+
+
+def existing():
+    out = []
+    for ln in kd.read(LOG).splitlines():
+        m = LINE.match(ln)
+        if m:
+            out.append({"date": kd.parse_date(m["date"]), "theme": m["theme"], "text": m["text"], "src": m["src"] or ""})
+    return out
+
+
+def from_queue():
+    lines = kd.queue_lines()
+    out = []
+    for ln in kd.section(lines, "Done"):
+        m = re.match(r"^- \[x\] \*\*(.+?)\*\*(.*)$", ln, re.I)
+        if not m:
+            continue
+        title, rest = m.group(1), m.group(2)
+        kit_item = re.search(r":\s*Kit, done\b", rest)
+        if not kit_item and "[work]" not in rest and "[work]" not in title:
+            continue                      # an owner's item without [work] may be personal
+        d = kd.parse_date(re.search(r"done (\d{2}-[A-Z][a-z]{2}-\d{4})", rest).group(1)) \
+            if re.search(r"done (\d{2}-[A-Z][a-z]{2}-\d{4})", rest) else None
+        out.append({"date": d or kd.today(), "text": title.replace("[work]", "").strip(), "src": "queue"})
+    for ln in kd.section(lines, "Sprint"):
+        m = re.match(r"^- \[x\] \*\*(.+?)\*\*", ln, re.I)
+        if m:
+            out.append({"date": kd.today(), "text": m.group(1).strip(), "src": "sprint"})
+    return out
+
+
+def table_rows(path):
+    rows, header = [], None
+    for ln in kd.read(path).splitlines():
+        if not ln.strip().startswith("|"):
+            header = None if not ln.strip() else header
+            continue
+        cells = [c.strip() for c in ln.strip().strip("|").split("|")]
+        if all(re.fullmatch(r":?-+:?", c) for c in cells if c):
+            continue
+        if header is None:
+            header = [c.lower() for c in cells]
+            continue
+        rows.append(dict(zip(header, cells)))
+    return rows
+
+
+def pick(row, *names):
+    for n in names:
+        for k, v in row.items():
+            if n in k and v:
+                return v
+    return ""
+
+
+def from_library():
+    root = kd.library_root()
+    out = []
+    if not root:
+        return out
+    for row in table_rows(root / "decisions/INDEX.md"):
+        status = pick(row, "status").lower()
+        if status.startswith("accepted"):
+            num, title = pick(row, "number", "adr", "id"), pick(row, "title")
+            d = kd.parse_date(pick(row, "date"))
+            out.append({"date": d or kd.today(), "text": f"{num} accepted: {title}".strip(), "src": "ADR"})
+    for row in table_rows(root / "poc/INDEX.md"):
+        verdict = pick(row, "verdict")
+        if verdict and verdict.lower() not in ("-", "pending", "none", "tbd"):
+            pid, title = pick(row, "id", "poc"), pick(row, "title")
+            d = kd.parse_date(pick(row, "decided", "closed", "date", "end"))
+            out.append({"date": d or kd.today(), "text": f"{pid} {title}: verdict {verdict}".strip(), "src": "POC"})
+    for ln in kd.read(root / "LOG.md").splitlines():
+        m = re.match(r"^- (\d{2}-[A-Z][a-z]{2}-\d{4}):\s*(.+)$", ln)
+        if m and LOG_VERBS.search(m.group(2)):
+            out.append({"date": kd.parse_date(m.group(1)), "text": kd.clip(m.group(2), 160), "src": "library"})
+    return out
+
+
+def from_releases():
+    out = []
+    for f in sorted(kd.BRIEFS.glob("kit-release-notes-*.md")):
+        d = kd.parse_date(f.name)
+        m = re.search(r"to (\S+ \([0-9a-f]{7,}\))", kd.read(f))
+        out.append({"date": d or kd.today(), "text": "Kit updated" + (f" to {m.group(1)}" if m else ""), "src": "release"})
+    return out
+
+
+def gather():
+    return from_queue() + from_library() + from_releases()
+
+
+def collect(dry=False):
+    have = {key(e["text"]) for e in existing()}
+    new = []
+    for e in gather():
+        k = key(e["text"])
+        if not k or k in have:
+            continue
+        have.add(k)
+        e["theme"] = theme(e["text"])
+        new.append(e)
+    new.sort(key=lambda e: e["date"])
+    if new and not dry:
+        text = kd.read(LOG) or HEADER
+        if not text.endswith("\n"):
+            text += "\n"
+        text += "".join(f"- {kd.fmt(e['date'])} [{e['theme']}] {kd.clip(e['text'], 200)} ({e['src']})\n" for e in new)
+        kd.write(LOG, text)
+    return new
+
+
+def in_range(entries, a, b):
+    return [e for e in entries if e["date"] and a <= e["date"] <= b]
+
+
+def report(a, b):
+    ents = in_range(existing(), a, b)
+    out = [f"# Accomplishments, {kd.fmt(a)} to {kd.fmt(b)}", "", f"{len(ents)} item(s).", ""]
+    for name in [t for t, _ in THEMES] + ["Other"]:
+        group = [e for e in ents if e["theme"] == name]
+        if group:
+            out += [f"## {name} ({len(group)})", ""] + [f"- {kd.fmt(e['date'])}: {e['text']}" for e in group] + [""]
+    return "\n".join(out)
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-wins", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd")
+    c = sub.add_parser("collect"); c.add_argument("--dry-run", action="store_true")
+    r = sub.add_parser("report"); r.add_argument("--from", dest="start", required=True); r.add_argument("--to", dest="end")
+    args = ap.parse_args(argv)
+    if args.cmd == "collect":
+        new = collect(args.dry_run)
+        verb = "would add" if args.dry_run else "added"
+        print(f"kit-wins: {verb} {len(new)} entr{'y' if len(new) == 1 else 'ies'} to {LOG}")
+        for e in new:
+            print(f"  {kd.fmt(e['date'])} [{e['theme']}] {kd.clip(e['text'], 90)}")
+        return 0
+    if args.cmd == "report":
+        a = kd.parse_date(args.start)
+        b = kd.parse_date(args.end) if args.end else kd.today()
+        if not a or not b:
+            sys.exit("kit-wins: dates are DD-Mmm-YYYY or YYYY-MM-DD")
+        print(report(a, b))
+        return 0
+    t = kd.today()
+    ents = in_range(existing(), t.replace(day=1), t)
+    print(f"kit-wins: {len(ents)} entr{'y' if len(ents) == 1 else 'ies'} this month ({LOG})")
+    for e in ents:
+        print(f"  {kd.fmt(e['date'])} [{e['theme']}] {kd.clip(e['text'], 90)}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

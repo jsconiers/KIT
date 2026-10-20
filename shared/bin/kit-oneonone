@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""kit-oneonone: a one-page prep for the owner's 1:1 with their manager.
+
+  kit-oneonone            write briefs/oneonone-<date>.md and print its path
+  kit-oneonone --print    print it instead of writing it
+  kit-oneonone --done     record today as the last 1:1 (memory/context/oneonone.md)
+
+It draws on the accomplishments log since the last 1:1 (kit-wins), STATUS.md's blockers, queue items
+waiting on a decision or on someone else, deadlines in the next 14 days, and the owner's own items
+that ask for something. The manager appears by role only. It never sends anything.
+"""
+import argparse
+import datetime as dt
+import pathlib
+import re
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import kit_daily as kd  # noqa: E402
+
+SETUP = kd.CONTEXT / "oneonone.md"
+DECIDE = re.compile(r"\b(decide|decision|approve|approval|sign[- ]?off|choose|pick|confirm)\b", re.I)
+ASK = re.compile(r"\b(need|ask|request|budget|headcount|access|help|unblock|escalat)\w*", re.I)
+WIN = re.compile(r"^- (\d{2}-[A-Z][a-z]{2}-\d{4}) \[([^\]]+)\] (.*?)(?: \([^()]*\))?$")
+
+
+def since_date(text):
+    last = kd.parse_date(kd.setting(text, "Last 1:1"))
+    if last:
+        return last
+    m = re.search(r"(\d+)", kd.setting(text, "Look back") or "14")
+    return kd.today() - dt.timedelta(days=int(m.group(1)) if m else 14)
+
+
+def wins(since):
+    out = []
+    for ln in kd.read(kd.KIT / "memory/accomplishments.md").splitlines():
+        m = WIN.match(ln)
+        if m and (kd.parse_date(m.group(1)) or dt.date.min) >= since:
+            out.append(f"{m.group(3)} ({m.group(2)})")
+    return out
+
+
+def blockers():
+    lines = kd.read(kd.KIT / "STATUS.md").splitlines()
+    out, on = [], False
+    for ln in lines:
+        if ln.startswith("## "):
+            on = bool(re.match(r"## Blocked", ln, re.I))
+            continue
+        if on and ln.startswith("- "):
+            out.append(ln[2:].strip())
+    return out
+
+
+def build():
+    setup = kd.read(SETUP)
+    role = kd.setting(setup, "Manager role")
+    role = role if role and not role.lower().startswith("not set") else "manager"
+    since = since_date(setup)
+    lines = kd.queue_lines()
+    me = kd.owner_section(lines)
+    mine = [i for i in kd.items(lines, me) if not i["done"]] if me else []
+    kit = [i for i in kd.items(lines, "Kit") if not i["done"]]
+    waiting = [i for i in kd.items(lines, "Waiting on others") if not i["done"] and not i["sub"]]
+    horizon = kd.today() + dt.timedelta(days=14)
+    deadlines = sorted(((kd.due_of(i["rest"] or i["title"]), i["title"]) for i in mine + kit
+                        if kd.due_of(i["rest"] or i["title"]) and kd.due_of(i["rest"] or i["title"]) <= horizon))
+    decisions = [i["title"] for i in mine + kit if DECIDE.search(i["title"]) and not i["sub"]]
+    asks = [i["title"] for i in mine if ASK.search(i["title"]) and not i["sub"] and i["title"] not in decisions]
+    w = wins(since)
+    out = [f"# 1:1 prep with the {role}, {kd.fmt(kd.today())}", "",
+           f"Covers {kd.fmt(since)} to {kd.fmt(kd.today())}. A draft for {kd.owner()}; nothing is sent.", ""]
+
+    def block(title, rows, empty):
+        out.extend([f"## {title}", ""] + ([f"- {kd.clip(r, 160)}" for r in rows] if rows else [f"- {empty}"]) + [""])
+
+    block("Wins since the last 1:1", w[:12], "none logged (run: kit-wins collect)")
+    block("Blockers", blockers()[:8], "none in STATUS.md")
+    block("Waiting on others", [f"{i['title']}{(' ' + kd.clip(i['rest'], 60)) if i['rest'] else ''}" for i in waiting][:8], "nothing waiting")
+    block("Deadlines in the next 14 days", [f"{kd.fmt(d)}: {t}" for d, t in deadlines][:8], "none with a due date")
+    block("Decisions I need", decisions[:8], "none flagged in the queue; add the decision you want before the meeting")
+    block("Asks", asks[:8], "none flagged")
+    out += ["## Notes", "", "- ", ""]
+    return "\n".join(out)
+
+
+def mark_done():
+    text = kd.read(SETUP)
+    if not text:
+        sys.exit(f"kit-oneonone: {SETUP} not found")
+    new, n = re.subn(r"^(- \*\*Last 1:1:\*\*)\s*.*?(?=\n- \*\*|\n*\Z)", rf"\g<1> {kd.fmt(kd.today())}.", text, count=1, flags=re.M | re.S)
+    if not n:
+        new = text.rstrip("\n") + f"\n- **Last 1:1:** {kd.fmt(kd.today())}.\n"
+    kd.write(SETUP, new)
+    print(f"kit-oneonone: last 1:1 recorded as {kd.fmt(kd.today())}")
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-oneonone", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--print", action="store_true", help="print instead of writing the file")
+    ap.add_argument("--done", action="store_true", help="record today as the last 1:1")
+    args = ap.parse_args(argv)
+    if args.done:
+        mark_done()
+        return 0
+    text = build()
+    if args.print:
+        print(text)
+        return 0
+    path = kd.write(kd.BRIEFS / f"oneonone-{kd.today().isoformat()}.md", text + "\n")
+    print(f"kit-oneonone: wrote {path}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -12,6 +12,8 @@ Support levels used below:
 - **Same code**: pure Python or a Claude Code feature with no platform-specific part; expected
   to work, but only exercised on macOS so far.
 
+For installing and configuring, see INSTALL.md; for how the pieces fit, see DESIGN.md.
+
 ## 1. Platform requirements
 
 ### Both platforms
@@ -31,7 +33,7 @@ Support levels used below:
 | `kit-backup` | Python 3.8, git | Same code; permissions set on macOS only | No backups; BACKUP_DIR unset means a folder next to Kit, which doesn't survive a lost computer |
 | `kit-retention` | Python 3.8 | Same code | Everything is kept (the default anyway) |
 | `kit-outlook` | `osascript`, `pgrep`, classic Outlook | macOS; reports "skipped" elsewhere | run.sh skips the check; calendar and mail fail the old way |
-| `kit-team` | Python 3.8 (sqlite3 is in the standard library) | Same code; owner-only permissions on macOS only | No team view; kit-publish still writes records |
+| `kit-team` | Python 3.8 (sqlite3 is in the standard library); for Transport sql (MySQL with PyMySQL tested; others UNTESTED), the dialect's driver: psycopg 3, pyodbc (with ODBC Driver 18) or pymssql, PyMySQL or mysql-connector-python | Same code; owner-only permissions on macOS only | No team view; kit-publish still writes records |
 | `kit-precedent` | Python 3.8 | Same code | The precedent finder searches the indexes by hand |
 | `kit-cost` | Python 3.8; Claude Code with `--output-format json` (uses its `modelUsage` for cost by model) | Same code; run.sh guard is macOS (the Windows runner doesn't record cost yet) | No ledger or budget guard; runs go ahead as before |
 | `kit-queue` | Python 3.8 | Same code | No hygiene report; the brief falls back to listing items untouched for seven days |
@@ -41,7 +43,28 @@ Support levels used below:
 | `kit-metrics` | Python 3.8 | Same code (opens the page with the platform's opener) | No metrics page; the data files are still kept |
 | `kit-project` | Python 3.8 | Same code | Create project folders by hand from `memory/context/project-types.md` |
 | `kit-delegate` | Python 3.8; a provider's API reachable, and its credential by env-var or Keychain name | Same code; Keychain on macOS only (Windows: env var) | No delegate tool; Claude Code agents keep their own model |
-| `kit-run` | Python 3.8; as kit-delegate | Same code; experimental | Agents run only inside Claude Code |
+| `kit-run` | Python 3.8; as kit-delegate; for connectors, each MCP server's own runtime (for example node), named in kit-run.json | Same code; experimental; hooks run through the platform shell | Agents run only inside Claude Code |
+| `kit-lifecycle` | Python 3.8; an inventory export and eol.json in the radar folder | Same code | The planner joins inventory and dates by hand |
+| `kit-roadmap` | Python 3.8 | Same code | The planner drafts the roadmap by hand from the template |
+| `kit-connect` | Python 3.8; Claude Code (`claude mcp list`; `claude -p --agent gateway` for --read) | Same code; Keychain name check on macOS only | No connector report; check with `claude mcp list` by hand |
+| `kit-evals` | Python 3.8; Claude Code for --live | Same code | Agent changes and model moves go unchecked |
+| `kit-commitments` | Python 3.8 | Same code | Commitments aren't proposed; add them with `todo` yourself |
+| `kit-quality` | Python 3.8 | Same code | Recurring findings are spotted by hand |
+| `kit-refarch` | Python 3.8; a reference-architecture index in the library | Same code | Match by hand with kit-precedent |
+| `kit-sysprofile` | Python 3.8; the library root | Same code | Assemble profiles by hand |
+| `kit-sizing` | Python 3.8 | Same code | Size by hand from the template |
+| `kit-diagram-diff` | Python 3.8 | Same code | Compare diagrams by eye |
+| `kit-wins` | Python 3.8 | Same code | Wins collected by hand |
+| `kit-oneonone` | Python 3.8 | Same code | Prep by hand |
+| `kit-meetprep` | Python 3.8; a calendar JSON command (kitmail calendar --json) | Same code; launchd template macOS only | No prep packs |
+| `kit-triage` | Python 3.8; kitmail inbox output | Same code | No triage suggestions |
+| `kit-awaiting` | Python 3.8; kitmail sent-items commands (not yet in kitmail) | Same code | No awaiting-reply list |
+| `kit-plugin` | Python 3.8; optional `claude` for `check --claude` (claude plugin validate) | Same code | Plugins are assembled and reviewed by hand |
+| `kit-backup` (encrypted) | Python 3.8; `openssl` with `enc -pbkdf2` (macOS ships OpenSSL 3 or LibreSSL); macOS Keychain or an env var for the passphrase | Same code; Keychain on macOS only | Encrypted backups unavailable; plain backups stay inside the home folder |
+| `kit-audit-export` | Python 3.8 | Same code | Gather evidence by hand |
+| `kit-holds` | Python 3.8 (3.9+ for time zones via zoneinfo; older Pythons write floating local times) | Same code; `open` on macOS, the default app on Windows | Holds are created by hand |
+| `kit-degraded` | Python 3.8 | Same code | A failed or budget-stopped morning run sends only a failure notice |
+| `kit-reliability` | Python 3.8 | Same code | No reliability view; read the run logs by hand |
 
 ### macOS
 
@@ -172,6 +195,7 @@ session, including MCP connectors, minus the ones listed.
 | Other agents | Librarian, curator, and the writers through Kit |
 | Optional | LanguageTool + Java (grammar pass); Poppler (`pdftotext`) for PDFs; a browser for auth-gated links |
 | If missing | QA skill missing: skips the scan and says so; never installs anything. LanguageTool or Java missing: `kit-grammar` prints `skipped:` and the review carries on |
+| Quality loop | Writes review notes with a Findings table that kit-quality reads |
 
 ### diagrammer
 
@@ -388,6 +412,7 @@ session, including MCP connectors, minus the ones listed.
 | | |
 |---|---|
 | Setup | `future-tech.md`, `library.md`; `standards.md` for standards impact |
+| Commands | `python3` with `shared/bin/kit-lifecycle` and `shared/bin/kit-roadmap` |
 | Tools | All except WebSearch, WebFetch, Agent, SendMessage |
 | Skills | docx, pptx, xlsx, pdf (to read sources) |
 | Templates | `templates/radar-ballot-template.md`, `tech-lifecycle-review-template.md`, `strategy-brief-template.md` |
@@ -439,6 +464,18 @@ manager is allowed.
 | `pywin32` | Windows mail, calendar, reminders adapters | n/a | `py -3 -m pip install pywin32==<pinned>` |
 | BurntToast | Windows toast delivery | n/a | `Install-Module BurntToast -Scope CurrentUser -RequiredVersion <pinned>` |
 
+### SQL server and driver (optional; MySQL tested, others UNTESTED)
+
+Transport sql for sharing between Kits: DDL and grants in shared/sql/. Never run against a real
+database yet.
+
+### OneDrive sync client (optional)
+
+Publishing briefs for the phone (ONEDRIVE_PUBLISH_DIR): the folder must be inside the synced
+OneDrive (or ONEDRIVE_ALLOWED_PREFIX). The Mac and Windows to-do syncs share one implementation
+(shared/kit_sync_core.py), so Windows routes "kit:", "ask:", and "approve <code>" too (tested over a
+fake COM layer; untested on real Windows).
+
 ### Shared folder for team sharing (optional)
 
 | Requirement | Used by | Notes |
@@ -465,6 +502,10 @@ A failed sign-in can count against a shared account: the gateway stops after one
 - `ANTHROPIC_API_KEY` (environment variable name), only for direct calls by kit-delegate and
   kit-run on the Anthropic provider; Claude Code's own sign-in is separate.
 - A provider's `credential_env` or `keychain_entry`, as named in models.json.
+- The sharing database's `credential_env` or `keychain_entry`, as named in
+  memory/context/sharing-db.json (Transport sql).
+- The backup passphrase's Keychain entry name (BACKUP_KEY_KEYCHAIN) or environment variable name
+  (BACKUP_KEY_ENV).
 
 ## 6. Check it
 
@@ -496,6 +537,10 @@ server, `--brief` for problems only).
 - Models: models.json is valid and the agents' `model:` lines match it (warn on drift).
 - Direct model calls: enabled_phase, which providers kit-delegate and kit-run may reach, and
   whether each one's credential is named (never reads a Keychain value).
+- Sharing policy: the organization profile (warn if it can't be read).
+- Connector credentials: named credential variables that aren't set.
+- Phone publishing: the OneDrive publishing folder, or why it's refused.
+- Run reliability: warn on any kit-reliability alert.
 
 ### Gaps it doesn't check
 
@@ -542,7 +587,49 @@ Claude Code uses for hooks, on every machine.
 - kit-delegate and kit-run policy: closed (a provider above enabled_phase, outside
   allowed_providers, or below the request's data class is refused; the fallback chain ends in
   Claude, or the request is refused).
-- kit-run tools: closed (no send, delete, install, or connector tools; writes only to the agent's
-  write paths with the owner's yes; with no one at the keyboard, writes are refused).
+- kit-run tools: closed (no send, delete, or install tools; writes and skill scripts only with the
+  owner's yes; with no one at the keyboard they're refused; connector tools only from kit-run.json's
+  allow_tools, and by default only for agents guarded by a PreToolUse hook; a tool the agent wasn't
+  offered is refused before any hook runs; a hook can block a call but never loosen kit-run's rules).
+- kit-run hooks: as Claude Code: exit 2 or a deny decision blocks; any other non-zero exit is a
+  non-blocking error and the call goes ahead (so a hook that crashes fails open, except the
+  connector guard, which denies on its own errors).
 - run.ps1 time limit: closed for delivery (a stopped run's text is never delivered; a failure
   notice goes out instead); the claude process is ended by its run id.
+- kit-lifecycle: closed for unsourced dates (an EOL entry with no source counts as unknown) and never
+  reaches outside the computer; the inventory never leaves.
+- Sharing policy: closed (a policy file that can't be read refuses all sharing).
+- kit-connect --read: off by default; one read-only tool per server, run as the gateway under the guard.
+- Phone approvals: closed (unknown, expired, used, or wrong-scope codes and any payload naming a
+  medium- or high-tier action are refused and recorded; a code is single-use and works only on the
+  day it's issued).
+- OneDrive publishing: closed on the path (a folder outside OneDrive or inside Kit is refused;
+  nothing from memory/personal is published) and open on delivery (a publishing failure never
+  fails the delivery).
+- Messages: closed (sending needs the owner's yes at the keyboard; a message that fails its schema,
+  names the wrong sender, isn't addressed to this Kit, or doesn't match the sender's manifest and
+  intact hash chain is rejected and listed).
+- Hash chain: closed per Kit (a broken chain skips that Kit's records and messages); a manifest
+  without a chain (older Kit) is read with a warning.
+- kit-team purge: closed (no team_cache rule means keep everything; held projects never purged;
+  nothing deleted).
+- SQL transport: MySQL tested, PostgreSQL and SQL Server UNTESTED; TLS required unless the database is on this computer; credentials named,
+  never stored.
+- kit-quality: proposals only (never writes lessons/ or templates); notes without a Findings table
+  are skipped and counted.
+- kit-triage and kit-awaiting: suggestions only (never move, flag, answer, or send); addresses masked;
+  at most 80 characters quoted.
+- kit-plugin check: closed (any manifest problem, denylist or credential hit, unmarked lesson, or
+  hook, script, or server without a recorded review fails the check); it never publishes or pushes.
+- Expertise finder: evidence only from what Kits chose to share; self-declared levels never count as
+  evidence; "no evidence" is said plainly.
+- Encrypted backups: closed (no passphrase source, an empty variable, a wrong passphrase, or a changed
+  file means nothing is written or restored; the HMAC is checked before decrypting).
+- Plain backups: closed outside the home folder and in synced or shared folders unless --allow-plain.
+- kit-audit-export: closed (credential-like text anywhere in the pack removes the pack).
+- kit-holds: never writes to the calendar or adds attendees; a requested block that clashes or falls
+  outside working hours is skipped, never moved.
+- Degraded mode: open for delivery (a brief still arrives without a model); never overwrites a brief
+  or short text the model run wrote; personal to-dos counted, never named.
+- Auto-retry: at most one retry, only for transient-looking failures, never after a timeout or
+  refusal; kit-reliability is read-only.

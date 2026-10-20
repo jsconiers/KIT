@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """kit-backup: back up Kit's folder to one archive, check it, and restore it on this or a new computer.
 
-  kit-backup                         make a backup now, check it, and keep the newest BACKUP_KEEP
+  kit-backup [--dir DIR] [--encrypt | --no-encrypt] [--allow-plain]
+                                     make a backup now, check it, and keep the newest BACKUP_KEEP
   kit-backup list                    the backups in the backup folder, newest first
   kit-backup verify [ARCHIVE]        check an archive (default: the newest): every file's checksum,
                                      and that Kit's history restores
@@ -20,12 +21,28 @@ notes, briefs, and queue); a folder on the same disk only protects against mista
 broken computer. BACKUP_KEEP (default 14) sets how many backups to keep; older ones are deleted
 after a new backup checks out.
 
+Where to keep them: any folder you choose, on this computer or a shared or synced one (a network
+share, a OneDrive folder). Set BACKUP_DIR, or pass --dir for one run.
+
+Encryption: BACKUP_ENCRYPT="on" (or --encrypt) writes kit-backup-YYYYMMDD-HHMMSS.tar.gz.enc instead.
+The passphrase comes from a macOS Keychain entry named in BACKUP_KEY_KEYCHAIN, or an environment
+variable named in BACKUP_KEY_ENV (Windows: the variable only). It is read when the backup runs and
+never stored, logged, or passed on a command line. Create the Keychain entry yourself; the command
+asks for the passphrase:
+    security add-generic-password -s kit-backup -a "$USER" -w
+Keep the passphrase somewhere else too: without it, an encrypted backup can't be restored.
+The archive is encrypted with AES-256 (openssl, key from PBKDF2-SHA256), and an HMAC-SHA256 over the
+whole file is checked before anything is decrypted, so a wrong passphrase or a changed file is caught
+and nothing is written. Because backups hold your notes, an unencrypted backup is refused outside your
+home folder or in a synced or cloud folder unless you pass --allow-plain.
+
 To restore on a new computer: install Kit's tools, run kit-backup restore ARCHIVE --to an empty
 folder (or move the old one aside first), then rerun the installer so Claude Code finds Kit again.
 The restored history has no remote, like the original.
 """
 import datetime
 import hashlib
+import hmac
 import io
 import json
 import os
@@ -42,7 +59,133 @@ CONFIG = KIT / ".install/shared/morning/config"
 SKIP_DIRS = {".git", "__pycache__", ".install/logs"}
 SKIP_NAMES = {".DS_Store"}
 SKIP_SUFFIXES = (".pyc",)
-PATTERN = re.compile(r"^kit-backup-\d{8}-\d{6}\.tar\.gz$")
+PATTERN = re.compile(r"^kit-backup-\d{8}-\d{6}\.tar\.gz(\.enc)?$")
+MAGIC = b"KITBAK1\n"
+CIPHER = "aes-256-ctr"
+ITERATIONS = 600_000
+CLOUD_PATTERNS = ("CloudStorage", "OneDrive", "Dropbox", "Google Drive", "GoogleDrive", "iCloud",
+                  "Mobile Documents", "Box Sync", "/Volumes/")
+
+
+class CryptoError(Exception):
+    pass
+
+
+def passphrase():
+    """The backup passphrase, from the Keychain entry or environment variable the config names."""
+    env = setting("BACKUP_KEY_ENV", "")
+    if env:
+        value = os.environ.get(env, "")
+        if not value:
+            raise CryptoError(f"the environment variable {env} (BACKUP_KEY_ENV) isn't set")
+        return value.encode()
+    entry = setting("BACKUP_KEY_KEYCHAIN", "")
+    if entry:
+        if sys.platform != "darwin":
+            raise CryptoError("BACKUP_KEY_KEYCHAIN works on macOS only; use BACKUP_KEY_ENV")
+        r = subprocess.run(["security", "find-generic-password", "-s", entry, "-w"],
+                           capture_output=True, text=True)
+        value = r.stdout.rstrip("\n")
+        if r.returncode != 0 or not value:
+            raise CryptoError(f"no Keychain entry named {entry} (create it: security add-generic-password "
+                              f"-s {entry} -a \"$USER\" -w)")
+        return value.encode()
+    raise CryptoError("encryption is on but no passphrase source is set (BACKUP_KEY_KEYCHAIN or BACKUP_KEY_ENV)")
+
+
+def _openssl(args, src, dst, secret, iterations=ITERATIONS):
+    """Run openssl enc with the passphrase on a pipe (fd), never on the command line."""
+    if not shutil.which("openssl"):
+        raise CryptoError("openssl isn't on the PATH")
+    r_fd, w_fd = os.pipe()
+    try:
+        os.write(w_fd, secret + b"\n")
+    finally:
+        os.close(w_fd)
+    try:
+        cmd = ["openssl", "enc", *args, "-" + CIPHER, "-pbkdf2", "-iter", str(iterations), "-md", "sha256",
+               "-pass", f"fd:{r_fd}", "-in", str(src), "-out", str(dst)]
+        r = subprocess.run(cmd, pass_fds=(r_fd,), capture_output=True, text=True)
+    finally:
+        os.close(r_fd)
+    if r.returncode != 0:
+        raise CryptoError("openssl failed: " + (r.stderr.strip().splitlines() or ["no detail"])[-1])
+
+
+def _mac_key(secret, salt, iterations=ITERATIONS):
+    return hashlib.pbkdf2_hmac("sha256", secret, salt + b"kit-backup-mac", iterations, 32)
+
+
+def _header_bytes(header):
+    return json.dumps({k: header[k] for k in sorted(header) if k != "mac"}, sort_keys=True).encode()
+
+
+def encrypt_file(plain, out, secret):
+    """plain .tar.gz -> out .enc: MAGIC, 4-byte header length, JSON header, openssl ciphertext."""
+    mac_salt = os.urandom(16)
+    with tempfile.TemporaryDirectory() as tmp:
+        ct = pathlib.Path(tmp, "ct")
+        _openssl([], plain, ct, secret)
+        header = {"version": 1, "cipher": CIPHER, "kdf": "pbkdf2-sha256", "iterations": ITERATIONS,
+                  "mac": "", "mac_alg": "hmac-sha256", "mac_salt": mac_salt.hex()}
+        body = ct.read_bytes()
+        hb = _header_bytes(header)
+        header["mac"] = hmac.new(_mac_key(secret, mac_salt), hb + body, hashlib.sha256).hexdigest()
+        full = json.dumps(header, sort_keys=True).encode()
+        old = os.umask(0o077)
+        try:
+            with open(out, "wb") as f:
+                f.write(MAGIC + len(full).to_bytes(4, "big") + full + body)
+        finally:
+            os.umask(old)
+
+
+def decrypt_file(enc, out, secret):
+    """Check the HMAC first; only then decrypt enc into out."""
+    data = pathlib.Path(enc).read_bytes()
+    if not data.startswith(MAGIC) or len(data) < len(MAGIC) + 4:
+        raise CryptoError("not a Kit encrypted backup (bad header)")
+    n = int.from_bytes(data[len(MAGIC):len(MAGIC) + 4], "big")
+    try:
+        header = json.loads(data[len(MAGIC) + 4:len(MAGIC) + 4 + n])
+        body = data[len(MAGIC) + 4 + n:]
+        if header.get("version") != 1 or header.get("cipher") != CIPHER:
+            raise CryptoError(f"unsupported encrypted backup (version {header.get('version')})")
+        iters = int(header["iterations"])
+        if iters < 100_000:
+            raise CryptoError(f"refusing a weak key setting ({iters} iterations)")
+        want = hmac.new(_mac_key(secret, bytes.fromhex(header["mac_salt"]), iters), _header_bytes(header) + body,
+                        hashlib.sha256).hexdigest()
+    except (ValueError, KeyError, TypeError) as e:
+        raise CryptoError(f"the header is damaged ({e.__class__.__name__})")
+    if not hmac.compare_digest(want, header.get("mac", "")):
+        raise CryptoError("wrong passphrase, or the file was changed; nothing was decrypted")
+    with tempfile.TemporaryDirectory() as tmp:
+        ct = pathlib.Path(tmp, "ct")
+        ct.write_bytes(body)
+        _openssl(["-d"], ct, out, secret, iters)
+
+
+def plain_refusal(dest):
+    """Why an unencrypted backup may not go to dest, or None."""
+    full = str(dest.expanduser().resolve())
+    home = str(pathlib.Path.home().resolve())
+    if not (full == home or full.startswith(home + os.sep)):
+        return f"{dest} is outside your home folder"
+    hit = next((p for p in CLOUD_PATTERNS if p in full), None)
+    if hit:
+        return f"{dest} looks like a synced or shared folder ({hit.strip('/')})"
+    return None
+
+
+def opened(archive, tmp):
+    """A plain .tar.gz path for archive, decrypting into tmp when it's encrypted."""
+    archive = pathlib.Path(archive)
+    if archive.name.endswith(".enc"):
+        plain = pathlib.Path(tmp, archive.name[:-4])
+        decrypt_file(archive, plain, passphrase())
+        return plain
+    return archive
 
 
 def setting(key, default):
@@ -55,7 +198,12 @@ def setting(key, default):
     return default
 
 
+DIR_OVERRIDE = None
+
+
 def backup_dir():
+    if DIR_OVERRIDE:
+        return pathlib.Path(os.path.expanduser(DIR_OVERRIDE))
     return pathlib.Path(os.path.expanduser(setting("BACKUP_DIR", "~/Claude/Agents/kit-backups")))
 
 
@@ -99,7 +247,8 @@ def walk(root, skip_under=None):
 
 def archives():
     d = backup_dir()
-    return sorted((p for p in d.glob("kit-backup-*.tar.gz") if PATTERN.match(p.name)), reverse=True) if d.is_dir() else []
+    return sorted((p for p in d.glob("kit-backup-*") if PATTERN.match(p.name)),
+                  key=lambda p: p.name.replace(".enc", ""), reverse=True) if d.is_dir() else []
 
 
 def safe_members(tar):
@@ -119,10 +268,23 @@ def extract(archive, dest):
             tar.extractall(dest, members=members)
 
 
-def make():
+def make(encrypt=None, allow_plain=False):
     if not KIT.is_dir():
         sys.exit(f"kit-backup: {KIT} doesn't exist")
+    if encrypt is None:
+        encrypt = setting("BACKUP_ENCRYPT", "off").lower() in ("on", "yes", "true", "1")
     dest = backup_dir()
+    if not encrypt and not allow_plain:
+        why = plain_refusal(dest)
+        if why:
+            sys.exit(f"kit-backup: {why}, and this backup isn't encrypted, so nothing was written. "
+                     "Turn encryption on (BACKUP_ENCRYPT=\"on\" or --encrypt), or pass --allow-plain.")
+    secret = None
+    if encrypt:
+        try:
+            secret = passphrase()
+        except CryptoError as e:
+            sys.exit(f"kit-backup: {e}; nothing was written")
     dest.mkdir(parents=True, exist_ok=True)
     if os.name != "nt":
         os.chmod(dest, 0o700)
@@ -153,7 +315,19 @@ def make():
         finally:
             os.umask(old)
         archive = dest / name
-        part.rename(archive)
+        if encrypt:
+            enc_part = dest / (name + ".enc.part")
+            try:
+                encrypt_file(part, enc_part, secret)
+            except CryptoError as e:
+                part.unlink(missing_ok=True)
+                enc_part.unlink(missing_ok=True)
+                sys.exit(f"kit-backup: {e}; nothing was written")
+            part.unlink()
+            archive = dest / (name + ".enc")
+            enc_part.rename(archive)
+        else:
+            part.rename(archive)
     if os.name != "nt":
         os.chmod(archive, 0o600)
     problems = check(archive)
@@ -164,7 +338,8 @@ def make():
         print("Older backups were kept.")
         return 1
     size = archive.stat().st_size
-    print(f"kit-backup: {archive} ({len(files)} files, {size / 1e6:.1f} MB), checked")
+    print(f"kit-backup: {archive} ({len(files)} files, {size / 1e6:.1f} MB"
+          + (", encrypted" if encrypt else "") + "), checked")
     keep = int(setting("BACKUP_KEEP", "14") or 14)
     for old_archive in archives()[max(keep, 1):]:
         old_archive.unlink()
@@ -176,6 +351,10 @@ def check(archive):
     """Problems found in an archive; empty means it checks out."""
     problems = []
     with tempfile.TemporaryDirectory() as tmp:
+        try:
+            archive = opened(archive, tmp)
+        except CryptoError as e:
+            return [str(e)]
         try:
             extract(archive, tmp)
         except (tarfile.TarError, OSError, RuntimeError) as e:
@@ -233,7 +412,11 @@ def restore(arg, to):
     if problems:
         sys.exit("kit-backup: the archive didn't check out, so nothing was restored:\n  " + "\n  ".join(problems))
     with tempfile.TemporaryDirectory() as tmp:
-        extract(archive, tmp)
+        try:
+            plain = opened(archive, tmp)
+        except CryptoError as e:
+            sys.exit(f"kit-backup: {e}")
+        extract(plain, tmp)
         manifest = json.loads(pathlib.Path(tmp, "MANIFEST.json").read_text())
         dest.mkdir(parents=True, exist_ok=True)
         if os.name != "nt":
@@ -262,8 +445,19 @@ def restore(arg, to):
 
 
 def main(argv):
+    global DIR_OVERRIDE
+    argv = list(argv)
+    if "--dir" in argv:
+        i = argv.index("--dir")
+        if i + 1 >= len(argv):
+            sys.exit("Usage: kit-backup --dir DIR")
+        DIR_OVERRIDE = argv[i + 1]
+        del argv[i:i + 2]
+    encrypt = True if "--encrypt" in argv else (False if "--no-encrypt" in argv else None)
+    allow_plain = "--allow-plain" in argv
+    argv = [a for a in argv if a not in ("--encrypt", "--no-encrypt", "--allow-plain")]
     if not argv:
-        return make()
+        return make(encrypt, allow_plain)
     cmd, rest = argv[0], argv[1:]
     if cmd in ("-h", "--help", "help"):
         print(__doc__)

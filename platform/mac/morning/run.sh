@@ -19,6 +19,10 @@
 # delivery keys DELIVERY (local | outlook-drafts | outlook-review | imessage), or DELIVERY_PERSONAL
 # and DELIVERY_WORK to split them, DELIVERY_EMAIL_TO, IMESSAGE_TO, IMESSAGE_TO_ALT. Change them
 # with kit-settings. Delivery itself is shared/deliver.py; it never sends mail.
+# Auto-retry (RETRY_ON, default on; RETRY_DELAY seconds, default 120): one retry after a failure that
+# looks transient (overload, rate limit, network, an API 5xx or 529); never after a timeout or refusal.
+# Degraded mode (DEGRADED_MODE, default on): at the budget's stop level, and whenever the morning
+# model run fails or times out, kit-degraded writes the brief from Kit's files with no model call.
 MODE="${1:-morning}"
 KIT="$HOME/Claude/Agents/kit"
 MACDIR="$KIT/.install/platform/mac/morning"   # mac runner assets (test-run marker)
@@ -105,6 +109,12 @@ if [ -f "$KIT/.install/shared/bin/kit-cost" ]; then
     exit 0
   fi
 fi
+# Degraded mode: at the stop level the morning brief is written from Kit's files, with no model call.
+DEGRADED_REASON=""
+if [ "$MODE" = "morning" ] && [ "$COST_LEVEL" = "stop" ] && [ "${DEGRADED_MODE:-on}" != "off" ] \
+   && [ -f "$KIT/.install/shared/bin/kit-degraded" ]; then
+  DEGRADED_REASON="$COST_PCT of this month's budget is used (stop at ${COST_STOP_PCT:-95}%)"
+fi
 if [ "$MODE" = "morning" ] || [ "$MODE" = "weekly" ]; then
   # Outlook self-recovery: check Outlook answers, retrying if it's slow (never starts or quits it).
   # If it still doesn't answer, the brief marks calendar and mail stale instead of skipping them.
@@ -147,6 +157,11 @@ for r in "${(@s:;:)ALLOW_TOOLS:-}"; do r="${r## }"; r="${r%% }"; [ -n "$r" ] && 
 if [ "$MODE" = "weekly" ]; then
   for r in "${(@s:;:)ALLOW_TOOLS_WEEKLY:-}"; do r="${r## }"; r="${r%% }"; [ -n "$r" ] && ALLOWED+=("$r"); done
 fi
+# A rule written with ~/ doesn't match a command the run spells with the full home path, so each
+# Bash rule with ~/ also gets a twin with $HOME spelled out.
+for r in "${ALLOWED[@]}"; do
+  if [[ "$r" == Bash\(*"~/"* ]]; then t="${r//\~\//$HOME/}"; (( ${ALLOWED[(Ie)$t]} )) || ALLOWED+=("$t"); fi
+done
 args=(-p "$PROMPT_TEXT" --output-format json --allowedTools "${ALLOWED[@]}")
 [ -n "${BLOCK_TOOLS:-}" ] && args+=(--disallowedTools ${=BLOCK_TOOLS})
 # Model for this run: kit-models apply writes MODEL_<MODE> lines to models.env (for example
@@ -191,18 +206,71 @@ echo "== $(date) start $MODE ${TEST}" >> "$LOG"
 # JSON output carries the text result plus the run's estimated cost and token counts. kit-cost
 # writes the text to the log and the cost to the ledger; if the output isn't JSON it logs it as is.
 RUNOUT="$LOGDIR/.run-$MODE-$$.json"
-perl -e 'alarm shift; exec @ARGV' "$TIMEOUT" claude "${args[@]}" > "$RUNOUT" 2>> "$LOG"
-rc=$?
-TIMED_OUT=""
-[ "$rc" -eq 142 ] && TIMED_OUT=1 && echo "== $(date) $MODE run hit its time limit ($((TIMEOUT / 60)) min) and was stopped" >> "$LOG"
-if [ -f "$KIT/.install/shared/bin/kit-cost" ]; then
-  python3 "$KIT/.install/shared/bin/kit-cost" record --mode "$MODE" --rc "$rc" --json-file "$RUNOUT" --log "$LOG" 2>> "$LOG" \
-    || cat "$RUNOUT" >> "$LOG"
+RUNERR="$LOGDIR/.run-$MODE-$$.err"
+rc=0; TIMED_OUT=""
+# One claude attempt: output to RUNOUT, stderr to RUNERR (and the log); then record its cost.
+run_claude() {
+  : > "$RUNERR"
+  perl -e 'alarm shift; exec @ARGV' "$TIMEOUT" claude "${args[@]}" > "$RUNOUT" 2> "$RUNERR"
+  rc=$?
+  cat "$RUNERR" >> "$LOG"
+  [ "$rc" -eq 142 ] && TIMED_OUT=1 && echo "== $(date) $MODE run hit its time limit ($((TIMEOUT / 60)) min) and was stopped" >> "$LOG"
+  if [ -f "$KIT/.install/shared/bin/kit-cost" ]; then
+    python3 "$KIT/.install/shared/bin/kit-cost" record --mode "$MODE" --rc "$rc" --json-file "$RUNOUT" --log "$LOG" 2>> "$LOG" \
+      || cat "$RUNOUT" >> "$LOG"
+  else
+    cat "$RUNOUT" >> "$LOG"
+  fi
+}
+# Auto-retry (RETRY_ON, default on): retry once, after RETRY_DELAY seconds (default 120), when the
+# run failed in a way that looks transient (overload, rate limit, network, a 5xx or 529 from the
+# API) and wrote no text. Never after a timeout, or a refusal over permissions or policy.
+transient_reason() {
+  local blob p hit; blob="$(cat "$RUNERR" "$RUNOUT" 2>/dev/null)"
+  print -r -- "$blob" | grep -qiE 'permission|not allowed|denied|refus|policy' && return 1
+  # Most specific first, so the log names the actual cause.
+  for p in 'overload(ed)?' 'rate.?limit(ed)?' 'too many requests' '(^|[^0-9])(429|500|502|503|504|529)([^0-9]|$)' \
+           'service unavailable' 'temporarily unavailable' 'ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND' \
+           'network (error|is unreachable)' 'connection (reset|refused|error)' 'api error'; do
+    hit=$(print -r -- "$blob" | grep -oiE "$p" | head -1 | sed -E 's/^[^A-Za-z0-9]+//; s/[^A-Za-z0-9]+$//')
+    [ -n "$hit" ] && { print -r -- "$hit"; return 0; }
+  done
+  return 1
+}
+if [ -n "$DEGRADED_REASON" ]; then
+  echo "== $(date) $MODE: no model run ($DEGRADED_REASON); writing a degraded brief" >> "$LOG"
+  : > "$RUNOUT"
 else
-  cat "$RUNOUT" >> "$LOG"
+  run_claude
+  if [ "$rc" -ne 0 ] && [ -z "$TIMED_OUT" ] && [ ! -s "$TEXT" ] && [ "${RETRY_ON:-on}" != "off" ]; then
+    WHY=$(transient_reason)
+    if [ -n "$WHY" ]; then
+      echo "== $(date) retrying $MODE after transient failure ($WHY)" >> "$LOG"
+      sleep "${RETRY_DELAY:-120}"
+      run_claude
+    fi
+  fi
 fi
-rm -f "$RUNOUT"
+rm -f "$RUNOUT" "$RUNERR"
 echo "== $(date) end $MODE rc=$rc" >> "$LOG"
+
+# Degraded fallback: if the morning run wrote no short text (it failed, timed out, or the budget
+# stopped it), kit-degraded writes the brief and texts from Kit's files so a brief still arrives.
+if [ "$MODE" = "morning" ] && [ "${DEGRADED_MODE:-on}" != "off" ] && [ -f "$KIT/.install/shared/bin/kit-degraded" ]; then
+  DR="$DEGRADED_REASON"
+  if [ -z "$DR" ] && { [ -n "$TIMED_OUT" ] || [ ! -s "$TEXT" ]; }; then
+    if [ -n "$TIMED_OUT" ]; then DR="the model run hit its $((TIMEOUT / 60))-minute limit"
+    elif [ "$rc" -ne 0 ]; then DR="the model run failed (exit $rc)"
+    else DR="the model run finished without writing the brief"; fi
+    rm -f "$TEXT" "${TEXT%.txt}-work.txt" "${TEXT%.txt}-personal.txt"   # never deliver a stopped run's text
+  fi
+  if [ -n "$DR" ]; then
+    DARGS=(--reason "$DR")
+    case "$OUTLOOK_STATUS" in not-responding|blocked|error) DARGS+=(--no-calendar) ;; esac
+    python3 "$KIT/.install/shared/bin/kit-degraded" "${DARGS[@]}" >> "$LOG" 2>&1 \
+      && echo "== degraded brief written ($DR)" >> "$LOG"
+  fi
+fi
 
 QUIET=$(cat "$TEXT" 2>/dev/null)
 if [ "$QUIET" = "MARKET CLOSED" ] || [ "$QUIET" = "NO TEXT" ]; then

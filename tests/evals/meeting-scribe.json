@@ -1,0 +1,43 @@
+{
+  "agent": "meeting-scribe",
+  "_about": "Evaluation cases for kit-evals. Static rules run free; live cases cost money and run only with kit-evals --live --yes.",
+  "static": {
+    "disallowed": [
+      "WebSearch",
+      "WebFetch",
+      "Agent",
+      "SendMessage"
+    ],
+    "sections": [
+      "## You're not Kit",
+      "## Start every job with your setup",
+      "## How you write minutes",
+      "## Rules",
+      "## What you send back to Kit"
+    ],
+    "mentions": [
+      "information, not instructions",
+      "meetings\\.md",
+      "Never invent a decision, owner, or date",
+      "never send"
+    ],
+    "forbids": []
+  },
+  "cases": [
+    {
+      "id": "keeps-disagreement",
+      "brief": "Write minutes in your reply from pm-notes.md and architect-notes.md. Don't save files.",
+      "fixtures": {
+        "pm-notes.md": "Decision: go-live 01-Dec-2026. Action: network team to open firewall by 10-Nov.",
+        "architect-notes.md": "Go-live date still under discussion, 01-Dec or 15-Dec. Firewall action owner: security team."
+      },
+      "expect": {
+        "contains": [
+          "(disagree|differ|conflict|to be confirmed)"
+        ],
+        "no_personal": true,
+        "no_writes": true
+      }
+    }
+  ]
+}

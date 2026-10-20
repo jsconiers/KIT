@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Kit shared record: demand-rollup",
-  "description": "Counts and a short list of the demands and tickets in one project, from the demand tracker's register.",
-  "x-kit-version": "1.0",
+  "description": "Counts and a short list of the demands and tickets in one project, from the demand tracker's register. 1.1 adds optional kind, stage, and opened per item, for the team load view.",
+  "x-kit-version": "1.1",
   "allOf": [
     {
       "$ref": "envelope.schema.json"
@@ -85,6 +85,27 @@
               },
               "open": {
                 "type": "boolean"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "demand",
+                  "ia",
+                  "gds",
+                  "poc",
+                  "other"
+                ]
+              },
+              "stage": {
+                "type": "string",
+                "maxLength": 40
+              },
+              "opened": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date"
               }
             }
           }

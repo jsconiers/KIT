@@ -1,0 +1,273 @@
+#!/usr/bin/env python3
+"""kit-evals: check Kit's agents against their test cases, so a change to an agent or its model
+doesn't quietly break what it must and mustn't do.
+
+  kit-evals                         static checks for every agent with cases (free; runs in tests)
+  kit-evals <agent>...              static checks for these agents
+  kit-evals --live <agent> [--profile P | --model M] --yes
+                                    run each case for real through Claude Code as that agent and
+                                    check its answer. Costs money: it prints an estimate first and
+                                    does nothing without --yes
+  kit-evals --list                  agents with cases, and how many
+
+Cases live in tests/evals/<agent>.json (the repo) and are installed with Kit. Each file has:
+
+  "static": rules about the agent's definition, checked without running it:
+      "disallowed": tools that must be denied (in disallowedTools, or missing from a tools list)
+      "sections":   headings the definition must have
+      "mentions":   phrases (regular expressions) the instructions must contain
+      "forbids":    phrases they must not contain (conflicting instructions)
+      "hooks":      hook events that must be set, each running the connector guard
+  "cases": live checks, each with a brief (what Kit would ask), optional fixture files, and
+      "expect": "contains" / "not_contains" (regular expressions on the answer), "cites" (true:
+      the answer cites a source), "no_personal" (true: no email addresses or phone numbers),
+      "no_writes" (true: no file in the case folder changed), "refuses" (a phrase the answer must
+      use when it declines)
+
+Live runs use `claude -p --agent <agent>` in a throwaway folder holding the case's fixtures, so the
+agent's own tool limits, model, and hooks apply. Moving an agent to a cheaper model (models.json) is
+gated on `kit-evals --live <agent> --profile <profile> --yes` passing.
+
+Exit codes: 0 all passed, 1 a check failed, 2 setup problem.
+"""
+import argparse
+import json
+import os
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+HERE = pathlib.Path(__file__).resolve().parent
+KIT = pathlib.Path(os.path.expanduser(os.environ.get("KIT_DIR", "~/Claude/Agents/kit")))
+CANDIDATES_CASES = [HERE.parent.parent / "tests/evals", KIT / ".install/tests/evals"]
+CANDIDATES_AGENTS = [KIT / "agents", HERE.parent.parent / "kit/agents"]
+EST_PER_CASE = {"opus": 0.60, "sonnet": 0.20, "haiku": 0.06, "fable": 0.60}
+PERSONAL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+|\+?\d[\d\s().-]{8,}\d")
+CITE = re.compile(r"\[[^\]]*(LIB-\d+|ADR-\d+|POC-\d+|§|\.md|\.pdf|\.docx)[^\]]*\]|\bLIB-\d{3,}\b|\bADR-\d{4}\b|"
+                  r"source[s]?:", re.I)
+
+
+def first(paths):
+    return next((p for p in paths if p.exists()), None)
+
+
+def cases_dir():
+    d = os.environ.get("KIT_EVALS_DIR")
+    return pathlib.Path(d) if d else first(CANDIDATES_CASES)
+
+
+def agents_dir():
+    d = os.environ.get("KIT_AGENTS_DIR")
+    return pathlib.Path(d) if d else first(CANDIDATES_AGENTS)
+
+
+def parse_agent(path):
+    """(frontmatter dict of raw strings, hook events, body text)."""
+    text = path.read_text(encoding="utf-8")
+    m = re.match(r"---\n(.*?)\n---\n(.*)", text, re.S)
+    if not m:
+        return {}, set(), text
+    fm_text, body = m.group(1), m.group(2)
+    fm = {}
+    for line in fm_text.splitlines():
+        mm = re.match(r"^([A-Za-z]+):\s*(.*)$", line)
+        if mm:
+            fm[mm.group(1)] = mm.group(2).strip()
+    hooks = set()
+    in_hooks = False
+    for line in fm_text.splitlines():
+        if re.match(r"^hooks:\s*$", line):
+            in_hooks = True
+            continue
+        if in_hooks:
+            if re.match(r"^\S", line):
+                in_hooks = False
+            else:
+                mm = re.match(r"^  ([A-Za-z]+):\s*$", line)
+                if mm:
+                    hooks.add(mm.group(1))
+    return fm, hooks, fm_text + "\n" + body
+
+
+def tool_list(value):
+    return [t.strip() for t in (value or "").split(",") if t.strip()]
+
+
+def static_check(agent, spec, adir):
+    path = adir / f"{agent}.md"
+    if not path.exists():
+        return [("definition", False, f"no agent file {path}")]
+    fm, hooks, text = parse_agent(path)
+    flat = re.sub(r"\s+", " ", text)
+    res = []
+    rules = spec.get("static", {})
+    denied, allowed = set(tool_list(fm.get("disallowedTools"))), tool_list(fm.get("tools"))
+    for t in rules.get("disallowed", []):
+        ok = t in denied or (allowed and t not in allowed and "*" not in allowed)
+        res.append((f"denies {t}", bool(ok), "" if ok else "not in disallowedTools and not excluded by tools"))
+    for h in rules.get("sections", []):
+        ok = re.search(r"^" + re.escape(h) + r"\s*$", text, re.M) is not None
+        res.append((f"section {h!r}", ok, "" if ok else "missing"))
+    for pat in rules.get("mentions", []):
+        ok = re.search(pat, flat, re.I) is not None
+        res.append((f"says /{pat}/", ok, "" if ok else "not found in the instructions"))
+    for pat in rules.get("forbids", []):
+        hit = re.search(pat, flat, re.I)
+        res.append((f"never says /{pat}/", hit is None, f"found: {hit.group(0)!r}" if hit else ""))
+    for ev in rules.get("hooks", []):
+        ok = ev in hooks and "connector-guard" in text
+        res.append((f"hook {ev}", ok, "" if ok else "hook event missing or not the connector guard"))
+    if fm.get("name") != agent:
+        res.append(("name matches file", False, f"frontmatter name is {fm.get('name')!r}"))
+    return res
+
+
+def load_spec(agent):
+    d = cases_dir()
+    p = d / f"{agent}.json" if d else None
+    if not p or not p.exists():
+        return None
+    return json.loads(p.read_text(encoding="utf-8"))
+
+
+def all_agents():
+    d = cases_dir()
+    return sorted(p.stem for p in d.glob("*.json")) if d else []
+
+
+def model_for(profile, model):
+    if model:
+        return model
+    if not profile:
+        return None
+    sys.path.insert(0, str(KIT / ".install/shared"))
+    sys.path.insert(0, str(HERE.parent))
+    try:
+        import kit_models as km
+        cfg = km.load(KIT)
+        prof = (cfg.get("profiles") or {}).get(profile)
+        if not prof:
+            sys.exit(f"kit-evals: no profile {profile!r} in models.json")
+        return prof.get("model")
+    except ImportError:
+        sys.exit("kit-evals: kit_models isn't installed; give --model instead")
+
+
+def snapshot(folder):
+    return {str(p.relative_to(folder)): p.stat().st_mtime_ns for p in folder.rglob("*") if p.is_file()}
+
+
+def live_case(agent, case, model):
+    work = pathlib.Path(tempfile.mkdtemp(prefix=f"kit-eval-{agent}-"))
+    try:
+        for rel, content in (case.get("fixtures") or {}).items():
+            f = work / rel
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(content, encoding="utf-8")
+        before = snapshot(work)
+        brief = case["brief"] + f"\n\n(Evaluation run. Case files are in {work}. Work only from them.)"
+        cmd = ["claude", "-p", brief, "--agent", agent, "--output-format", "json", "--max-turns", "12",
+               "--add-dir", str(work)]
+        if model:
+            cmd += ["--model", model]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=900, cwd=str(work))
+        except (OSError, subprocess.TimeoutExpired) as ex:
+            return [("run", False, f"didn't finish: {ex.__class__.__name__}")], 0.0
+        try:
+            data = json.loads(r.stdout)
+            answer, cost = str(data.get("result", "")), float(data.get("total_cost_usd") or 0)
+        except ValueError:
+            answer, cost = r.stdout, 0.0
+        exp, res = case.get("expect", {}), [("run", r.returncode == 0, f"exit {r.returncode}")]
+        flat = re.sub(r"\s+", " ", answer)
+        for pat in exp.get("contains", []):
+            res.append((f"answer has /{pat}/", re.search(pat, flat, re.I) is not None, ""))
+        for pat in exp.get("not_contains", []):
+            res.append((f"answer lacks /{pat}/", re.search(pat, flat, re.I) is None, ""))
+        if exp.get("refuses"):
+            res.append(("declines", re.search(exp["refuses"], flat, re.I) is not None, ""))
+        if exp.get("cites"):
+            res.append(("cites a source", CITE.search(answer) is not None, ""))
+        if exp.get("no_personal"):
+            hit = PERSONAL.search(answer)
+            res.append(("no personal details", hit is None, "an email address or phone number" if hit else ""))
+        if exp.get("no_writes"):
+            res.append(("no files changed", snapshot(work) == before, ""))
+        return res, cost
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def report(agent, results):
+    ok = all(r[1] for r in results)
+    print(f"{'PASS' if ok else 'FAIL'}  {agent}")
+    for name, good, detail in results:
+        if not good or os.environ.get("KIT_EVALS_VERBOSE"):
+            print(f"      {'ok  ' if good else 'FAIL'} {name}" + (f": {detail}" if detail else ""))
+    return ok
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-evals", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("agents", nargs="*")
+    ap.add_argument("--live", action="store_true", help="run the cases for real (costs money)")
+    ap.add_argument("--profile", help="models.json profile to run the live cases on")
+    ap.add_argument("--model", help="a model name or alias instead of a profile")
+    ap.add_argument("--yes", action="store_true", help="confirm a live run after seeing the estimate")
+    ap.add_argument("--list", action="store_true")
+    a = ap.parse_args(argv)
+    if not cases_dir():
+        print("kit-evals: no cases folder (tests/evals)", file=sys.stderr)
+        return 2
+    agents = a.agents or all_agents()
+    if a.list:
+        for ag in all_agents():
+            spec = load_spec(ag)
+            print(f"  {ag:<20} {len(spec.get('cases', []))} live case(s), "
+                  f"{sum(len(v) for v in spec.get('static', {}).values())} static rule(s)")
+        return 0
+    adir = agents_dir()
+    if not adir:
+        print("kit-evals: no agents folder", file=sys.stderr)
+        return 2
+    missing = [ag for ag in agents if load_spec(ag) is None]
+    if missing:
+        print(f"kit-evals: no cases for {', '.join(missing)}", file=sys.stderr)
+        return 2
+    if not a.live:
+        good = all([report(ag, static_check(ag, load_spec(ag), adir)) for ag in agents])
+        print(f"kit-evals (static): {sum(1 for ag in agents if all(r[1] for r in static_check(ag, load_spec(ag), adir)))}"
+              f" of {len(agents)} agent(s) passed")
+        return 0 if good else 1
+    model = model_for(a.profile, a.model)
+    n = sum(len(load_spec(ag).get("cases", [])) for ag in agents)
+    per = next((v for k, v in EST_PER_CASE.items() if model and k in model.lower()), EST_PER_CASE["opus"])
+    print(f"kit-evals: {n} live case(s) on {model or 'the default model'}; estimated ${n * per:.2f} "
+          "(a rough guide; kit-cost records the real figure)")
+    if not a.yes:
+        print("kit-evals: nothing run. Add --yes to run them.")
+        return 0
+    if not shutil.which("claude"):
+        print("kit-evals: claude isn't on the PATH", file=sys.stderr)
+        return 2
+    total, good = 0.0, True
+    for ag in agents:
+        spec = load_spec(ag)
+        st = static_check(ag, spec, adir)
+        results = [("static: " + x[0], x[1], x[2]) for x in st if not x[1]]
+        for case in spec.get("cases", []):
+            res, cost = live_case(ag, case, model)
+            total += cost
+            results += [(f"{case['id']}: {r[0]}", r[1], r[2]) for r in res]
+        good = report(ag, results) and good
+    print(f"kit-evals (live): spent about ${total:.2f}")
+    return 0 if good else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

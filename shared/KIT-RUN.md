@@ -50,48 +50,90 @@ the model asks for tools, kit-run checks and runs them, and sends back the resul
 answers or `--max-turns` (default 20) is reached. Exit codes: 0 done, 2 refused, 3 provider or
 credential error, 4 stopped at the turn limit.
 
-**Tools in this version**
+**Tools**
 
 | Tool | Allowed |
 |---|---|
 | `read_file`, `list_dir`, `search` | Under the Kit folder and the library root (from `library.md`). Credential-looking files (`.env`, keys, credential stores, token files) are refused |
-| `write_file` | Only under the agent's write paths, and only after the owner says yes at the keyboard, or with `--yes-ask`. With no one at the keyboard, writes are refused. An existing file is backed up to `.install/backups/kit-run/` first |
+| `write_file` | Only under the agent's write paths, and only with the owner's approval (see Approvals). An existing file is backed up to `.install/backups/kit-run/` first |
 | `run_kit_tool` | `kit-precedent`, `kit-labcheck`, `kit-version`, `kit-queue hygiene`, `kit-models check` and `resolve`, `kit-cost report` and `check` |
+| `mcp__<server>__<tool>` | MCP connectors named in `kit-run.json`; only each server's `allow_tools`; and, by default, only for agents whose frontmatter hooks guard that tool (the connector guard) |
+| `agent` | Brief another Kit agent, only along the direct pairs in `memory/context/agents.md` or the agent's own `kit_run: agents:` list; at most two levels deep |
+| `skill`, `skill_script` | Read a skill's `SKILL.md`; run one of its `.py` or `.sh` scripts only if it's on `skills.allow_scripts` and the owner approves |
 
-An agent's write paths come from a `kit_run:` block in its frontmatter; without one, only
-`briefs/` in the Kit folder:
+An agent's write paths (and extra agents it may brief) come from a `kit_run:` block in its
+frontmatter; without one, only `briefs/` in the Kit folder:
 
 ```
 kit_run:
   write:
     - briefs/
     - <library root>/artifacts/
+  agents:
+    - librarian
 ```
 
 The agent's `tools` and `disallowedTools` are honoured: Read, Glob, and Grep map to the read tools;
-Write and Edit to `write_file`; Bash to `run_kit_tool`.
+Write and Edit to `write_file`; Bash to `run_kit_tool` (and, with Skill, `skill_script`); Agent or
+Task to `agent`; Skill to `skill`. MCP tools follow Claude Code's rules: an exact name,
+`mcp__<server>`, or `mcp__<server>__*`.
 
-**Guardrails kit-run enforces itself:** no tools to send, delete, install, or reach outside
-systems; ask-first for every write; the allowlists above; data-class and organization-profile
-policy; nothing runs while Kit is paused (`kit-pause`); every tool result wrapped as untrusted
-content; an audit line per tool call in `.install/logs/kit-run-YYYY-MM.jsonl`; and the run's
-usage in the cost ledger.
+**kit-run.json** (in the Kit folder; optional). Connectors and skills come only from here, never
+from Claude Code's settings. Environment values and HTTP header values are named by environment
+variable and read at launch; they're never logged or printed.
 
-**Not at parity with Claude Code**
+```
+{"mcp": {"require_guard": true,
+         "servers": {"jira": {"type": "stdio", "command": "node", "args": ["server.js"],
+                              "env_from": {"SERVER_VAR": "MY_ENV_VAR"},
+                              "allow_tools": ["get_issue", "search_issues"]},
+                     "wiki": {"type": "http", "url": "https://wiki.example.com/mcp",
+                              "headers_env": {"Authorization": "WIKI_AUTH_HEADER"},
+                              "allow_tools": ["search"]}}},
+ "skills": {"dirs": ["~/.claude/skills"], "allow_scripts": ["xlsx/recalc.py"]}}
+```
 
-- **No MCP connectors.** Agents that need the gateway, Jira, Confluence, or ServiceNow can't run
-  under kit-run yet; it says what it would need instead.
-- **No subagents.** An agent can't call another agent; the routing pairs in `agents.md` don't apply.
-- **No hooks.** The connector guard isn't involved because there are no connectors; kit-run's own
-  audit log stands in for its records.
-- **No skills.** The document skills (docx, pptx, xlsx, pdf) and style skills aren't available, so
-  agents that build Office files can't finish those jobs.
-- **Plain prompts for approval.** Ask-first is a y/N at the terminal, with no settings-based
-  permission rules, and no remembered approvals.
-- **Smaller models vary.** Tool calling on local and smaller models is less reliable. Move an
-  agent to a non-Claude profile only after it passes its evals there.
-- **Context.** KIT.md is included as text (its `@` imports aren't followed), so preferences,
-  lessons, and the memory index don't load the way they do in Claude Code.
+**MCP.** Version 2025-06-18 over stdio (one JSON-RPC message per line; shutdown closes stdin, then
+SIGTERM, then SIGKILL) or Streamable HTTP (POST with `Accept: application/json, text/event-stream`,
+JSON or event-stream answers, `Mcp-Session-Id` and `MCP-Protocol-Version` on later requests, DELETE
+at the end). HTTP servers must be `https://`, or `http://` on this computer. Server requests
+(sampling, elicitation, roots) are declined. A server that won't start is noted to the model and
+the run continues.
+
+**Hooks.** The agent's frontmatter `hooks:` run as in Claude Code: PreToolUse, PostToolUse,
+PostToolUseFailure, and Stop, with the same matchers, stdin JSON fields, exit codes (2 blocks), and
+JSON decisions (deny, ask, updatedInput; block and updatedToolOutput; Stop block, up to 8 times).
+kit-run's tools go by their Claude Code names in hooks (Read, Glob, Grep, Write, Bash, Agent,
+Skill), so a matcher like `Edit|Write` works. So the connector guard governs kit-run's connector
+calls and writes the same audit log. Only `command` hooks run. Hooks can only tighten: kit-run's own
+rules still apply after a hook allows a call.
+
+**Approvals.** kit-run shows the action (tool, arguments, and a diff for writes) and asks
+`[y]es / [n]o / [a]lways for this tool this run / [d]etails`. Each answer is logged. With no one at
+the keyboard it refuses, unless `--yes-ask`. A hook's "ask" decision goes through the same prompt.
+
+**Context.** KIT.md is loaded with its `@` imports followed (relative to the importing file, `~`
+expanded, not inside code fences, five levels at most, each file once), so preferences, lessons,
+and the memory index load as in Claude Code.
+
+**Guardrails kit-run enforces itself:** no tools to send, delete, or install; ask-first for writes
+and skill scripts; the allowlists above; data-class and organization-profile policy; nothing runs
+while Kit is paused (`kit-pause`); every tool result wrapped as untrusted content; an audit line per
+tool call, hook, and approval in `.install/logs/kit-run-YYYY-MM.jsonl`; and the run's usage in the
+cost ledger.
+
+**Parity with Claude Code**
+
+| Area | Status |
+|---|---|
+| MCP connectors | At parity for tools (stdio and Streamable HTTP). Not supported: resources, prompts, sampling, elicitation, OAuth sign-in flows, the old HTTP+SSE transport |
+| Hooks | At parity for command hooks on PreToolUse, PostToolUse, PostToolUseFailure, and Stop. Not supported: other events (SessionStart, UserPromptSubmit, SubagentStop, ...) and prompt, agent, http, and mcp_tool hooks; `defer` is treated as allow |
+| Subagents | Supported along direct pairs, two levels deep. Stricter than Claude Code: an unrestricted Agent permission alone doesn't let an agent brief anyone |
+| Skills | Instructions load on demand. Scripts run only from an allowlist with approval; Claude Code runs them through Bash under its own permissions |
+| KIT.md imports | At parity |
+| Approvals | Interactive y / n / always / details, logged. Not supported: settings-based permission rules (allow and deny lists in settings.json), permission modes |
+| Built-in tools | No web search or fetch, no general Bash, no notebook editing |
+| Smaller models | Tool calling on local and smaller models is less reliable. Move an agent to a non-Claude profile only after it passes its evals there |
 
 ## Turning phase 2 on
 

@@ -1,0 +1,242 @@
+#!/usr/bin/env python3
+"""kit-connect: check that Kit's connectors (Claude Code MCP servers) are set up and answering.
+
+  kit-connect test [server...]          check each connector: allowed by the guard, credential
+                                        variables present (by name only), and Claude Code's own
+                                        health check (claude mcp list)
+  kit-connect test --read [server...]   also make ONE read-only call per server, run as the gateway
+                                        agent so the connector guard checks and logs it. Costs a
+                                        little (one short Claude Code run per server); off by default
+  kit-connect test --json               the same, as JSON
+  kit-connect list                      the servers kit-connect checks, and where it found them
+
+Which servers: those in connector-guard.json's allowed_servers (memory/context/), or the ones you
+name. For each, connector-guard.json may also give:
+
+  "credential_env": {"jira": ["JIRA_MCP_TOKEN"]}        variable names a server needs
+  "probe_tools":    {"jira": "mcp__jira__search_issues"} the read-only tool --read calls
+
+Credentials are checked by name only: whether the environment variable is set, or a Keychain entry
+of that name exists. Their values are never read, printed, or logged. Claude Code's own diagnostics
+also name variables a server is missing; kit-connect reports those names too.
+
+Exit codes: 0 every checked server passed, 1 at least one failed, 2 setup problem (no servers, or
+claude not found). kit-connect never adds, removes, or changes a server.
+"""
+import argparse
+import datetime
+import json
+import os
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+
+HOME = pathlib.Path.home()
+KIT = pathlib.Path(os.path.expanduser(os.environ.get("KIT_DIR", "~/Claude/Agents/kit")))
+GUARD = KIT / "memory/context/connector-guard.json"
+STATUS_LINE = re.compile(r"^(?P<name>\S+?):\s.*\s-\s(?P<status>[✔✓✘✗⏸!].*)$")
+MISSING = re.compile(r"\[(?P<name>[^\]]+)\]\s+mcpServers\.[^:]+:\s+Missing environment variables?:\s*(?P<vars>.+)$")
+PROBE_PROMPT = ("Connection check. Call the one tool you're allowed to call exactly once, with the "
+                "smallest possible read-only request (for example, one item). Then reply with only "
+                "OK if it returned data, or FAILED and the error message if it didn't. Don't call "
+                "any other tool and don't summarize the data.")
+
+
+def guard_config():
+    try:
+        return json.loads(GUARD.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def claude_bin():
+    return shutil.which("claude")
+
+
+def mcp_list(claude):
+    """Claude Code's health check: {server: (ok, status text)} and {server: [missing var names]}.
+    Lines look like '<name>: <command or url> - ✔ Connected' or '... - ✘ Failed to connect ...'.
+    Only the name and the status are kept: the command or URL part can hold headers."""
+    try:
+        out = subprocess.run([claude, "mcp", "list"], capture_output=True, text=True, timeout=180).stdout
+    except (OSError, subprocess.TimeoutExpired) as ex:
+        return None, {}, f"claude mcp list didn't finish: {ex.__class__.__name__}"
+    health, missing = {}, {}
+    for line in out.splitlines():
+        line = line.strip()
+        m = STATUS_LINE.match(line)
+        if m:
+            status = m.group("status").strip()
+            health[m.group("name")] = (status.startswith(("✔", "✓")), status[:120])
+            continue
+        m = MISSING.search(line)
+        if m:
+            names = [v.strip() for v in re.split(r"[,\s]+", m.group("vars")) if re.fullmatch(r"[A-Z0-9_]+", v.strip())]
+            missing.setdefault(m.group("name"), []).extend(names)
+    return health, missing, ""
+
+
+def keychain_has(name):
+    """Whether a Keychain entry with this service name exists. Never asks for the value (no -w)."""
+    if sys.platform != "darwin" or not shutil.which("security"):
+        return False
+    r = subprocess.run(["security", "find-generic-password", "-s", name], capture_output=True, text=True)
+    return r.returncode == 0
+
+
+def credential_state(names):
+    """[(name, 'set' | 'keychain' | 'missing')] by name only."""
+    out = []
+    for n in names:
+        if os.environ.get(n):
+            out.append((n, "set"))
+        elif keychain_has(n):
+            out.append((n, "keychain"))
+        else:
+            out.append((n, "missing"))
+    return out
+
+
+def audit_outcome(tool, since):
+    """'ok', an error summary, or '' from the connector guard's audit log for this tool since
+    `since`. Reads only tool names, times, and error flags."""
+    try:
+        cfg = json.loads((KIT / "memory/context/connector-guard.json").read_text())
+        d = pathlib.Path(os.path.expanduser(cfg.get("audit_dir", "")))
+    except (OSError, ValueError):
+        return ""
+    if not d.is_dir():
+        return ""
+    result = ""
+    for f in sorted(d.glob("*.jsonl"))[-2:]:
+        for line in f.read_text(errors="ignore").splitlines():
+            try:
+                rec = json.loads(line)
+                when = datetime.datetime.fromisoformat(str(rec.get("time", "")))
+            except (ValueError, TypeError):
+                continue
+            if rec.get("tool") != tool or rec.get("event") not in ("post", "fail") or when < since:
+                continue
+            bad = rec.get("event") == "fail" or str(rec.get("is_error")).lower() == "true"
+            result = (str(rec.get("error", "error"))[:120] or "error") if bad else "ok"
+    return result
+
+
+def probe(claude, server, tool):
+    """One read-only call through the gateway agent (its connector guard checks and logs it)."""
+    if not tool:
+        return False, "no probe tool set (connector-guard.json probe_tools)"
+    if not tool.startswith(f"mcp__{server}__"):
+        return False, f"probe tool {tool!r} isn't one of {server}'s tools"
+    # The gateway reads its setup files before calling, so allow enough turns for that.
+    cmd = [claude, "-p", PROBE_PROMPT, "--agent", "gateway", "--allowedTools", tool,
+           "--output-format", "json", "--max-turns", "10"]
+    started = datetime.datetime.now().astimezone()
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=300, cwd=str(KIT))
+    except (OSError, subprocess.TimeoutExpired) as ex:
+        return False, f"probe didn't finish: {ex.__class__.__name__}"
+    subtype = ""
+    try:
+        data = json.loads(r.stdout)
+        text = str(data.get("result", "")).strip()
+        cost = data.get("total_cost_usd")
+        subtype = str(data.get("subtype", ""))
+    except ValueError:
+        text, cost = r.stdout.strip()[:200], None
+    # The connector guard's audit log is the authority: a post record for this tool, after the
+    # probe started, with no error, proves the read worked even if the run's answer didn't arrive.
+    audited = audit_outcome(tool, started)
+    if audited == "ok":
+        ok, note = True, "read ok (connector guard audit log)" + ("" if text.upper().startswith("OK") else
+                                                                   f"; run ended: {subtype or 'exit ' + str(r.returncode)}")
+    elif audited:
+        ok, note = False, f"read failed: {audited}"
+    else:
+        ok = r.returncode == 0 and text.upper().startswith("OK")
+        note = text.splitlines()[0][:160] if text else f"no answer (exit {r.returncode}{', ' + subtype if subtype else ''}); no audit record"
+    if cost is not None:
+        note += f" (about ${cost:.3f})"
+    return ok, note
+
+
+def test(servers, do_read, as_json):
+    cfg = guard_config()
+    allowed = cfg.get("allowed_servers") or []
+    servers = servers or allowed
+    if not servers:
+        print("kit-connect: no servers to check. Name them, or list them in connector-guard.json "
+              f"allowed_servers ({GUARD}).", file=sys.stderr)
+        return 2
+    claude = claude_bin()
+    if not claude:
+        print("kit-connect: claude isn't on the PATH", file=sys.stderr)
+        return 2
+    health, missing, err = mcp_list(claude)
+    if do_read:
+        print(f"kit-connect: --read makes one short Claude Code run per server ({len(servers)}), "
+              "each a few cents at most, run as the gateway agent.", file=sys.stderr)
+    results = []
+    for s in servers:
+        checks = []
+        checks.append(("guard", s in allowed, "allowed by the connector guard" if s in allowed
+                       else "not in allowed_servers: the guard denies it"))
+        names = list(dict.fromkeys((cfg.get("credential_env") or {}).get(s, []) + (missing or {}).get(s, [])))
+        creds = credential_state(names)
+        gone = [n for n, st in creds if st == "missing"]
+        checks.append(("credentials", not gone,
+                       "none named" if not creds else
+                       ("present: " + ", ".join(f"{n} ({st})" for n, st in creds)) if not gone else
+                       "missing: " + ", ".join(gone) + " (set the variable; values are never read here)"))
+        if health is None:
+            checks.append(("health", False, err))
+        elif s in health:
+            checks.append(("health", health[s][0], health[s][1]))
+        else:
+            checks.append(("health", False, "not configured in Claude Code (claude mcp list)"))
+        if do_read:
+            if all(ok for _, ok, _ in checks):
+                ok, note = probe(claude, s, (cfg.get("probe_tools") or {}).get(s))
+                checks.append(("read", ok, note))
+            else:
+                checks.append(("read", False, "skipped: fix the checks above first"))
+        results.append({"server": s, "pass": all(ok for _, ok, _ in checks),
+                        "checks": [{"check": c, "pass": ok, "detail": d} for c, ok, d in checks]})
+    if as_json:
+        print(json.dumps({"servers": results, "read": do_read}, indent=2))
+    else:
+        for r in results:
+            print(f"{'PASS' if r['pass'] else 'FAIL'}  {r['server']}")
+            for c in r["checks"]:
+                print(f"      {'ok  ' if c['pass'] else 'FAIL'} {c['check']:<12} {c['detail']}")
+        n = sum(r["pass"] for r in results)
+        print(f"kit-connect: {n} of {len(results)} server(s) passed"
+              + ("" if do_read else "; add --read to prove each with one read-only call"))
+    return 0 if all(r["pass"] for r in results) else 1
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-connect", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("command", choices=["test", "list"])
+    ap.add_argument("servers", nargs="*")
+    ap.add_argument("--read", action="store_true", help="one read-only call per server (costs a little)")
+    ap.add_argument("--json", action="store_true")
+    a = ap.parse_args(argv)
+    if a.command == "list":
+        cfg = guard_config()
+        print(f"From {GUARD}:")
+        for s in cfg.get("allowed_servers") or []:
+            tool = (cfg.get("probe_tools") or {}).get(s) or "no probe tool"
+            creds = ", ".join((cfg.get("credential_env") or {}).get(s, [])) or "no credential names"
+            print(f"  {s:<20} {tool:<40} {creds}")
+        if not cfg.get("allowed_servers"):
+            print("  (none: allowed_servers is empty)")
+        return 0
+    return test(a.servers, a.read, a.json)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

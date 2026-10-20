@@ -10,6 +10,8 @@ import sys
 import tempfile
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
+# Never read the real Kit's sharing policy (or anything else) from these tests.
+os.environ["KIT_DIR"] = tempfile.mkdtemp(prefix="kit-transport-test-")
 sys.path.insert(0, str(REPO / "shared"))
 import kit_records as kr  # noqa: E402
 import kit_transport as kt  # noqa: E402

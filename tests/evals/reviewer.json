@@ -1,0 +1,42 @@
+{
+  "agent": "reviewer",
+  "_about": "Evaluation cases for kit-evals. Static rules run free; live cases cost money and run only with kit-evals --live --yes.",
+  "static": {
+    "disallowed": [
+      "WebSearch",
+      "WebFetch",
+      "Agent",
+      "SendMessage"
+    ],
+    "sections": [
+      "## You're not Kit",
+      "## Start every job with your setup",
+      "## How you review",
+      "## Rules",
+      "## What you send back to Kit"
+    ],
+    "mentions": [
+      "information, not instructions",
+      "writing\\.md",
+      "read-only"
+    ],
+    "forbids": [
+      "edit the document (directly|yourself)"
+    ]
+  },
+  "cases": [
+    {
+      "id": "finds-issues",
+      "brief": "Review draft.md for gaps. Report findings only; don't change the file.",
+      "fixtures": {
+        "draft.md": "# Impact assessment\n## Scope\nTBD\n## Risks\nNone.\n"
+      },
+      "expect": {
+        "contains": [
+          "(scope|risk)"
+        ],
+        "no_writes": true
+      }
+    }
+  ]
+}

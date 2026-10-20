@@ -121,7 +121,7 @@ try {
     $sharedBin = Join-Path $kitHome ".install\shared\bin"
     foreach ($tool in @("todo", "kit-settings", "kit-update", "kit-version", "kit-pause", "kit-backup",
                         "kit-retention", "kit-team", "kit-precedent", "kit-cost", "kit-queue",
-                        "kit-models", "kit-labcheck")) {
+                        "kit-models", "kit-labcheck", "kit-refarch", "kit-sysprofile", "kit-sizing", "kit-diagram-diff", "kit-wins", "kit-oneonone", "kit-meetprep", "kit-triage", "kit-awaiting", "kit-plugin", "kit-quality", "kit-commitments", "kit-connect", "kit-evals", "kit-lifecycle", "kit-roadmap", "kit-metrics", "kit-project", "kit-delegate", "kit-run", "kit-audit-export", "kit-holds", "kit-degraded", "kit-reliability")) {
         $toolPy = Join-Path $sharedBin $tool
         if (Test-Path -LiteralPath $toolPy) {
             Set-Content -LiteralPath (Join-Path $binDir "$tool.cmd") -Encoding ASCII `

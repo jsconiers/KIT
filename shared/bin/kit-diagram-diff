@@ -1,0 +1,243 @@
+#!/usr/bin/env python3
+"""kit-diagram-diff: what changed between two versions of a diagram.
+
+  kit-diagram-diff OLD NEW            compare two draw.io (.drawio or .xml) or Visio (.vsdx) files
+  kit-diagram-diff OLD NEW --json     the same comparison as JSON
+
+Pages are matched by name. On each page it lists components added and removed, components renamed
+(same id, new label) or restyled (same id and label, new shape style), and connections added and
+removed (source -> target, with the connection's label). When ids differ between the files, a removed
+and an added component with the same label count as the same component, so a redrawn diagram isn't
+reported as all new. Compressed draw.io pages (base64 plus deflate) are read too. Read-only.
+"""
+import argparse
+import base64
+import html
+import json
+import pathlib
+import re
+import sys
+import urllib.parse
+import xml.etree.ElementTree as ET
+import zipfile
+import zlib
+
+VNS = "{http://schemas.microsoft.com/office/visio/2012/main}"
+RNS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+
+
+def clean(label):
+    text = html.unescape(re.sub(r"<br\s*/?>", " ", label or "", flags=re.I))
+    text = re.sub(r"<[^>]+>", "", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def shape_kind(style):
+    style = style or ""
+    first = style.split(";")[0]
+    if "=" not in first and first:
+        return first
+    m = re.search(r"shape=([^;]+)", style)
+    return m.group(1) if m else ("ellipse" if "ellipse" in style else "rectangle")
+
+
+# ---------------------------------------------------------------- draw.io
+def drawio_page_model(diagram):
+    model = diagram.find("mxGraphModel")
+    if model is not None:
+        return model
+    text = (diagram.text or "").strip()
+    if not text:
+        return None
+    raw = base64.b64decode(text)
+    try:
+        xml_text = urllib.parse.unquote(zlib.decompress(raw, -15).decode("utf-8"))
+    except zlib.error:
+        xml_text = urllib.parse.unquote(raw.decode("utf-8", "ignore"))
+    return ET.fromstring(xml_text)
+
+
+def read_drawio(path):
+    root = ET.parse(path).getroot()
+    diagrams = root.findall("diagram") if root.tag == "mxfile" else []
+    if root.tag == "mxGraphModel":
+        diagrams = [None]
+    pages = {}
+    for i, d in enumerate(diagrams, 1):
+        model = root if d is None else drawio_page_model(d)
+        name = (d.get("name") if d is not None else None) or f"Page-{i}"
+        comps, edges = {}, []
+        if model is None:
+            pages[name] = (comps, edges)
+            continue
+        cells = model.iter("mxCell")
+        cell_list = list(cells)
+        for c in cell_list:
+            if c.get("vertex") == "1":
+                comps[c.get("id")] = {"label": clean(c.get("value")), "kind": shape_kind(c.get("style"))}
+        for c in cell_list:
+            if c.get("edge") == "1":
+                edges.append((c.get("source"), c.get("target"), clean(c.get("value"))))
+        # labels on objects wrapped in <object label=...><mxCell .../></object>
+        for o in model.iter("object"):
+            c = o.find("mxCell")
+            if c is not None and c.get("vertex") == "1":
+                comps[o.get("id")] = {"label": clean(o.get("label")), "kind": shape_kind(c.get("style"))}
+        pages[name] = (comps, edges)
+    return pages
+
+
+# ---------------------------------------------------------------- Visio
+def read_vsdx(path):
+    z = zipfile.ZipFile(path)
+    names = set(z.namelist())
+    order = []
+    if "visio/pages/pages.xml" in names:
+        rels = {}
+        if "visio/pages/_rels/pages.xml.rels" in names:
+            for r in ET.fromstring(z.read("visio/pages/_rels/pages.xml.rels")):
+                rels[r.get("Id")] = r.get("Target")
+        for i, p in enumerate(ET.fromstring(z.read("visio/pages/pages.xml")).iter(VNS + "Page"), 1):
+            rel = p.find(VNS + "Rel")
+            target = rels.get(rel.get(RNS + "id")) if rel is not None else None
+            order.append((p.get("NameU") or p.get("Name") or f"Page-{i}",
+                          f"visio/pages/{target}" if target else f"visio/pages/page{i}.xml"))
+    else:
+        order = [(f"Page-{i}", n) for i, n in enumerate(sorted(n for n in names if re.match(r"visio/pages/page\d+\.xml$", n)), 1)]
+    pages = {}
+    for name, member in order:
+        if member not in names:
+            continue
+        root = ET.fromstring(z.read(member))
+        shapes = {}
+        for s in root.iter(VNS + "Shape"):
+            t = s.find(VNS + "Text")
+            text = clean("".join(t.itertext())) if t is not None else ""
+            shapes[s.get("ID")] = {"label": text or (s.get("NameU") or s.get("Name") or ""),
+                                   "kind": s.get("Master") and f"master {s.get('Master')}" or (s.get("NameU") or "shape")}
+        ends = {}
+        for c in root.iter(VNS + "Connect"):
+            ends.setdefault(c.get("FromSheet"), {})[c.get("FromCell")] = c.get("ToSheet")
+        connectors = {sid for sid in ends}
+        edges = []
+        for sid, cells in ends.items():
+            edges.append((cells.get("BeginX"), cells.get("EndX"), shapes.get(sid, {}).get("label", "")
+                          if not re.match(r"^(Dynamic connector|Connector)", shapes.get(sid, {}).get("label", "")) else ""))
+        comps = {k: v for k, v in shapes.items() if k not in connectors}
+        pages[name] = (comps, edges)
+    return pages
+
+
+def read(path):
+    p = pathlib.Path(path)
+    if p.suffix.lower() == ".vsdx":
+        return read_vsdx(p)
+    return read_drawio(p)
+
+
+# ---------------------------------------------------------------- compare
+def compare_page(old, new):
+    oc, oe = old
+    nc, ne = new
+    added = {k: v for k, v in nc.items() if k not in oc}
+    removed = {k: v for k, v in oc.items() if k not in nc}
+    # same label, different id: treat as the same component, and map the new id onto the old one
+    rlabels = {}
+    for k, v in removed.items():
+        rlabels.setdefault(v["label"], []).append(k)
+    to_old = {}
+    for k, v in list(added.items()):
+        if v["label"] and rlabels.get(v["label"]):
+            ok = rlabels[v["label"]].pop()
+            to_old[k] = ok
+            del added[k]
+            del removed[ok]
+    renamed, restyled = [], []
+    for k in set(oc) & set(nc):
+        if oc[k]["label"] != nc[k]["label"]:
+            renamed.append({"id": k, "from": oc[k]["label"], "to": nc[k]["label"]})
+        elif oc[k]["kind"] != nc[k]["kind"]:
+            restyled.append({"id": k, "label": nc[k]["label"], "from": oc[k]["kind"], "to": nc[k]["kind"]})
+    # connections compared by component id (so a rename doesn't look like a rewiring), shown by label
+    oes = {(s_, t_, l) for s_, t_, l in oe}
+    nes = {(to_old.get(s_, s_), to_old.get(t_, t_), l) for s_, t_, l in ne}
+    back = {v: k for k, v in to_old.items()}
+
+    def lab(comps, i):
+        return comps.get(i, {}).get("label") or (f"#{i}" if i else "(unattached)")
+
+    def lab_new(i):
+        return lab(nc, back.get(i, i)) if back.get(i, i) in nc else lab(oc, i)
+    return {"added": [{"id": k, "label": v["label"], "kind": v["kind"]} for k, v in sorted(added.items())],
+            "removed": [{"id": k, "label": v["label"], "kind": v["kind"]} for k, v in sorted(removed.items())],
+            "renamed": sorted(renamed, key=lambda r: r["id"]),
+            "restyled": sorted(restyled, key=lambda r: r["id"]),
+            "same_label_new_id": len(to_old),
+            "connections_added": sorted(({"from": lab_new(s_), "to": lab_new(t_), "label": l} for s_, t_, l in nes - oes),
+                                        key=lambda e: (e["from"], e["to"], e["label"])),
+            "connections_removed": sorted(({"from": lab(oc, s_), "to": lab(oc, t_), "label": l} for s_, t_, l in oes - nes),
+                                          key=lambda e: (e["from"], e["to"], e["label"]))}
+
+
+def diff(old_path, new_path):
+    old, new = read(old_path), read(new_path)
+    out = {"old": str(old_path), "new": str(new_path), "pages": {},
+           "pages_added": sorted(set(new) - set(old)), "pages_removed": sorted(set(old) - set(new))}
+    for name in [n for n in new if n in old]:
+        out["pages"][name] = compare_page(old[name], new[name])
+    for name in out["pages_added"]:
+        out["pages"][name] = compare_page(({}, []), new[name])
+    return out
+
+
+def render(d):
+    lines = [f"# Diagram changes: {pathlib.Path(d['old']).name} -> {pathlib.Path(d['new']).name}", ""]
+    if d["pages_added"]:
+        lines.append("Pages added: " + ", ".join(d["pages_added"]))
+    if d["pages_removed"]:
+        lines.append("Pages removed: " + ", ".join(d["pages_removed"]))
+    total = 0
+    for name, p in d["pages"].items():
+        lines += ["", f"## {name}", ""]
+        n = 0
+        for r in p["added"]:
+            lines.append(f"- Added: {r['label'] or '(no label)'} [{r['kind']}, id {r['id']}]"); n += 1
+        for r in p["removed"]:
+            lines.append(f"- Removed: {r['label'] or '(no label)'} [{r['kind']}, id {r['id']}]"); n += 1
+        for r in p["renamed"]:
+            lines.append(f"- Renamed: {r['from'] or '(no label)'} -> {r['to'] or '(no label)'} [id {r['id']}]"); n += 1
+        for r in p["restyled"]:
+            lines.append(f"- Restyled: {r['label']} ({r['from']} -> {r['to']}) [id {r['id']}]"); n += 1
+        for e in p["connections_added"]:
+            lines.append(f"- Connection added: {e['from']} -> {e['to']}" + (f" ({e['label']})" if e["label"] else "")); n += 1
+        for e in p["connections_removed"]:
+            lines.append(f"- Connection removed: {e['from']} -> {e['to']}" + (f" ({e['label']})" if e["label"] else "")); n += 1
+        if p["same_label_new_id"]:
+            lines.append(f"- {p['same_label_new_id']} component(s) kept their label under a new id (treated as unchanged)")
+        if not n:
+            lines.append("No changes.")
+        total += n
+    lines += ["", f"{total} change(s) in all."]
+    return "\n".join(lines) + "\n"
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-diagram-diff", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("old")
+    ap.add_argument("new")
+    ap.add_argument("--json", action="store_true")
+    a = ap.parse_args(argv)
+    for f in (a.old, a.new):
+        if not pathlib.Path(f).exists():
+            sys.exit(f"kit-diagram-diff: {f} not found")
+    try:
+        d = diff(a.old, a.new)
+    except (ET.ParseError, zipfile.BadZipFile, ValueError) as e:
+        sys.exit(f"kit-diagram-diff: couldn't read a diagram: {e}")
+    print(json.dumps(d, indent=2) if a.json else render(d), end="" if not a.json else "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

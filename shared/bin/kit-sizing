@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+"""kit-sizing: rough-order sizing for compute, storage, and network, with every assumption shown.
+
+  kit-sizing users=5000 req_per_user_hour=60 tier=1        key=value inputs
+  kit-sizing --file workload.json                           JSON inputs (same keys)
+  kit-sizing ... --json                                     the result as JSON
+  kit-sizing --keys                                         list every input, its default and meaning
+
+Give the workload: users and requests per user per hour, or rps directly; payload sizes; the read
+share; how much each write stores; growth and retention; the HA/DR tier; and the peak factor and
+headroom. Every per-unit assumption (requests one vCPU handles, memory per vCPU, IO per request,
+replicas per tier) is listed in the output and can be overridden by name. Results come as low,
+likely, and high. This is rough-order sizing for early design and the cost estimator, not capacity
+planning; test with real load before committing to numbers.
+"""
+import argparse
+import json
+import math
+import pathlib
+import sys
+
+INPUTS = {
+    # workload
+    "users": (0, "concurrent-capable users; used with req_per_user_hour when rps isn't given"),
+    "req_per_user_hour": (60, "requests per user per hour"),
+    "rps": (0, "average requests per second (overrides users x req_per_user_hour)"),
+    "peak_factor": (3.0, "peak load as a multiple of the average"),
+    "headroom": (0.30, "spare capacity on top of peak (0.30 = 30%)"),
+    "read_pct": (80.0, "share of requests that only read (percent)"),
+    "payload_in_kb": (2.0, "average request size in KB"),
+    "payload_out_kb": (20.0, "average response size in KB"),
+    "write_kb": (4.0, "data stored per write request, in KB"),
+    "retention_days": (365, "how long written data is kept"),
+    "growth_pct": (20.0, "load growth per year (percent)"),
+    "years": (3, "planning horizon in years"),
+    "tier": (2, "HA/DR tier: 1 = active-active across sites, 2 = HA in one site plus DR copy, 3 = single instance"),
+    # per-unit assumptions
+    "rps_per_vcpu": (50.0, "requests per second one vCPU handles at target latency"),
+    "mem_gb_per_vcpu": (4.0, "memory per vCPU in GB"),
+    "min_vcpu_per_node": (2, "smallest node size in vCPU"),
+    "max_vcpu_per_node": (16, "largest node size in vCPU"),
+    "read_io": (1.0, "storage IOs per read request"),
+    "write_io": (3.0, "storage IOs per write request (data plus log)"),
+    "overhead_pct": (25.0, "storage overhead for indexes, logs, and free space (percent)"),
+    "range_low": (0.7, "low estimate as a multiple of the likely one"),
+    "range_high": (1.5, "high estimate as a multiple of the likely one"),
+}
+TIERS = {1: {"replicas": 3, "sites": 2, "nodes_min": 4, "note": "active-active across two sites, N+1 in each"},
+         2: {"replicas": 2, "sites": 2, "nodes_min": 2, "note": "HA pair in one site plus a DR copy"},
+         3: {"replicas": 1, "sites": 1, "nodes_min": 1, "note": "single instance, backups only"}}
+
+
+def parse(pairs, file):
+    vals = {k: v for k, (v, _) in INPUTS.items()}
+    given = {}
+    if file:
+        given.update(json.loads(pathlib.Path(file).read_text()))
+    for p in pairs:
+        if "=" not in p:
+            raise SystemExit(f"kit-sizing: expected key=value, got {p!r} (see --keys)")
+        k, v = p.split("=", 1)
+        given[k.strip()] = v.strip()
+    for k, v in given.items():
+        if k not in INPUTS:
+            raise SystemExit(f"kit-sizing: unknown input {k!r} (see --keys)")
+        vals[k] = type(INPUTS[k][0])(float(v)) if isinstance(INPUTS[k][0], int) else float(v)
+    if int(vals["tier"]) not in TIERS:
+        raise SystemExit("kit-sizing: tier must be 1, 2, or 3")
+    return vals, given
+
+
+def size(v):
+    t = TIERS[int(v["tier"])]
+    avg = v["rps"] or v["users"] * v["req_per_user_hour"] / 3600.0
+    if avg <= 0:
+        raise SystemExit("kit-sizing: give rps, or users and req_per_user_hour")
+    growth = (1 + v["growth_pct"] / 100.0) ** v["years"]
+    avg_end = avg * growth
+    peak = avg_end * v["peak_factor"]
+    design = peak * (1 + v["headroom"])
+    read, write = v["read_pct"] / 100.0, 1 - v["read_pct"] / 100.0
+
+    # compute: vCPU for one site's worth of design load, spread over nodes, times sites for tier 1
+    vcpu_site = max(v["min_vcpu_per_node"], math.ceil(design / v["rps_per_vcpu"]))
+    nodes_site = max(math.ceil(vcpu_site / v["max_vcpu_per_node"]), 2 if t["nodes_min"] > 1 else 1)
+    if t["nodes_min"] >= 4:
+        nodes_site += 1                                   # N+1 in each site for active-active
+    per_node = max(v["min_vcpu_per_node"], math.ceil(vcpu_site / max(1, nodes_site - (1 if t["nodes_min"] >= 4 else 0))))
+    sites_live = t["sites"] if int(v["tier"]) == 1 else 1
+    nodes = nodes_site * sites_live
+    vcpu = nodes * per_node
+    mem = vcpu * v["mem_gb_per_vcpu"]
+    dr_nodes = nodes_site if int(v["tier"]) == 2 else 0   # warm DR copy sized like the primary
+
+    # storage: data written per day at end-of-horizon load, kept for the retention period
+    writes_day = avg_end * write * 86400
+    gb_day = writes_day * v["write_kb"] / (1024 * 1024)
+    raw_gb = gb_day * v["retention_days"] * (1 + v["overhead_pct"] / 100.0)
+    replicated_gb = raw_gb * t["replicas"]
+    iops = design * (read * v["read_io"] + write * v["write_io"])
+
+    # network at design peak, and monthly egress at average end load
+    in_mbps = design * v["payload_in_kb"] * 8 / 1024
+    out_mbps = design * v["payload_out_kb"] * 8 / 1024
+    egress_gb_month = avg_end * v["payload_out_kb"] * 86400 * 30 / (1024 * 1024)
+
+    likely = {"avg_rps_now": avg, "avg_rps_end": avg_end, "peak_rps": peak, "design_rps": design,
+              "nodes": nodes, "vcpu_per_node": per_node, "vcpu_total": vcpu, "memory_gb_total": mem,
+              "dr_nodes": dr_nodes, "storage_gb_per_day": gb_day, "storage_raw_gb": raw_gb,
+              "storage_replicated_gb": replicated_gb, "iops": iops,
+              "ingress_mbps": in_mbps, "egress_mbps": out_mbps, "egress_gb_month": egress_gb_month}
+    exact = {"avg_rps_now", "avg_rps_end", "peak_rps", "design_rps", "nodes", "vcpu_per_node", "dr_nodes"}
+    whole = {"vcpu_total"}
+    rng = {}
+    for k, x in likely.items():
+        if k in exact:
+            rng[k] = {"low": x, "likely": x, "high": x}
+        elif k in whole:
+            rng[k] = {"low": max(1, math.ceil(x * v["range_low"])), "likely": x, "high": math.ceil(x * v["range_high"])}
+        else:
+            rng[k] = {"low": x * v["range_low"], "likely": x, "high": x * v["range_high"]}
+    return {"tier": t, "growth_multiplier": growth, "results": rng}
+
+
+def fmt(x):
+    if isinstance(x, int) or float(x).is_integer():
+        return f"{int(round(x)):,}"
+    return f"{x:,.0f}" if abs(x) >= 100 else f"{x:,.1f}" if abs(x) >= 1 else f"{x:,.3f}"
+
+
+ROWS = [("Compute", [("Average load now (rps)", "avg_rps_now"), ("Average load at horizon (rps)", "avg_rps_end"),
+                     ("Peak load (rps)", "peak_rps"), ("Design load with headroom (rps)", "design_rps"),
+                     ("Nodes (live)", "nodes"), ("vCPU per node", "vcpu_per_node"), ("vCPU total", "vcpu_total"),
+                     ("Memory total (GB)", "memory_gb_total"), ("DR nodes (warm copy)", "dr_nodes")]),
+        ("Storage", [("Data written per day (GB)", "storage_gb_per_day"), ("Raw, with overhead (GB)", "storage_raw_gb"),
+                     ("Replicated (GB)", "storage_replicated_gb"), ("IOPS at design load", "iops")]),
+        ("Network", [("Ingress at design load (Mbps)", "ingress_mbps"), ("Egress at design load (Mbps)", "egress_mbps"),
+                     ("Egress per month (GB)", "egress_gb_month")])]
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-sizing", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("pairs", nargs="*", help="key=value inputs")
+    ap.add_argument("--file")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--keys", action="store_true")
+    a = ap.parse_args(argv)
+    if a.keys:
+        for k, (d, m) in INPUTS.items():
+            print(f"{k:20} default {d!s:8} {m}")
+        return 0
+    vals, given = parse(a.pairs, a.file)
+    r = size(vals)
+    if a.json:
+        print(json.dumps({"inputs": vals, "given": sorted(given), **r}, indent=2))
+        return 0
+    print("# Rough-order sizing\n")
+    print("**Rough order only.** For early design and cost estimates, not capacity planning; test with "
+          "real load before committing.\n")
+    print(f"Tier {int(vals['tier'])}: {r['tier']['note']}. Horizon {int(vals['years'])} years at "
+          f"{vals['growth_pct']:g}% growth a year (x{r['growth_multiplier']:.2f}).\n")
+    for title, rows in ROWS:
+        print(f"## {title}\n")
+        print("| Measure | Low | Likely | High |")
+        print("|---|---|---|---|")
+        for label, key in rows:
+            x = r["results"][key]
+            print(f"| {label} | {fmt(x['low'])} | {fmt(x['likely'])} | {fmt(x['high'])} |")
+        print()
+    print("## Assumptions\n")
+    for k, (d, m) in INPUTS.items():
+        mark = "given" if k in given else "default"
+        print(f"- `{k}` = {vals[k]:g} ({mark}): {m}")
+    t = r["tier"]
+    print(f"- Tier {int(vals['tier'])}: {t['replicas']} storage replica(s), {t['sites']} site(s).")
+    print("\nOverride any assumption by name, for example `rps_per_vcpu=120`.")
+    print("\nHand-off: give these figures, with the tier and horizon, to the cost estimator for a ROM cost.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -26,7 +26,8 @@ the list in his next session, and you work on what he approves there.
    - A "Standby" list, numbered on from the main list.
    - A "Needs {{OWNER}}" list: up to five blocked items, each with the one thing that would
      unblock it.
-   - Last line: "Reply in a Kit session with: approve all, approve 1,3,4, or skip today."
+   - Last line: "Reply in a Kit session with: approve all, approve 1,3,4, or skip today. From your
+     phone, use the approval code added below when this list is delivered."
 6. Write a short version to briefs/worklist-text.txt for the notification: plain text, no
    markdown, under 400 characters. First line: "Kit work list · " plus the weekday and date. Then
    the number of items proposed and the total size, with no personal details. Last line: "Full

@@ -34,6 +34,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import kit_records as kr  # noqa: E402
 import kit_template  # noqa: E402
 import kit_transport as kt  # noqa: E402
+import kit_teamviews as tv  # noqa: E402
 
 HOME = pathlib.Path.home()
 KIT = kt.KIT
@@ -250,6 +251,23 @@ def handoffs(recs):
     return table(["Date", "Brief", "Where it stands", "Library path", "Project", "Kit"], rows, "No handoff briefs yet.")
 
 
+def team_load(recs):
+    """Open demands, IAs, GDSs, and POCs per Kit, from demand roll-ups (kit_teamviews.load_view)."""
+    th = tv.overload_threshold(KIT)
+    rows = []
+    for k in tv.load_view(recs, th, TODAY):
+        bk, du, ag = k["by_kind"], k["due"], k["aging"]
+        flag = "overloaded" if k["overloaded"] else ""
+        oldest = f'{ag["max_days"]} d' if ag["max_days"] is not None else "-"
+        rows.append(f'<tr data-kit="{e(k["kit_id"])}"><td>{e(k["kit_id"])}</td><td>{e(k["owner_role"])}</td>'
+                    f'<td>{k["open"]}</td><td>{bk["demand"]}</td><td>{bk["ia"]}</td><td>{bk["gds"]}</td>'
+                    f'<td>{bk["poc"]}</td><td class="{"late" if du["overdue"] else ""}">{du["overdue"]}</td>'
+                    f'<td>{du["7 days"]}</td><td>{du["30 days"]}</td><td>{oldest}</td>'
+                    f'<td class="{"late" if flag else ""}">{e(flag)}</td></tr>')
+    return table(["Kit", "Owner role", "Open", "Demands", "IAs", "GDSs", "POCs", "Overdue", "Due 7 d", "Due 30 d",
+                  "Oldest", f"Flag (at {th})"], rows, "No demand roll-ups shared yet.")
+
+
 def kits(recs, stale_days):
     by = {}
     for r in recs:
@@ -311,7 +329,7 @@ FALLBACK = """<!doctype html>
 <label for="f-kit">Kit</label> <select id="f-kit">$kit_options</select> Sources: $sources</p>
 <h2>Projects</h2>$projects<h2>Waiting on others</h2>$waiting<h2>Recent decisions</h2>$decisions
 <h2>Shared lessons</h2>$lessons<h2>Artifacts</h2>$artifacts<h2>Handoff briefs</h2>$handoffs
-<h2>Kits</h2>$kits<h2>Warnings ($warning_count)</h2>$warnings<script>$script</script>
+<h2>Team load</h2>$load<h2>Kits</h2>$kits<h2>Warnings ($warning_count)</h2>$warnings<script>$script</script>
 </body></html>
 """
 
@@ -329,7 +347,7 @@ def page(recs, warnings, sources, stale_days):
         "project_options": proj_opts, "kit_options": kit_opts, "sources": e(srcs),
         "projects": projects(recs), "waiting": waiting(recs), "decisions": decisions(recs),
         "lessons": lessons(recs), "artifacts": artifacts(recs), "handoffs": handoffs(recs),
-        "kits": kits(recs, stale_days), "warning_count": str(len(warnings)), "warnings": warn_list(warnings),
+        "kits": kits(recs, stale_days), "load": team_load(recs), "warning_count": str(len(warnings)), "warnings": warn_list(warnings),
         "script": JS,
     }
     tpl = kit_template.find("team-dashboard.html", TEMPLATE_ARG, "KIT_TEAM_DASHBOARD_TEMPLATE")

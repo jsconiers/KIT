@@ -12,6 +12,7 @@
 #   Kit Post-Open Read    weekdays (Mon-Fri)  09:45   -> run.ps1 open      (optional; see note)
 #   Kit Weekly Review     Monday              06:30   -> run.ps1 weekly    (before the brief)
 #   Kit Work List         Monday-Thursday     09:00   -> run.ps1 worklist
+#   Kit Backup            Daily               12:30   -> kit-backup
 #   Kit Reminders Sync    every 15 min + at logon     -> reminders_sync_win.py
 #   Kit Trade Journal     weekdays (Mon-Fri)  16:20   -> run.ps1 journal   (optional; see note)
 #
@@ -89,6 +90,15 @@ Register-KitTask -Name "Kit Work List" `
     -Description "Kit's proposed work list for the owner to approve (port of com.USER.kit.worklist)." `
     -Trigger (New-ScheduledTaskTrigger -Weekly -DaysOfWeek @("Monday", "Tuesday", "Wednesday", "Thursday") -At "9:00am") `
     -ActionArgs @("-ExecutionPolicy", "Bypass", "-NoProfile", "-WindowStyle", "Hidden", "-File", "`"$RunPs1`"", "worklist")
+
+# --- Kit Backup: daily 12:30 (port of com.USER.kit.backup) ----------------------------------
+# Runs kit-backup with the config's BACKUP_* settings. On Windows, encryption reads the passphrase
+# from the environment variable named in BACKUP_KEY_ENV (no Keychain).
+$backupPy = Join-Path $KitHome ".install\shared\bin\kit-backup"
+Register-KitTask -Name "Kit Backup" `
+    -Description "Kit's daily backup of its folder and history (port of com.USER.kit.backup)." `
+    -Trigger (New-ScheduledTaskTrigger -Daily -At "12:30pm") `
+    -ActionArgs @("-NoProfile", "-WindowStyle", "Hidden", "-Command", "`"python '$backupPy'`"")
 
 # --- Kit Reminders Sync: every 15 minutes + at logon -----------------------------------------
 # Mirrors com.USER.kit.sync (StartInterval 900, RunAtLoad true). A repeating "Once" trigger gives

@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""kit-sysprofile: a one-page profile of a system, from what the library already records.
+
+  kit-sysprofile NAME                    print the profile (nothing is written)
+  kit-sysprofile NAME --alias OTHER      also match another name the system goes by (repeatable)
+  kit-sysprofile NAME --write [--project P] [--force]
+                                         save it to <library>/artifacts/<P or name>/profile-<name>.md
+  kit-sysprofile NAME --json             the findings as JSON
+  kit-sysprofile NAME --root DIR         use a library root other than the one in library.md
+
+It reads the library's catalog and log, the published indexes, decision records and the knowledge
+base, the POC and lab registers, the radar (RADAR.md, the lifecycle summary, tech-debt.md,
+vendors.md), the demand register, and a configuration-management export (inventory.csv or
+inventory.json in the radar folder) when there is one. Every line it reports is cited by file and
+line, and sections with nothing found are listed as unknowns. Read-only unless --write; it never
+overwrites a profile without --force. The layout follows templates/system-profile-template.md.
+"""
+import argparse
+import csv
+import datetime as dt
+import json
+import pathlib
+import re
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import kit_arch as ka  # noqa: E402
+
+PER_SECTION = 10
+SECTIONS = [
+    ("Identity and inventory", ["{radar}/inventory.csv", "{radar}/inventory.json"]),
+    ("Documents", ["CATALOG.md", "published/*.md", "LOG.md"]),
+    ("Decisions", ["decisions/INDEX.md", "knowledge/decisions.md", "knowledge/precedents.md"]),
+    ("POCs", ["poc/INDEX.md"]),
+    ("Labs", ["labs/REGISTER.md"]),
+    ("Radar and lifecycle", ["{radar}/RADAR.md", "{radar}/lifecycle/summary.md"]),
+    ("Tech debt", ["{radar}/tech-debt.md"]),
+    ("Vendors", ["{radar}/vendors.md"]),
+    ("Demands", ["demands/REGISTER.md"]),
+]
+
+
+def radar_dir(root):
+    try:
+        import kit_radar
+        return kit_radar.radar_dir(root)
+    except Exception:  # noqa: BLE001
+        return root / "radar"
+
+
+def slug(s):
+    return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-") or "system"
+
+
+def matcher(names):
+    pats = [re.escape(n.strip()) for n in names if n.strip()]
+    return re.compile(r"(?<![A-Za-z0-9])(" + "|".join(pats) + r")(?![A-Za-z0-9])", re.I)
+
+
+def inventory_hits(path, rx, root):
+    out = []
+    if path.suffix == ".json":
+        try:
+            data = json.loads(path.read_text(errors="ignore"))
+        except (OSError, ValueError):
+            return out
+        rows = data if isinstance(data, list) else data.get("items", data.get("rows", []))
+        for i, r in enumerate(rows, 1):
+            text = ", ".join(f"{k}: {v}" for k, v in r.items() if v not in (None, ""))
+            if rx.search(text):
+                out.append((text, f"{ka.cite(path, i, root).rsplit(':', 1)[0]}:item {i}"))
+        return out
+    try:
+        with path.open(newline="", errors="ignore") as fh:
+            for i, r in enumerate(csv.DictReader(fh), 2):
+                text = ", ".join(f"{k}: {v}" for k, v in r.items() if v)
+                if rx.search(text):
+                    out.append((text, ka.cite(path, i, root)))
+    except OSError:
+        pass
+    return out
+
+
+def collect(root, names):
+    rx = matcher(names)
+    rd = radar_dir(root)
+    found, missing = {}, []
+    for title, pats in SECTIONS:
+        hits = []
+        for pat in pats:
+            pat = pat.replace("{radar}", str(rd.relative_to(root)) if rd.is_relative_to(root) else str(rd))
+            base = pathlib.Path(pat)
+            paths = sorted((root / base.parent).glob(base.name)) if "*" in pat else [root / pat]
+            if not paths or not any(p.exists() for p in paths):
+                missing.append(pat)
+                continue
+            for p in paths:
+                if not p.exists():
+                    continue
+                if p.suffix in (".csv", ".json"):
+                    hits += inventory_hits(p, rx, root)
+                    continue
+                for n, line in enumerate(ka.read_lines(p), 1):
+                    if rx.search(line) and not re.fullmatch(r"\s*\|[\s:|-]+\|\s*", line):
+                        hits.append((re.sub(r"\s+", " ", line.strip().strip("|")).strip()[:220], ka.cite(p, n, root)))
+        found[title] = hits
+    return found, missing
+
+
+def render(name, aliases, found, missing, root):
+    today = dt.date.today().strftime("%d-%b-%Y")
+    out = [f"# System profile: {name}", "",
+           "| Field | Value |", "|---|---|",
+           f"| System | {name} |",
+           f"| Also known as | {', '.join(aliases) or 'none given'} |",
+           f"| Generated | {today}, by kit-sysprofile from the library's records |",
+           f"| Library root | {root} |",
+           "| Classification | internal (raise it if any source is confidential) |", ""]
+    unknown = []
+    for title, _ in SECTIONS:
+        hits = found.get(title, [])
+        out.append(f"## {title}")
+        out.append("")
+        if not hits:
+            out.append("Nothing recorded.")
+            unknown.append(title)
+        for text, where in hits[:PER_SECTION]:
+            out.append(f"- {text} [{where}]")
+        if len(hits) > PER_SECTION:
+            out.append(f"- ... and {len(hits) - PER_SECTION} more")
+        out.append("")
+    out.append("## Unknowns")
+    out.append("")
+    out.append("- Sections with nothing recorded: " + (", ".join(unknown) if unknown else "none") + ".")
+    if missing:
+        out.append("- Sources not found in the library: " + ", ".join(sorted(set(missing))) + ".")
+    out.append("- Owner, architecture, interfaces, and data held aren't in the indexes; take them from the "
+               "documents above or ask the system's owner.")
+    out.append("")
+    out.append("Every line above is quoted from the cited file and line. It's a starting point; check the "
+               "documents before relying on it.")
+    return "\n".join(out) + "\n"
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-sysprofile", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("name")
+    ap.add_argument("--alias", action="append", default=[])
+    ap.add_argument("--write", action="store_true")
+    ap.add_argument("--project")
+    ap.add_argument("--force", action="store_true")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--root")
+    a = ap.parse_args(argv)
+    root = ka.expand(a.root) if a.root else ka.library_root()
+    if not root or not root.is_dir():
+        sys.exit("kit-sysprofile: no library root (set it in memory/context/library.md, or use --root)")
+    found, missing = collect(root, [a.name] + a.alias)
+    if a.json:
+        print(json.dumps({"system": a.name, "aliases": a.alias, "root": str(root),
+                          "sections": {k: [{"text": t, "source": w} for t, w in v] for k, v in found.items()},
+                          "missing_sources": sorted(set(missing))}, indent=2))
+        return 0
+    text = render(a.name, a.alias, found, missing, root)
+    if not a.write:
+        print(text, end="")
+        return 0
+    dest = root / "artifacts" / slug(a.project or a.name) / f"profile-{slug(a.name)}.md"
+    if dest.exists() and not a.force:
+        sys.exit(f"kit-sysprofile: {dest} exists; add --force to replace it")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(".tmp")
+    tmp.write_text(text)
+    tmp.replace(dest)
+    print(f"kit-sysprofile: wrote {dest}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

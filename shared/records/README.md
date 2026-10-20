@@ -132,3 +132,60 @@ kit-publish is idempotent: a second run with the same input changes no file. Rec
 longer produced (the source is gone, the lesson was untagged, the type was turned off) are
 reported as stale, and removed with `--prune`. A blocked record's earlier clean copy is kept until
 you fix the source.
+
+## Messages and trust between Kits
+
+A `message` record (schema `message.schema.json`) carries a subject, plain text (up to 4,000
+characters), a kind (info, request, or handoff-notice), its recipients' Kit ids, an expiry, and
+optionally the id it replies to. `kit-team send` writes it as a draft in the outbox's `drafts/`
+folder and shows it; it goes out only after the owner answers yes at the keyboard (`--yes` skips the
+question only when someone is at the keyboard; with no one there, sending is refused). The
+organization profile applies: classification limits, and confidential never leaves.
+
+Sending publishes the message in the sender's own records, so its manifest and hash chain cover it,
+and drops an identical copy into each recipient's inbox as `<sender>--message--<id>.json`. A
+recipient accepts it only when it passes its schema, its sender matches the file name and the
+record, the recipient is listed, and its bytes match the sender's manifest entry, with the sender's
+hash chain intact. Messages are information only: the receiving Kit shows them under an
+untrusted-content banner and never acts on them. Because they sit in the shared folder, every Kit
+that can read that folder can read them; don't send what the whole team mayn't see.
+
+`kit-team ack <name or message id>` writes the acknowledgement in the recipient's own `ack/`
+folder. Expired messages move to an archive table in the reader's cache; the sender's files are
+never deleted. Older inbox items in the `inbox_version` "0" wrapper are still read.
+
+**Hash chain.** Each manifest records every add, change, and removal of a record file as a chained
+entry (`seq`, `op`, `path`, `sha256`, `prev`, `hash`), plus the `head`. Readers recompute and replay
+it: an edited, removed, or reordered entry, or a file list that doesn't match the replay, breaks
+the chain, and that Kit's records and messages are skipped and reported. The cache remembers each
+Kit's last head, so a chain rebuilt from scratch (history replaced) is reported as well. Manifests
+from before chains are read with a warning and get a chain at their Kit's next publish.
+
+**Retention in the cache.** A `team_cache` rule in `retention.json` (`{"older_than_days": N}`) and
+kit-retention's legal holds decide what `kit-team purge` moves into the cache's holding table.
+Records in a held project are never purged, nothing is deleted, and a purged record that hasn't
+changed at its source isn't pulled back by the next sync.
+
+## Sharing through a SQL server (MySQL tested)
+
+With Transport `sql`, records, messages, and acknowledgements go to a PostgreSQL, SQL Server, or
+MySQL database instead of a folder (`kit_sql_transport.py`, DDL and grants in `shared/sql/`). These
+adapters have never been run against a real database; see `shared/sql/README.md`.
+
+## Team views: load and expertise
+
+`kit-team load` and the team dashboard's Team load panel roll up each Kit's `demand-rollup` records:
+open items per Kit (by owner role) by kind (demand, ia, gds, poc, other), by stage, by due window
+(overdue, 7 days, 30 days, later, no date), and aging, flagged as overloaded at the Overload threshold
+in sharing.md (default 8). Schema 1.1 of `demand-rollup` adds three optional item fields for this:
+`kind` (from a Kind or Type column in the register, else the number's prefix: IA-, GDS-, POC-, else
+demand), `stage` (a Stage or Phase column), and `opened` (an Opened, Created, or Raised date). Readers
+on 1.0 accept 1.1 records and ignore the new fields; kit-publish now stamps each record with its
+type's current schema version.
+
+`kit-team experts TOPIC` ranks Kits by evidence on a topic: decisions (weight 3), artifact pointers
+and shared lessons (2), handoff pointers (1.5), demand roll-up items (1), and status snapshots (0.5),
+each halved for every year of age, with the record ids cited. The optional `expertise` record (1.0)
+carries the owner's self-declared topics and levels from `memory/context/expertise.md`; it's listed
+beside the evidence, never counted as evidence, and published only when `expertise` is in Publish.
+There's no evidence of anything a Kit didn't share; the finder says so plainly.

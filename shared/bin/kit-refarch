@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+"""kit-refarch: suggest which published reference architectures fit a new demand, and why.
+
+  kit-refarch "demand text..."        rank reference architectures for the demand
+  kit-refarch --file demand.md        read the demand from a file (or pipe it on stdin)
+  kit-refarch --json ...              the same result as JSON
+  kit-refarch --limit 10 ...          how many candidates to show (default 5)
+  kit-refarch --root DIR ...          use a library root other than the one in library.md
+
+It pulls the demand's key terms (technologies and systems, other content words, and non-functional
+requirements such as availability or encryption), then scores every row of the reference-
+architecture index that standards.md's "Reference architectures" setting names (the published GDS
+index by default) on matched terms in the title and notes, matched phrases, and how recent the
+document is, marking superseded or withdrawn ones. It also lists related precedent from
+kit-precedent's sources. When nothing scores well it says so plainly. Read-only; it suggests, and
+people decide which reference architecture applies.
+"""
+import argparse
+import datetime as dt
+import json
+import pathlib
+import re
+import subprocess
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import kit_arch as ka  # noqa: E402
+
+GOOD = 4          # a candidate below this score isn't a good match
+DATE_FORMATS = ("%d-%b-%Y", "%Y-%m-%d", "%d %b %Y", "%Y/%m/%d")
+
+
+def parse_date(s):
+    for f in DATE_FORMATS:
+        try:
+            return dt.datetime.strptime((s or "").strip(), f).date()
+        except ValueError:
+            pass
+    return None
+
+
+def phrases(text):
+    words = ka.tokens(text)
+    return {f"{a} {b}" for a, b in zip(words, words[1:])}
+
+
+def score_row(row, terms, demand_phrases, today):
+    title = ka.cell(row, "title", "name", "document")
+    notes = ka.cell(row, "notes", "summary", "description", "covers")
+    fname = ka.cell(row, "file")
+    title_toks = set(ka.tokens(title + " " + fname.replace("@", " ")))
+    note_toks = set(ka.tokens(notes))
+    title_l = (title + " " + fname).lower()
+    why, score = [], 0
+    for t in terms["technologies"]:
+        if t in title_toks:
+            score += 4; why.append(f"technology '{t}' in the title")
+        elif len(t) >= 4 and t in title_l:
+            score += 2; why.append(f"'{t}' in the title (partial)")
+        elif t in note_toks:
+            score += 1; why.append(f"'{t}' in the notes")
+    for w in terms["words"]:
+        if w in terms["technologies"]:
+            continue
+        if w in title_toks:
+            score += 2; why.append(f"'{w}' in the title")
+        elif w in note_toks:
+            score += 1; why.append(f"'{w}' in the notes")
+    title_phr = phrases(title)
+    for p in sorted(demand_phrases & title_phr):
+        score += 3; why.append(f"phrase '{p}'")
+    status = "current"
+    if re.search(r"supersed|withdrawn|retired|obsolete|replaced by", notes, re.I):
+        score -= 5; status = "superseded or withdrawn (see notes)"
+    when = parse_date(ka.cell(row, "modified", "date", "published", "updated"))
+    if when and why:                       # recency only counts for a document that matched something
+        age = (today - when).days / 365.25
+        if age <= 2:
+            score += 1; why.append("published or updated in the last 2 years")
+        elif age > 5:
+            score -= 1; why.append(f"older than 5 years ({when:%d-%b-%Y})")
+    return score, why, status, when
+
+
+def related_precedent(terms, root, limit=5):
+    tool = pathlib.Path(__file__).resolve().parent / "kit-precedent"
+    words = (terms["technologies"] + [w for w in terms["words"] if w not in terms["technologies"]])[:6]
+    if not tool.exists() or not words:
+        return []
+    try:
+        cmd = [sys.executable, str(tool), "--json", "--limit", str(limit + 10)] + (["--root", str(root)] if root else [])
+        r = subprocess.run(cmd + words,
+                           capture_output=True, text=True, timeout=60)
+        hits = json.loads(r.stdout).get("hits", []) if r.returncode == 0 and r.stdout.strip() else []
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return []
+    out = []
+    for h in hits:
+        f = pathlib.Path(h.get("file", ""))
+        if "published" in f.parts:
+            continue
+        h["file"] = ka.cite(f, h.get("line"), root).rsplit(":", 1)[0]
+        out.append(h)
+    return out[:limit]
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-refarch", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("text", nargs="*")
+    ap.add_argument("--file")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--limit", type=int, default=5)
+    ap.add_argument("--root")
+    ap.add_argument("--today", help=argparse.SUPPRESS)
+    a = ap.parse_args(argv)
+    if a.file:
+        demand = pathlib.Path(a.file).read_text(errors="ignore")
+    elif a.text:
+        demand = " ".join(a.text)
+    elif not sys.stdin.isatty():
+        demand = sys.stdin.read()
+    else:
+        ap.error("give the demand as text, --file, or on stdin")
+    root = ka.expand(a.root) if a.root else ka.library_root()
+    today = dt.datetime.strptime(a.today, "%Y-%m-%d").date() if a.today else dt.date.today()
+    terms = ka.key_terms(demand)
+    dphr = phrases(demand)
+    sources = ka.refarch_sources(root)
+    # A capitalised word that names something in the index (a known system or product) is a
+    # technology even at the start of a sentence.
+    vocab = set()
+    for src in sources:
+        if src.exists():
+            for _, row in ka.table_rows(src):
+                vocab |= set(ka.tokens(ka.cell(row, "title", "name", "document")))
+    for w in sorted(set(__import__("re").findall(r"\b[A-Z][A-Za-z0-9+#-]{2,}", demand))):
+        lw = w.lower()
+        if lw in vocab and lw not in terms["technologies"] and lw not in ka.STOP:
+            terms["technologies"].append(lw)
+    missing = [str(s) for s in sources if not s.exists()]
+    cands = []
+    for src in sources:
+        if not src.exists():
+            continue
+        for n, row in ka.table_rows(src):
+            title = ka.cell(row, "title", "name", "document")
+            if not title:
+                continue
+            sc, why, status, when = score_row(row, terms, dphr, today)
+            if sc <= 0 and not why:
+                continue
+            cands.append({"score": sc, "title": title, "number": ka.cell(row, "number", "id"),
+                          "file": ka.cell(row, "file").strip("`"), "version": ka.cell(row, "version"),
+                          "date": when.strftime("%d-%b-%Y") if when else "", "status": status,
+                          "why": why, "source": ka.cite(src, n, root)})
+    cands.sort(key=lambda c: (-c["score"], c["title"].lower()))
+    good = [c for c in cands if c["score"] >= GOOD]
+    result = {"terms": terms, "sources": [str(s) for s in sources], "missing_sources": missing,
+              "matches": good[:a.limit], "weak": [c for c in cands if 0 < c["score"] < GOOD][:3],
+              "good_match": bool(good), "related_precedent": related_precedent(terms, root)}
+    if a.json:
+        print(json.dumps(result, indent=2))
+        return 0
+    print("# Reference architecture matches\n")
+    nfr = "; ".join(f"{k}: {', '.join(v)}" for k, v in terms["nfr"].items()) or "none stated"
+    print(f"Key terms: technologies and systems: {', '.join(terms['technologies']) or 'none found'}. "
+          f"Other words: {', '.join([w for w in terms['words'] if w not in terms['technologies']][:12]) or 'none'}. Non-functional: {nfr}.\n")
+    if missing:
+        print("Missing reference-architecture sources (set in standards.md): " + ", ".join(missing) + "\n")
+    if not good:
+        print("**No good match.** No reference architecture in the index scores well for this demand "
+              f"(best score {cands[0]['score'] if cands else 0}, good starts at {GOOD}). Treat it as new "
+              "design work, or ask the librarian whether a reference architecture covers it under another name.\n")
+        if result["weak"]:
+            print("Weak candidates, for a look only:")
+            for c in result["weak"]:
+                status = "" if c["status"] == "current" else f", {c['status']}"
+                print(f"- {c['title']} ({c['number'] or 'no number'}), score {c['score']}{status} [{c['source']}]")
+            print()
+    else:
+        print("| # | Reference architecture | Number | Score | Status | Why | Source |")
+        print("|---|---|---|---|---|---|---|")
+        for i, c in enumerate(result["matches"], 1):
+            why = "; ".join(c["why"][:5]) + ("; ..." if len(c["why"]) > 5 else "")
+            print(f"| {i} | {c['title']} | {c['number']} | {c['score']} | {c['status']} | {why} | {c['source']} |")
+        print()
+    rel = result["related_precedent"]
+    if rel:
+        print("Related precedent (kit-precedent):")
+        for h in rel:
+            print(f"- {h.get('text', '').strip()[:140]} [{h.get('file')}:{h.get('line')}]")
+        print()
+    print("These are suggestions from index titles and notes; confirm in the documents before citing one "
+          "as the reference architecture.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

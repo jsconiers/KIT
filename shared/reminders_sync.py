@@ -8,7 +8,8 @@ REMINDERS_BACKEND in .install/shared/morning/config picks the device:
            outlook_tasks_backend.py. Stays inside Microsoft 365 and reaches your phone through
            Microsoft To Do. Outlook must be running; the sync never launches it.
   apple    Apple Reminders (the JXA below). Syncs through iCloud, so keep work items out of it.
-Windows has its own entry point, platform/windows/reminders/reminders_sync_win.py (Outlook only).
+Windows has its own entry point, platform/windows/reminders/reminders_sync_win.py (Outlook only);
+both call the same sync in shared/kit_sync_core.py.
 
 Work and personal to-dos can live in different apps: TODOS_PERSONAL and TODOS_WORK (set with
 `kit-settings todos personal|work ...`) override REMINDERS_BACKEND for each side. Work to-dos are
@@ -17,12 +18,13 @@ different apps, each app gets its own "Kit Inbox" and "Kit: <your name>" lists; 
 work app's inbox comes in tagged [work].
 
 - "Kit Inbox": anything you add there becomes one of your to-dos at the next sync. Start it with
-  "Kit:" to give it to Kit instead.
+  "Kit:" to give it to Kit instead (it's also listed in briefs/requests.md), "ask:" for a question
+  for Kit (requests only, not a to-do), or "approve <code> ..." to approve a work list or queue
+  hygiene verdicts with the day's code (see shared/kit_inbox.py; low-tier actions only).
 - "Kit: <your name>": your open to-dos, with alerts at 9:00 on their due dates. Check one off on
   your phone or in Outlook and it's checked off in QUEUE.md.
 A launchd job runs this every 15 minutes. The first run asks for Automation permission.
 """
-import datetime as dt
 import importlib.machinery
 import importlib.util
 import json
@@ -38,10 +40,11 @@ CONFIG = KIT / ".install/shared/morning/config"
 MAC_REMINDERS = pathlib.Path(__file__).resolve().parent.parent / "platform/mac/reminders"
 INBOX = "Kit Inbox"
 
-loader = importlib.machinery.SourceFileLoader("todo", str(KIT / ".install/shared/bin/todo"))
-spec = importlib.util.spec_from_loader("todo", loader)
-todo = importlib.util.module_from_spec(spec)
-loader.exec_module(todo)
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import kit_sync_core as core  # noqa: E402  the sync itself, shared with Windows
+from kit_sync_core import WORK_TAG, is_work, kit_inbox  # noqa: E402,F401  (kept for callers)
+
+todo = core.load_todo(KIT)
 
 JS_COMMON = r"""
 function ensure(app, name) {
@@ -109,9 +112,7 @@ def jxa(script, *args):
 
 
 def log(msg):
-    LOG.parent.mkdir(parents=True, exist_ok=True)
-    with LOG.open("a") as f:
-        f.write(f"{dt.datetime.now():%Y-%m-%d %H:%M} {msg}\n")
+    core.log(LOG, msg)
 
 
 class AppleRemindersBackend:
@@ -123,13 +124,6 @@ class AppleRemindersBackend:
 
     def mirror(self, desired_items, list_name):
         return jxa(JS_MIRROR, json.dumps(desired_items), list_name)
-
-
-WORK_TAG = "[work]"
-
-
-def is_work(line):
-    return WORK_TAG in line.split("(added", 1)[0].lower()
 
 
 def setting(key):
@@ -164,55 +158,8 @@ def make_backend(name):
 
 
 def reconcile(backend, me, inbox_name, mirror_name, side=None):
-    """OS-independent reconciliation: inbox list -> QUEUE.md, then QUEUE.md -> mirror list, with
-    completions on the device checked off. Returns a list of what changed. side=None syncs every
-    item; "work" syncs only [work] items (and tags what arrives in the inbox), "personal" the rest."""
-    changed = []
-
-    def wanted(line):
-        return side is None or (is_work(line) == (side == "work"))
-
-    # 1) Inbox list -> QUEUE.md
-    for r in backend.pull_open(inbox_name):
-        title = (r.get("name") or "").strip()
-        if not title:
-            continue
-        section = me
-        if title.lower().startswith("kit:"):
-            section, title = "Kit", title[4:].strip()
-        due = dt.date.fromisoformat(r["due"]) if r.get("due") else None
-        lines = todo.QUEUE.read_text().splitlines()
-        h = todo.heads(lines)
-        if section not in h:
-            continue
-        found = todo.items(lines, section)
-        at = found[-1][1] if found else h[section] + 1
-        entry = (f"- [ ] **{title}**" + (f" {WORK_TAG}" if side == "work" else "")
-                 + (f": due {todo.fmt(due)}" if due else "")
-                 + f" (added {todo.fmt(todo.TODAY)}, from phone)")
-        lines.insert(at, entry)
-        todo.save(lines)
-        changed.append(f"added for {section}: {title}")
-
-    # 2) QUEUE.md -> "Kit: <name>" list; completions on the device come back as done.
-    lines = todo.QUEUE.read_text().splitlines()
-    want = []
-    for i, _ in todo.items(lines, me):
-        m = re.match(r"- \[ \] \*\*(.+?)\*\*(.*)", lines[i])
-        if not m or not wanted(lines[i]):
-            continue
-        due = re.search(r"due (\d{2}-\w{3}-\d{4})", m.group(2))
-        want.append({"title": m.group(1),
-                     "due": dt.datetime.strptime(due.group(1), "%d-%b-%Y").date().isoformat()
-                     if due else None})
-    for title in backend.mirror(want, mirror_name):
-        lines = todo.QUEUE.read_text().splitlines()
-        for n, (i, _) in enumerate(todo.items(lines, me), 1):
-            if f"**{title}**" in lines[i] and wanted(lines[i]):
-                todo.done(me, n)
-                changed.append(f"checked off on phone: {title}")
-                break
-    return changed
+    """The shared sync (shared/kit_sync_core.py) with this install's todo module and kit_inbox."""
+    return core.reconcile(todo, backend, me, inbox_name, mirror_name, side, inbox=kit_inbox)
 
 
 def main():

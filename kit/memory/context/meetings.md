@@ -11,3 +11,5 @@ What the meeting scribe uses. It reads this before every job, so keep it current
 - **Mail:** optional. The command that searches mail (read-only), and the one that creates drafts.
 - **Vendor meeting template:** `~/Claude/Agents/kit/templates/vendor-meeting-template.md`, an
   example to adapt. Point here to your team's own if it has one.
+- **Awaiting reply after:** 3 days. How long `kit-awaiting` waits before listing sent mail that asked
+  for something and got no reply (it needs kitmail's sent-items commands).

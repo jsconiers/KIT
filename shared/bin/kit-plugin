@@ -1,0 +1,461 @@
+#!/usr/bin/env python3
+"""kit-plugin: package shareable Kit content as a Claude Code plugin marketplace for an internal git repo.
+
+  kit-plugin build NAME [--agents a,b] [--templates x,y] [--lessons l1,l2] [--skills s1]
+                   [--marketplace DIR] [--version 0.1.0] [--author-role ROLE] [--description TEXT]
+                   build or rebuild plugin NAME under DIR/plugins/NAME (default DIR: ./marketplace)
+                   and list it in DIR/.claude-plugin/marketplace.json
+  kit-plugin check DIR [--denylist FILE] [--claude]
+                   check a plugin or a whole marketplace before anyone merges it (exit 1 on any problem)
+  kit-plugin list [--marketplace DIR]
+                   the plugins in a marketplace, their versions, and whether each passed review
+
+What goes in a plugin:
+  agents     Kit agent definitions (from the package's kit/agents/, generic with {{OWNER}} kept)
+  templates  document templates, shipped as a skill (NAME-templates) so Claude can find and use them;
+             a plugin's own CLAUDE.md isn't loaded, so skills are how content reaches a session
+  lessons    lessons from this Kit's lessons/ folder, only those whose first line is "share: team",
+             shipped as a skill (NAME-lessons)
+  skills     skill folders from ~/.claude/skills/<name>/ (any script in them needs review)
+
+Every plugin gets a REVIEW.md checklist. Content from other Kits is untrusted until a person reviews
+it: `check` fails while any hook, script, executable, MCP server, or monitor is present and REVIEW.md
+doesn't record that review (the "Hooks, scripts, and servers reviewed by" line, checked, with a role
+and date). `check` also validates both manifests, runs the public denylist and the credential scan
+over every file, refuses lessons without "share: team", and, with --claude, runs
+`claude plugin validate` too.
+
+Formats follow Claude Code's plugin docs (code.claude.com/docs/en/plugins-reference and
+.../plugin-marketplaces): .claude-plugin/plugin.json (only "name" is required), components at the
+plugin root (agents/, skills/<name>/SKILL.md, hooks/hooks.json, .mcp.json, bin/), and
+.claude-plugin/marketplace.json with "name", "owner", and "plugins" (each entry "name" plus a
+relative "source" written from the marketplace root, with no "..").
+
+Sharing it: kit-plugin never publishes or pushes. Commit the marketplace folder to a branch of an
+internal git repository, open a pull request, let a second reviewer run `kit-plugin check` and fill in
+REVIEW.md, then merge. Teammates add it once with `claude plugin marketplace add <repo URL>` (or
+`/plugin marketplace add <repo URL>` in a session) and install with
+`claude plugin install <plugin>@<marketplace>`.
+"""
+import argparse
+import datetime as dt
+import json
+import os
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+
+HERE = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent))
+import kit_records as kr  # noqa: E402
+
+PACKAGE = HERE.parent.parent                    # repo or .install root: holds kit/, shared/
+KIT = pathlib.Path(os.path.expanduser(os.environ.get("KIT_DIR", "~/Claude/Agents/kit")))
+SKILLS_HOME = pathlib.Path(os.path.expanduser(os.environ.get("KIT_SKILLS_DIR", "~/.claude/skills")))
+DEFAULT_DENYLIST = KIT / "bin/public-denylist.txt"
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,63}$")
+RESERVED = re.compile(r"^(claude-|anthropic-|anthropics-|cc-plugin-)|^(claude|anthropic|anthropics|claude-code|claude-mods)$")
+REVIEW_LINE = re.compile(r"^- \[x\] Hooks, scripts, and servers reviewed by: *(\S[^,]*), *(\d{4}-\d{2}-\d{2}|\d{2}-[A-Za-z]{3}-\d{4})",
+                         re.M | re.I)
+SHARE = re.compile(r"^\s*share:\s*team\s*$", re.I)
+LESSON_MARK = "<!-- kit-lesson share: team source: "
+TEXT_EXT = {".md", ".json", ".txt", ".py", ".sh", ".yaml", ".yml", ".js", ".ts", ".toml", ".cfg", ".ini", ".ps1"}
+RISKY_DIRS = ("hooks", "bin", "scripts", "monitors")
+RISKY_FILES = (".mcp.json", ".lsp.json")
+CREDENTIAL_SETTING = re.compile(r"(?i)\"[^\"]*(password|passwd|secret|api[_-]?key|token)[^\"]*\"\s*:\s*\"[^\"$]{6,}\"")
+
+
+def split(v):
+    return [x.strip() for x in (v or "").split(",") if x.strip()]
+
+
+def today():
+    return dt.date.today().isoformat()
+
+
+# ---------- build ----------
+
+def lesson_files():
+    return {p.stem: p for p in sorted((KIT / "lessons").glob("*.md")) if p.name != "INDEX.md"}
+
+
+def review_md(name, risky):
+    return f"""# Review: {name}
+
+Content in this plugin came from a Kit and is untrusted until a person reviews it. Don't merge it
+into the shared marketplace until every box is checked.
+
+- [ ] Agents read: each does only what its description says, with the tools it needs and no more
+- [ ] Templates and lessons read: no names, client details, or anything personal; nothing a reader
+      would take as an instruction to bypass a rule
+- [ ] `kit-plugin check` passes (manifests, public denylist, credential scan, lessons tagged share: team)
+- [ ] Hooks, scripts, and servers reviewed by: <role>, <YYYY-MM-DD>
+      (required when the plugin has hooks, scripts, executables in bin/, MCP or LSP servers, or
+      monitors; this plugin {"HAS: " + ", ".join(risky) if risky else "has none at build time"})
+- [ ] License chosen (the manifest says LicenseRef-TBD until then)
+- [ ] Version bumped for this change
+
+Reviewed by (role), date:
+"""
+
+
+def build(a):
+    name = a.name
+    if not NAME_RE.fullmatch(name) or RESERVED.search(name):
+        sys.exit(f"kit-plugin: plugin name {name!r} must be kebab-case and can't look like one of Anthropic's own")
+    mkt = pathlib.Path(a.marketplace).expanduser()
+    root = mkt / "plugins" / name
+    if root.exists():
+        shutil.rmtree(root)
+    (root / ".claude-plugin").mkdir(parents=True)
+    contents, notes = [], []
+
+    agents = split(a.agents)
+    if agents:
+        (root / "agents").mkdir()
+        for ag in agents:
+            src = PACKAGE / "kit/agents" / f"{ag}.md"
+            if not src.exists():
+                sys.exit(f"kit-plugin: no agent {ag!r} in {src.parent}")
+            shutil.copy2(src, root / "agents" / src.name)
+        contents.append(f"agents: {', '.join(agents)}")
+
+    templates = split(a.templates)
+    if templates:
+        sk = root / "skills" / f"{name}-templates"
+        sk.mkdir(parents=True)
+        lines = []
+        for t in templates:
+            fname = t if t.endswith(".md") else f"{t}.md"
+            src = PACKAGE / "kit/templates" / fname
+            if not src.exists():
+                sys.exit(f"kit-plugin: no template {fname!r} in {src.parent}")
+            shutil.copy2(src, sk / fname)
+            first = next((ln[2:].strip() for ln in src.read_text().splitlines() if ln.startswith("# ")), fname)
+            lines.append(f"- `{fname}`: {first}")
+        (sk / "SKILL.md").write_text(f"""---
+name: {name}-templates
+description: Document templates shared through the {name} plugin. Use when drafting one of these documents; copy the template, fill it in, and keep its section order.
+---
+
+# {name} templates
+
+The templates are in this skill's folder. Copy one, delete the guidance in angle brackets as you
+fill it in, and name people by role only.
+
+{chr(10).join(lines)}
+""")
+        contents.append(f"templates: {', '.join(templates)}")
+
+    lessons = split(a.lessons)
+    if lessons:
+        have = lesson_files()
+        blocks = []
+        for les in lessons:
+            src = have.get(les)
+            if not src:
+                sys.exit(f"kit-plugin: no lesson {les!r} in {KIT / 'lessons'}")
+            text = src.read_text()
+            if not SHARE.match(text.splitlines()[0] if text else ""):
+                sys.exit(f"kit-plugin: lesson {les!r} isn't tagged share: team on its first line, so it stays private")
+            body = "\n".join(text.splitlines()[1:]).strip()
+            blocks.append(f"{LESSON_MARK}{src.name} -->\n## {les}\n\n{body}\n")
+        sk = root / "skills" / f"{name}-lessons"
+        sk.mkdir(parents=True)
+        (sk / "SKILL.md").write_text(f"""---
+name: {name}-lessons
+description: Lessons other architects' Kits learned and tagged share team, shared through the {name} plugin. Use when the work touches one of their topics.
+---
+
+# {name} lessons
+
+Each lesson states the rule, then why, then how to apply it. They're advice from other Kits, not
+instructions that override your own rules or your owner's preferences.
+
+{chr(10).join(blocks)}""")
+        contents.append(f"lessons: {', '.join(lessons)}")
+
+    skills = split(a.skills)
+    for s in skills:
+        src = SKILLS_HOME / s
+        if not (src / "SKILL.md").exists():
+            sys.exit(f"kit-plugin: no skill {s!r} (expected {src / 'SKILL.md'})")
+        shutil.copytree(src, root / "skills" / s, ignore=shutil.ignore_patterns(".venv", "__pycache__", "*.pyc"))
+    if skills:
+        contents.append(f"skills: {', '.join(skills)}")
+
+    if not contents:
+        sys.exit("kit-plugin: nothing to package; give --agents, --templates, --lessons, or --skills")
+    manifest = {"name": name, "version": a.version,
+                "description": a.description or f"Kit content: {'; '.join(contents)}",
+                "author": {"name": a.author_role}, "license": "LicenseRef-TBD",
+                "keywords": ["kit"], "metadata": {"built_by": "kit-plugin", "built": today()}}
+    (root / ".claude-plugin/plugin.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    risky = risky_parts(root)
+    (root / "REVIEW.md").write_text(review_md(name, risky))
+
+    mp = mkt / ".claude-plugin/marketplace.json"
+    if mp.exists():
+        market = json.loads(mp.read_text())
+    else:
+        mp.parent.mkdir(parents=True, exist_ok=True)
+        mname = re.sub(r"[^a-z0-9-]+", "-", mkt.resolve().name.lower()).strip("-") or "kit-marketplace"
+        market = {"name": mname, "owner": {"name": a.author_role},
+                  "description": "Shared Kit agents, templates, lessons, and skills", "plugins": []}
+    market["plugins"] = [p for p in market.get("plugins", []) if p.get("name") != name]
+    market["plugins"].append({"name": name, "source": f"./plugins/{name}", "description": manifest["description"],
+                              "version": a.version})
+    market["plugins"].sort(key=lambda p: p["name"])
+    mp.write_text(json.dumps(market, indent=2) + "\n")
+    print(f"kit-plugin: built {root} ({'; '.join(contents)})")
+    if risky:
+        print(f"kit-plugin: needs a person's review before merging: {', '.join(risky)} (see REVIEW.md)")
+    print(f"kit-plugin: next: kit-plugin check {mkt}, fill in {root / 'REVIEW.md'}, then a pull request")
+    for n in notes:
+        print("  note: " + n)
+    return 0
+
+
+# ---------- check ----------
+
+def risky_parts(root):
+    found = []
+    for d in RISKY_DIRS:
+        if (root / d).exists() and any(p.is_file() for p in (root / d).rglob("*")):
+            found.append(f"{d}/")
+    for f in RISKY_FILES:
+        if (root / f).exists():
+            found.append(f)
+    try:
+        m = json.loads((root / ".claude-plugin/plugin.json").read_text())
+        for k in ("hooks", "mcpServers", "lspServers"):
+            if m.get(k):
+                found.append(f'plugin.json "{k}"')
+        if (m.get("experimental") or {}).get("monitors"):
+            found.append('plugin.json "experimental.monitors"')
+    except (OSError, ValueError):
+        pass
+    for p in root.rglob("*"):
+        if p.is_file() and (p.suffix in (".sh", ".py", ".js", ".ps1") or os.access(p, os.X_OK)) \
+                and not any(str(p.relative_to(root)).startswith(d + "/") for d in RISKY_DIRS):
+            found.append(str(p.relative_to(root)))
+    return sorted(set(found))
+
+
+def load_denylist(path):
+    pats = []
+    if not path or not path.exists():
+        return None
+    for ln in path.read_text().splitlines():
+        ln = ln.strip()
+        if not ln or ln.startswith("#"):
+            continue
+        cs = ln.startswith("cs:")
+        pats.append(re.compile(ln[3:] if cs else ln, 0 if cs else re.I))
+    return pats
+
+
+def scan_files(root, deny):
+    problems = []
+    for p in sorted(root.rglob("*")):
+        if not p.is_file() or (p.suffix not in TEXT_EXT and p.name not in RISKY_FILES):
+            continue
+        rel = p.relative_to(root)
+        try:
+            text = p.read_text(errors="ignore")
+        except OSError:
+            continue
+        for n, ln in enumerate(text.splitlines(), 1):
+            for pat in deny or []:
+                if pat.search(ln):
+                    problems.append(f"{rel}:{n}: matches the public denylist ({pat.pattern})")
+            for what in kr.secret_hits(ln):
+                if what != "account or card number":
+                    problems.append(f"{rel}:{n}: looks like a {what}")
+            if p.suffix == ".json" and CREDENTIAL_SETTING.search(ln):
+                problems.append(f"{rel}:{n}: a credential setting with a literal value")
+            if re.search(r"/Users/[A-Za-z0-9._-]+|[A-Za-z]:\\Users\\", ln):
+                problems.append(f"{rel}:{n}: a home-directory path")
+    return problems
+
+
+def check_manifest(root):
+    problems = []
+    mf = root / ".claude-plugin/plugin.json"
+    if not mf.exists():
+        return [f"{root.name}: no .claude-plugin/plugin.json"]
+    try:
+        m = json.loads(mf.read_text())
+    except ValueError as ex:
+        return [f"{root.name}: plugin.json isn't valid JSON ({ex})"]
+    name = m.get("name", "")
+    if not name:
+        problems.append(f"{root.name}: plugin.json has no name")
+    elif not NAME_RE.fullmatch(name) or RESERVED.search(name):
+        problems.append(f"{root.name}: plugin name {name!r} isn't kebab-case or looks like one of Anthropic's own")
+    for k in ("version", "description", "author"):
+        if not m.get(k):
+            problems.append(f"{root.name}: plugin.json has no {k}")
+    for k in ("skills", "agents", "commands", "outputStyles", "hooks", "mcpServers", "lspServers"):
+        v = m.get(k)
+        for path in ([v] if isinstance(v, str) else v if isinstance(v, list) else []):
+            if not isinstance(path, str):
+                continue
+            if ".." in path:
+                problems.append(f"{root.name}: {k} path {path!r} contains '..'")
+            elif not (path.startswith("./") or path == "."):
+                problems.append(f"{root.name}: {k} path {path!r} must start with ./")
+            elif not (root / path).exists():
+                problems.append(f"{root.name}: {k} path {path!r} not found")
+    for ag in sorted((root / "agents").glob("*.md")) if (root / "agents").is_dir() else []:
+        head = ag.read_text().split("---")
+        if len(head) < 3 or "name:" not in head[1] or "description:" not in head[1]:
+            problems.append(f"{root.name}: agent {ag.name} has no name and description frontmatter")
+    if (root / "CLAUDE.md").exists():
+        problems.append(f"{root.name}: a plugin's CLAUDE.md isn't loaded; put instructions in a skill")
+    return problems
+
+
+def check_lessons(root):
+    problems = []
+    for sk in root.glob("skills/*/SKILL.md"):
+        text = sk.read_text()
+        if not sk.parent.name.endswith("-lessons"):
+            continue
+        blocks = re.split(r"(?m)^## ", text)[1:]
+        marks = text.count(LESSON_MARK)
+        if len(blocks) != marks:
+            problems.append(f"{sk.parent.name}: {len(blocks)} lesson(s) but {marks} carry the share: team mark; "
+                            "every lesson must come from a lesson tagged share: team")
+        for src in re.findall(re.escape(LESSON_MARK) + r"(\S+) -->", text):
+            p = KIT / "lessons" / src
+            if p.exists() and not SHARE.match(p.read_text().splitlines()[0] if p.read_text() else ""):
+                problems.append(f"{sk.parent.name}: lesson {src} is no longer tagged share: team in lessons/")
+    return problems
+
+
+def check_review(root, risky):
+    if not risky:
+        return []
+    rv = root / "REVIEW.md"
+    if not rv.exists() or not REVIEW_LINE.search(rv.read_text()):
+        return [f"{root.name}: has {', '.join(risky)}, which need a person's review: check the 'Hooks, scripts, and "
+                "servers reviewed by: <role>, <date>' line in REVIEW.md once someone has read them"]
+    return []
+
+
+def check_marketplace(mkt):
+    problems = []
+    mp = mkt / ".claude-plugin/marketplace.json"
+    try:
+        m = json.loads(mp.read_text())
+    except (OSError, ValueError) as ex:
+        return [f"marketplace.json can't be read ({ex})"], []
+    for k in ("name", "owner", "plugins"):
+        if not m.get(k):
+            problems.append(f"marketplace.json has no {k}")
+    if m.get("owner") and not (m["owner"] or {}).get("name"):
+        problems.append("marketplace.json owner has no name")
+    roots = []
+    for i, p in enumerate(m.get("plugins") or []):
+        src = p.get("source")
+        if not p.get("name") or not src:
+            problems.append(f"plugins[{i}] needs a name and a source")
+            continue
+        if isinstance(src, str):
+            if ".." in src:
+                problems.append(f"plugins[{i}] source {src!r} contains '..'")
+                continue
+            r = (mkt / src).resolve()
+            if not r.is_dir():
+                problems.append(f"plugins[{i}] source {src!r} doesn't exist")
+                continue
+            try:
+                mname = json.loads((r / ".claude-plugin/plugin.json").read_text()).get("name")
+            except (OSError, ValueError):
+                mname = None
+            if mname and mname != p["name"]:
+                problems.append(f"plugins[{i}] entry name {p['name']!r} differs from its manifest name {mname!r}")
+            roots.append(r)
+    return problems, roots
+
+
+def check(a):
+    target = pathlib.Path(a.dir).expanduser()
+    deny_path = pathlib.Path(a.denylist).expanduser() if a.denylist else \
+        pathlib.Path(os.environ["KIT_PUBLIC_DENYLIST"]) if os.environ.get("KIT_PUBLIC_DENYLIST") else DEFAULT_DENYLIST
+    deny = load_denylist(deny_path)
+    problems, notes = [], []
+    if deny is None:
+        notes.append(f"no public denylist at {deny_path}: only the credential scan ran (give --denylist FILE)")
+    if (target / ".claude-plugin/marketplace.json").exists():
+        mprobs, roots = check_marketplace(target)
+        problems += mprobs
+        problems += [f"marketplace: {x}" for x in scan_files(target / ".claude-plugin", deny)]
+    elif (target / ".claude-plugin/plugin.json").exists():
+        roots = [target]
+    else:
+        sys.exit(f"kit-plugin: {target} is neither a plugin nor a marketplace (no .claude-plugin/)")
+    for r in roots:
+        risky = risky_parts(r)
+        problems += check_manifest(r)
+        problems += [f"{r.name}: {x}" for x in scan_files(r, deny)]
+        problems += check_lessons(r)
+        problems += check_review(r, risky)
+        if risky:
+            notes.append(f"{r.name}: has {', '.join(risky)}; never install it unreviewed")
+    if a.claude and shutil.which("claude"):
+        res = subprocess.run(["claude", "plugin", "validate", str(target)], capture_output=True, text=True)
+        if res.returncode != 0:
+            problems.append("claude plugin validate: " + (res.stdout + res.stderr).strip().splitlines()[-1])
+    for n in notes:
+        print("  note: " + n)
+    for p in problems:
+        print("  FAIL " + p)
+    print(f"kit-plugin: {len(roots)} plugin(s) checked, {len(problems)} problem(s)"
+          + ("" if problems else "; ready for a person's review and a pull request"))
+    return 1 if problems else 0
+
+
+def listing(a):
+    mkt = pathlib.Path(a.marketplace).expanduser()
+    try:
+        m = json.loads((mkt / ".claude-plugin/marketplace.json").read_text())
+    except (OSError, ValueError):
+        sys.exit(f"kit-plugin: no marketplace at {mkt}")
+    print(f"Marketplace {m.get('name')} (owner: {(m.get('owner') or {}).get('name', '?')}) at {mkt}")
+    for p in m.get("plugins", []):
+        r = mkt / p["source"] if isinstance(p.get("source"), str) else None
+        risky = risky_parts(r) if r and r.is_dir() else []
+        rv = (r / "REVIEW.md").read_text() if r and (r / "REVIEW.md").exists() else ""
+        state = "reviewed" if REVIEW_LINE.search(rv) else ("needs review" if risky else "no hooks or scripts")
+        print(f"  {p['name']:<28} {p.get('version', '?'):<8} {state:<20} {p.get('description', '')[:60]}")
+    print(f"kit-plugin: {len(m.get('plugins', []))} plugin(s). Install: claude plugin install <name>@{m.get('name')}")
+    return 0
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-plugin", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    b = sub.add_parser("build")
+    b.add_argument("name")
+    for opt in ("--agents", "--templates", "--lessons", "--skills", "--description"):
+        b.add_argument(opt)
+    b.add_argument("--marketplace", default="./marketplace")
+    b.add_argument("--version", default="0.1.0")
+    b.add_argument("--author-role", default="Kit owner")
+    c = sub.add_parser("check")
+    c.add_argument("dir")
+    c.add_argument("--denylist")
+    c.add_argument("--claude", action="store_true", help="also run claude plugin validate")
+    li = sub.add_parser("list")
+    li.add_argument("--marketplace", default="./marketplace")
+    a = ap.parse_args(argv)
+    return {"build": build, "check": check, "list": listing}[a.cmd](a)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

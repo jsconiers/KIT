@@ -63,7 +63,9 @@ classic desktop Outlook before relying on them. Each file carries an "UNTESTED" 
 **Known follow-ups:**
 - Mail/calendar/reminders require **classic desktop Outlook** (COM); the new Outlook and web
   clients don't expose it.
-- The reconciliation logic is currently duplicated in `reminders/reminders_sync_win.py`.
-  Planned refactor: extract `reconcile(todo, backend, …)` into `shared/reminders_sync.py` with a
-  `MacRemindersBackend`, so Mac (JXA) and Windows (Outlook Tasks) share one implementation.
+- The to-do sync is shared: `shared/kit_sync_core.py` holds `reconcile()`, Kit Inbox routing
+  ("kit:", "ask:", "approve <code>"), and the work/personal split; `shared/reminders_sync.py` (Mac)
+  and `reminders/reminders_sync_win.py` (Windows, Outlook Tasks over COM) only supply the device
+  backend. `tests/test_sync_core.sh` runs the Windows backend over a fake COM layer; it still needs a
+  run against real Outlook on Windows.
 - Everything needs an end-to-end run on Windows; recurrence-delete off-by-one is the top risk.

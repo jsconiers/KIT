@@ -2,7 +2,7 @@
 <!-- Kit team dashboard template (default). Copy it to ~/Claude/Agents/kit/templates/team-dashboard.html
      to change the look; your copy wins. Placeholders: $$now_iso $$now_text $$record_count $$kit_count
      $$banner $$project_options $$kit_options $$sources $$projects $$waiting $$decisions $$lessons
-     $$artifacts $$handoffs $$kits $$warning_count $$warnings $$script (keep $$script: it runs the
+     $$artifacts $$handoffs $$load $$kits $$warning_count $$warnings $$script (keep $$script: it runs the
      filters). Keep the Content-Security-Policy line and keep it self-contained. -->
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -83,6 +83,7 @@ $banner
 <section class="panel" aria-labelledby="h-art"><h2 id="h-art">Artifacts</h2>$artifacts</section>
 <section class="panel" aria-labelledby="h-hand"><h2 id="h-hand">Handoff briefs</h2>$handoffs</section>
 <div class="two">
+<section class="panel" aria-labelledby="h-load"><h2 id="h-load">Team load</h2>$load</section>
 <section class="panel" aria-labelledby="h-kits"><h2 id="h-kits">Kits</h2>$kits</section>
 <section class="panel" aria-labelledby="h-warn"><h2 id="h-warn">Warnings <span class="added">$warning_count</span></h2>$warnings</section>
 </div>

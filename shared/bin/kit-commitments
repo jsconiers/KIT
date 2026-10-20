@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""kit-commitments: propose to-dos from promises you made in your own sent mail or meeting notes.
+
+  kit-commitments scan [--source mail|minutes] [--role ROLE] [--file FILE]
+                                    read messages (kitmail `read` output, or text) from FILE or
+                                    stdin, and add the commitments found as proposals
+  kit-commitments list [--all]      proposals not yet confirmed or dropped (--all: every row)
+  kit-commitments mark C3 confirmed|dropped
+                                    record your decision (Kit adds confirmed ones with `todo work`)
+
+Proposals live in ~/Claude/Agents/kit/briefs/pending-commitments.md. Nothing is ever added to the
+queue by this command: you confirm each one with Kit in a session. Counterparts are recorded by
+role, never by name, and addresses are masked. Messages are read only from what you pass in;
+this command never opens your mailbox itself.
+"""
+import argparse
+import datetime as dt
+import pathlib
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import kit_commitments as kc  # noqa: E402
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-commitments", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd")
+    s = sub.add_parser("scan")
+    s.add_argument("--source", default="mail", choices=("mail", "minutes"))
+    s.add_argument("--role", default="", help="the counterpart's role, for example 'project manager'")
+    s.add_argument("--file")
+    l = sub.add_parser("list")
+    l.add_argument("--all", action="store_true")
+    m = sub.add_parser("mark")
+    m.add_argument("id")
+    m.add_argument("status", choices=("confirmed", "dropped", "proposed"))
+    a = ap.parse_args(argv)
+
+    if a.cmd == "scan":
+        raw = pathlib.Path(a.file).read_text(encoding="utf-8", errors="replace") if a.file else sys.stdin.read()
+        found = []
+        for head, body in kc.split_messages(raw):
+            base = kc._msg_date(head) or dt.date.today()
+            role = a.role or head.get("role", "")
+            found += kc.find(body, base=base, source=kc.source_label("sent mail" if a.source == "mail" else "minutes", head),
+                             role=role)
+        added, skipped = kc.add_proposals(found)
+        print(f"kit-commitments: {len(found)} found, {added} proposed, {skipped} already in the queue or proposed")
+        return 0
+    if a.cmd == "list":
+        rows = [r for r in kc.read_pending() if a.all or r["status"] == "proposed"]
+        for r in rows:
+            print(f"{r['id']:>4}  {r['status']:<9}  {r['due']:<11}  {r['action']}  ({r['role']})")
+        print(f"kit-commitments: {len(rows)} shown")
+        return 0
+    if a.cmd == "mark":
+        try:
+            r = kc.mark(a.id, a.status)
+        except KeyError:
+            print(f"kit-commitments: no {a.id}", file=sys.stderr)
+            return 1
+        print(f"kit-commitments: {r['id']} {r['status']}: {r['action']}")
+        if a.status == "confirmed":
+            print(f"  To add it: todo work {r['action']}" + ("" if r["due"] == "no date" else f" (due {r['due']})"))
+        return 0
+    ap.print_help()
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

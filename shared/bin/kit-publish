@@ -17,7 +17,7 @@ decision records (ADRs), the knowledge base's decisions, the demand register, st
 handoff briefs. It never reads memory/personal/, and it blocks any record holding credential-shaped text.
 
 Records are validated against shared/records/schema/ and written one per file through
-shared/kit_transport.py: to <outbox>/<kit id>/<type>/<local id>.json, or, when Transport is folder
+shared/kit_transport.py (a SQL server when Transport is sql: UNTESTED): to <outbox>/<kit id>/<type>/<local id>.json, or, when Transport is folder
 and Shared root is set in sharing.md, to <shared root>/kits/<kit id>/records/<type>/<local id>.json
 with a manifest of hashes beside them. Unchanged records aren't rewritten, so a second run
 with the same input changes nothing. Exits 1 when a record was blocked or failed validation.
@@ -430,6 +430,21 @@ def from_catalog(lib):
         yield "artifact-pointer", acc.lower(), proj, lib_source(f, lib, f"#{acc}"), body, {}
 
 
+KINDS = {"demand": "demand", "ia": "ia", "impact assessment": "ia", "gds": "gds",
+         "design": "gds", "general design specification": "gds", "poc": "poc", "proof of concept": "poc"}
+
+
+def item_kind(text, number):
+    """demand, ia, gds, poc, or other: from a kind/type column, else the number's prefix."""
+    t = (text or "").strip().lower()
+    if t in KINDS:
+        return KINDS[t]
+    if t:
+        return "other"
+    m = re.match(r"\s*(ia|gds|poc)\b|\s*(ia|gds|poc)[-_ ]?\d", (number or "").lower())
+    return (m.group(1) or m.group(2)) if m else "demand"
+
+
 def from_register(lib, reg):
     groups = {}
     for row in table(read(reg), "status"):
@@ -439,9 +454,16 @@ def from_register(lib, reg):
         status = clean(col(row, "status"), 40)
         g = groups.setdefault(slug(col(row, "project")) or None, {"items": [], "checked": []})
         g["checked"].append(iso_date(col(row, "checked")) or "")
-        g["items"].append({"number": clean(num, 40), "title": clean(col(row, "title"), 160), "status": status,
-                           "role": clean(col(row, "role"), 60), "due": iso_date(col(row, "due", "date")),
-                           "open": status.lower() not in CLOSED})
+        item = {"number": clean(num, 40), "title": clean(col(row, "title"), 160), "status": status,
+                "role": clean(col(row, "role"), 60), "due": iso_date(col(row, "due", "date")),
+                "open": status.lower() not in CLOSED, "kind": item_kind(col(row, "kind", "type"), num)}
+        stage = clean(col(row, "stage", "phase"), 40)
+        if stage:
+            item["stage"] = stage
+        opened = iso_date(col(row, "opened", "created", "raised"))
+        if opened:
+            item["opened"] = opened
+        g["items"].append(item)
     for proj, g in groups.items():
         items = sorted(g["items"], key=lambda i: (not i["open"], i["due"] is None, i["due"] or "", i["number"]))
         by = {}
@@ -450,6 +472,24 @@ def from_register(lib, reg):
         body = {"as_of": max(g["checked"]) or None, "total": len(items), "open": sum(i["open"] for i in items),
                 "by_status": by, "items": items[:100]}
         yield "demand-rollup", proj or "_default", proj, lib_source(reg, lib), body, {}
+
+
+def from_expertise(kit, cfg):
+    """One expertise record from memory/context/expertise.md (Topic | Level | Evidence), only when the
+    owner turned on expertise in Publish. Levels: aware, working, expert."""
+    path = kit / "memory/context/expertise.md"
+    if not path.exists():
+        return
+    topics = []
+    for row in table(read(path), "level"):
+        topic, level = clean(col(row, "topic"), 80), col(row, "level").strip().lower()
+        if not topic or topic.lower() in ("not set", "example") or level not in ("aware", "working", "expert"):
+            continue
+        ev = [clean(x, 200) for x in re.split(r"[;,]\s*", col(row, "evidence")) if x.strip()][:10]
+        topics.append({"topic": topic, "level": level, **({"evidence": ev} if ev else {})})
+    if topics:
+        body = {"as_of": dt.date.today().isoformat(), "topics": topics[:30]}
+        yield "expertise", "profile", cfg["default_project"], "kit:memory/context/expertise.md", body, {}
 
 
 def from_handoffs(lib):
@@ -500,6 +540,8 @@ def collect(kit, cfg, types, notes):
         yield from from_register(lib, reg)
     if lib and "handoff-pointer" in types:
         yield from from_handoffs(lib)
+    if "expertise" in types:
+        yield from from_expertise(kit, cfg)
 
 
 def classify(cfg, project, tags):
@@ -558,6 +600,8 @@ def main(argv):
         transport = kt.for_publishing(kit, kit_id=kid, outbox=out, shared_root=a.shared_root)
     except kt.TransportError as ex:
         sys.exit(f"kit-publish: {ex}")
+    if getattr(transport, "kind", "folder") == "sql":
+        return publish_sql(a, kit, cfg, types, kid, role, transport)
     outbox = transport.root
     home = transport.records_dir(kid)
     schemas = kr.load_schemas()
@@ -573,7 +617,7 @@ def main(argv):
             counts["skipped"] += 1
             continue
         local = slug(local, 96) or "item"
-        rec = {"schema": typ, "schema_version": VERSION, "id": f"{kid}:{typ}:{local}", "kit_id": kid,
+        rec = {"schema": typ, "schema_version": kr.current_version(schemas, typ, VERSION), "id": f"{kid}:{typ}:{local}", "kit_id": kid,
                "owner_role": role, "project": project, "created": stamp, "updated": stamp,
                "classification": classify(cfg, project, tags), "source": source, "body": body}
         path = home / typ / f"{local}.json"     # the same place transport.publish writes
@@ -622,6 +666,72 @@ def main(argv):
           f"{counts['unchanged']} unchanged, {counts['blocked']} blocked, {counts['invalid']} invalid, "
           f"{counts['skipped']} excluded by project, {len(stale)} "
           f"{('would prune' if a.dry_run else 'pruned') if a.prune else 'stale'}")
+    return 1 if counts["blocked"] or counts["invalid"] else 0
+
+
+def publish_sql(a, kit, cfg, types, kid, role, transport):
+    """Publish to a SQL server (Transport: sql). UNTESTED: never run against a real database."""
+    schemas = kr.load_schemas()
+    notes = [] if cfg["found"] else ["no sharing.md: using defaults (publish nothing)"]
+    counts = {"new": 0, "changed": 0, "unchanged": 0, "blocked": 0, "invalid": 0, "skipped": 0}
+    produced, stamp = set(), kr.now_iso()
+    try:
+        existing = {}
+        for rec, info in transport.scan(schemas, kit_id=kid)[0]:
+            existing[info["ref"]] = rec
+        for typ, local, proj, source, body, tags in collect(kit, cfg, types, notes):
+            project = proj or cfg["default_project"]
+            if not wanted(cfg, project):
+                counts["skipped"] += 1
+                continue
+            local = slug(local, 96) or "item"
+            ref = f"{kid}/{typ}/{local}"
+            rec = {"schema": typ, "schema_version": kr.current_version(schemas, typ, VERSION), "id": f"{kid}:{typ}:{local}", "kit_id": kid,
+                   "owner_role": role, "project": project, "created": stamp, "updated": stamp,
+                   "classification": classify(cfg, project, tags), "source": source, "body": body}
+            hits = kr.secret_hits("\n".join(strings(rec)))
+            if hits:
+                counts["blocked"] += 1
+                produced.add(ref)
+                print(f"  blocked  {rec['id']}: looks like a {', '.join(hits)} (in {source})")
+                continue
+            problems = kr.validate(rec, schemas)
+            if problems:
+                counts["invalid"] += 1
+                print(f"  invalid  {rec['id']}: {'; '.join(problems[:3])}")
+                continue
+            produced.add(ref)
+            old = existing.get(ref)
+            if old and core(old) == core(rec):
+                counts["unchanged"] += 1
+                continue
+            counts["changed" if old else "new"] += 1
+            if old and old.get("created"):
+                rec["created"] = old["created"]
+            print(f"  {'changed' if old else 'new':<8} {rec['id']}  [{project}]")
+            if not a.dry_run:
+                try:
+                    transport.publish(rec)
+                except kt.TransportError as ex:
+                    counts["blocked"] += 1
+                    print(f"  blocked  {rec['id']}: {ex}")
+        stale = sorted(r for r in transport.own_refs() if r not in produced and "/message/" not in r)
+        for r in stale:
+            print(f"  {'pruned' if a.prune and not a.dry_run else 'stale':<8} {r}")
+            if a.prune and not a.dry_run:
+                transport.remove_ref(r)
+        if not a.dry_run:
+            transport.finish()
+    except kt.TransportError as ex:
+        sys.exit(f"kit-publish: {ex}")
+    finally:
+        transport.close()
+    for n in notes:
+        print(f"  note     {n}")
+    print(f"kit-publish ({'dry run' if a.dry_run else transport.describe()}): {counts['new']} new, "
+          f"{counts['changed']} changed, {counts['unchanged']} unchanged, {counts['blocked']} blocked, "
+          f"{counts['invalid']} invalid, {counts['skipped']} excluded by project, {len(stale)} "
+          f"{'pruned' if a.prune else 'stale'}")
     return 1 if counts["blocked"] or counts["invalid"] else 0
 
 

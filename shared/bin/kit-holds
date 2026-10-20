@@ -1,0 +1,447 @@
+#!/usr/bin/env python3
+"""kit-holds: draft calendar holds as .ics files you open and accept. Kit never writes to the calendar.
+
+  kit-holds propose --block "YYYY-MM-DD HH:MM 90m Title"   one hold (repeatable)
+  kit-holds propose --from-queue                           prep time before your [work] due dates
+  kit-holds propose --from-plan FILE                       lines "YYYY-MM-DD HH:MM 60m Title" in a
+                                                           plan (study blocks, focus time)
+  kit-holds propose --meeting-prep 30m                     prep time before today's meetings
+  kit-holds list                                           the newest set of draft holds
+  kit-holds open N|all                                     open draft N (or all) in your calendar
+                                                           app to review and save
+  kit-holds clear --older-than 7                           remove draft sets older than N days
+
+Options for propose: --calendar-json FILE (otherwise CALENDAR_JSON_CMD from Kit's config, if set) so
+holds skip busy times; --prep 60m (queue prep length); --days 5 (how far ahead to look);
+--alarm 10 (a reminder N minutes before); --transp opaque|transparent; --include-personal (name
+personal to-dos instead of "personal item").
+
+Each hold is one RFC 5545 file in briefs/holds/<date>/ (METHOD:PUBLISH, one VEVENT, no attendees,
+SUMMARY "Hold: ...", the reason in DESCRIPTION, a UID that stays the same for the same proposal, and
+times in your time zone with a VTIMEZONE block), plus a README.md index. Holds stay inside working
+hours from memory/context/calendar.md ("Working hours and time zone", for example "09:00-17:00
+America/New_York"; 09:00-17:00 in the system zone when not set) and skip busy calendar times and each
+other. A requested block that clashes is skipped with the reason, never moved. Opening a file hands
+it to your calendar app; nothing is saved until you save it there.
+"""
+import argparse
+import datetime as dt
+import hashlib
+import json
+import os
+import pathlib
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import kit_daily as kd  # noqa: E402
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # Python < 3.9
+    ZoneInfo = None
+
+HOLDS = kd.BRIEFS / "holds"
+BLOCK = re.compile(r"(\d{4}-\d{2}-\d{2})[ T](\d{1,2}):(\d{2})\s+(\d+)\s*(m|min|h)\b\s*(.*)")
+STEP = dt.timedelta(minutes=15)
+
+
+# ---------- settings ----------------------------------------------------------------------------
+def system_zone():
+    if os.environ.get("TZ") and "/" in os.environ["TZ"]:
+        return os.environ["TZ"].lstrip(":")
+    try:
+        target = os.path.realpath("/etc/localtime")
+        if "zoneinfo/" in target:
+            return target.split("zoneinfo/", 1)[1]
+    except OSError:
+        pass
+    return None
+
+
+def working_hours():
+    text = kd.setting(kd.read(kd.CONTEXT / "calendar.md"), "Working hours and time zone")
+    note = ""
+    m = re.search(r"(\d{1,2}):?(\d{2})?\s*(?:-|–|to)\s*(\d{1,2}):?(\d{2})?", text)
+    if m:
+        start = dt.time(int(m[1]), int(m[2] or 0))
+        end = dt.time(int(m[3]), int(m[4] or 0))
+    else:
+        start, end = dt.time(9), dt.time(17)
+        note = "working hours aren't set in calendar.md, so 09:00-17:00 is assumed"
+    z = re.search(r"\b([A-Z][A-Za-z_]+/[A-Za-z_]+(?:/[A-Za-z_]+)?)\b", text)
+    zone = z.group(1) if z else system_zone()
+    if zone and ZoneInfo:
+        try:
+            ZoneInfo(zone)
+        except Exception:
+            zone = None
+    return start, end, zone, note
+
+
+# ---------- busy times --------------------------------------------------------------------------
+def busy_events(path):
+    raw = ""
+    if path:
+        raw = kd.read(path)
+    else:
+        m = re.search(r'^CALENDAR_JSON_CMD="([^"]*)"', kd.read(kd.CONFIG), re.M)
+        if m and m.group(1).strip():
+            try:
+                cmd = [os.path.expanduser(p) for p in shlex.split(m.group(1))]
+                raw = subprocess.run(cmd, capture_output=True, text=True, timeout=120).stdout
+            except (OSError, subprocess.TimeoutExpired):
+                raw = ""
+    try:
+        events = json.loads(raw or "[]")
+    except ValueError:
+        events = []
+    out = []
+    for e in events if isinstance(events, list) else []:
+        if e.get("all_day") or str(e.get("my_response") or "").lower() in ("declined", "decline"):
+            continue
+        try:
+            s = dt.datetime.fromisoformat(str(e.get("start"))).replace(tzinfo=None)
+            f = dt.datetime.fromisoformat(str(e.get("end") or e.get("start"))).replace(tzinfo=None)
+        except ValueError:
+            continue
+        out.append({"start": s, "end": f, "title": e.get("title") or e.get("subject") or "",
+                    "has_attendees": bool(e.get("has_attendees"))})
+    return out
+
+
+def overlaps(s, f, busy):
+    return any(s < b["end"] and b["start"] < f for b in busy)
+
+
+def in_hours(s, f, hours):
+    """A weekday slot that starts and ends inside working hours on the same day."""
+    return s.date() == f.date() and s.weekday() < 5 and hours[0] <= s.time() and f.time() <= hours[1]
+
+
+def find_slot(day, length, latest_end, busy, hours, earliest=None):
+    """The latest free slot on `day` that ends by latest_end (searching back in 15-minute steps)."""
+    end = min(latest_end, dt.datetime.combine(day, hours[1]))
+    start_floor = dt.datetime.combine(day, hours[0])
+    if earliest:
+        start_floor = max(start_floor, earliest)
+    s = end - length
+    while s >= start_floor:
+        f = s + length
+        if in_hours(s, f, hours) and not overlaps(s, f, busy):
+            return s
+        s -= STEP
+    return None
+
+
+def duration(num, unit):
+    return dt.timedelta(hours=int(num)) if unit == "h" else dt.timedelta(minutes=int(num))
+
+
+def parse_len(text, default):
+    m = re.fullmatch(r"(\d+)\s*(m|min|h)?", (text or "").strip())
+    return duration(m[1], m[2] or "m") if m else default
+
+
+# ---------- proposals ---------------------------------------------------------------------------
+def proposals(args, busy, hours):
+    now = kd.now().replace(second=0, microsecond=0)
+    out, skipped = [], []
+    taken = list(busy)
+
+    def add(kind, key, title, s, f, reason):
+        out.append({"kind": kind, "key": key, "title": title, "start": s, "end": f, "reason": reason})
+        taken.append({"start": s, "end": f})
+
+    for spec in args.block or []:
+        m = BLOCK.match(spec.strip())
+        if not m:
+            skipped.append(f"{spec!r}: not 'YYYY-MM-DD HH:MM 90m Title'")
+            continue
+        s = dt.datetime.fromisoformat(f"{m[1]}T{int(m[2]):02d}:{m[3]}")
+        f = s + duration(m[4], m[5])
+        title = m[6].strip() or "Focus time"
+        if not in_hours(s, f, hours):
+            skipped.append(f"{title} {s:%a %d-%b %H:%M}: outside working hours")
+        elif overlaps(s, f, taken):
+            skipped.append(f"{title} {s:%a %d-%b %H:%M}: clashes with something already on the calendar")
+        else:
+            add("block", f"block|{title}|{s:%Y-%m-%dT%H:%M}", title, s, f, "Requested block.")
+
+    if args.from_plan:
+        for ln in kd.read(args.from_plan).splitlines():
+            m = BLOCK.search(ln)
+            if not m:
+                continue
+            s = dt.datetime.fromisoformat(f"{m[1]}T{int(m[2]):02d}:{m[3]}")
+            f = s + duration(m[4], m[5])
+            title = re.sub(r"[|*`]+", " ", m[6]).strip() or "Study block"
+            if not in_hours(s, f, hours):
+                skipped.append(f"{title} {s:%a %d-%b %H:%M}: outside working hours")
+            elif overlaps(s, f, taken):
+                skipped.append(f"{title} {s:%a %d-%b %H:%M}: clashes with something already on the calendar")
+            else:
+                add("plan", f"plan|{title}|{s:%Y-%m-%dT%H:%M}", title, s, f,
+                    f"From {pathlib.Path(args.from_plan).name}.")
+
+    if args.from_queue:
+        lines = kd.queue_lines()
+        sec = kd.owner_section(lines)
+        length = parse_len(args.prep, dt.timedelta(minutes=60))
+        horizon = kd.today() + dt.timedelta(days=args.days)
+        for it in (kd.items(lines, sec) if sec else []):
+            if it["done"] or it["sub"]:
+                continue
+            due = kd.due_of(it["line"])
+            if not due or due < kd.today() or due > horizon:
+                continue
+            work = "[work]" in it["line"]
+            title = it["title"] if (work or args.include_personal) else "personal item"
+            slot = None
+            day = due
+            while day >= kd.today() and slot is None:
+                if day.weekday() < 5:
+                    slot = find_slot(day, length, dt.datetime.combine(day, hours[1]), taken, hours,
+                                     earliest=now if day == kd.today() else None)
+                day -= dt.timedelta(days=1)
+            if slot:
+                add("queue", f"queue|{it['title']}|{due.isoformat()}", f"Prep: {title}", slot, slot + length,
+                    f"Prep for a to-do due {kd.fmt(due)}.")
+            else:
+                skipped.append(f"Prep: {title}: no free slot before {kd.fmt(due)}")
+
+    if args.meeting_prep:
+        length = parse_len(args.meeting_prep, dt.timedelta(minutes=30))
+        for e in busy:
+            if not e["has_attendees"] or e["start"] < now or e["start"].date() != kd.today():
+                continue
+            title = kd.clip(e["title"], 60)
+            slot = find_slot(e["start"].date(), length, e["start"], taken, hours,
+                             earliest=now if e["start"].date() == kd.today() else None)
+            if slot and e["start"] - (slot + length) <= dt.timedelta(hours=3):
+                add("meeting", f"meeting|{e['title']}|{e['start']:%Y-%m-%dT%H:%M}", f"Prep: {title}",
+                    slot, slot + length, f"Prep before the {e['start']:%H:%M} meeting (see kit-meetprep's pack).")
+            else:
+                skipped.append(f"Prep: {title}: no free slot in the three hours before it")
+    return out, skipped
+
+
+# ---------- iCalendar (RFC 5545) ----------------------------------------------------------------
+def esc(text):
+    return (text.replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,")
+            .replace("\r\n", "\\n").replace("\n", "\\n"))
+
+
+def fold(line):
+    """Fold a content line at 75 octets (RFC 5545 3.1), never splitting a UTF-8 character."""
+    raw = line.encode("utf-8")
+    if len(raw) <= 75:
+        return line
+    parts, cur, limit = [], b"", 75
+    for ch in line:
+        b = ch.encode("utf-8")
+        if len(cur) + len(b) > limit:
+            parts.append(cur.decode("utf-8"))
+            cur, limit = b"", 74   # continuation lines start with one space
+        cur += b
+    parts.append(cur.decode("utf-8"))
+    return "\r\n ".join(parts)
+
+
+def offset_str(td):
+    total = int(td.total_seconds())
+    sign = "+" if total >= 0 else "-"
+    total = abs(total)
+    return f"{sign}{total // 3600:02d}{(total % 3600) // 60:02d}"
+
+
+def vtimezone(zone, year):
+    """A VTIMEZONE for `zone` covering `year`, built from the zone's actual transitions."""
+    tz = ZoneInfo(zone)
+    start = dt.datetime(year, 1, 1, tzinfo=dt.timezone.utc)
+    prev = start.astimezone(tz).utcoffset()
+    trans = []
+    t = start
+    while t.year == year:
+        nxt = t + dt.timedelta(hours=1)
+        off = nxt.astimezone(tz).utcoffset()
+        if off != prev:
+            local = nxt.astimezone(tz).replace(tzinfo=None)
+            trans.append((local, prev, off, nxt.astimezone(tz).dst() != dt.timedelta(0), nxt.astimezone(tz).tzname()))
+            prev = off
+        t = nxt
+    lines = ["BEGIN:VTIMEZONE", f"TZID:{zone}"]
+    if not trans:
+        off = start.astimezone(tz).utcoffset()
+        lines += ["BEGIN:STANDARD", "DTSTART:19700101T000000", f"TZOFFSETFROM:{offset_str(off)}",
+                  f"TZOFFSETTO:{offset_str(off)}", f"TZNAME:{start.astimezone(tz).tzname()}", "END:STANDARD"]
+    for local, frm, to, is_dst, name in trans:
+        kind = "DAYLIGHT" if is_dst else "STANDARD"
+        lines += [f"BEGIN:{kind}", f"DTSTART:{local:%Y%m%dT%H%M%S}", f"TZOFFSETFROM:{offset_str(frm)}",
+                  f"TZOFFSETTO:{offset_str(to)}", f"TZNAME:{name}", f"END:{kind}"]
+    return lines + ["END:VTIMEZONE"]
+
+
+def ics(h, zone, transp, alarm):
+    uid = hashlib.sha1(h["key"].encode()).hexdigest()[:24] + "@kit-holds"
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Kit//kit-holds//EN", "CALSCALE:GREGORIAN",
+             "METHOD:PUBLISH"]
+    if zone and ZoneInfo:
+        lines += vtimezone(zone, h["start"].year)
+        ds = f"DTSTART;TZID={zone}:{h['start']:%Y%m%dT%H%M%S}"
+        de = f"DTEND;TZID={zone}:{h['end']:%Y%m%dT%H%M%S}"
+    else:   # no known zone: floating local time (RFC 5545 form 1)
+        ds = f"DTSTART:{h['start']:%Y%m%dT%H%M%S}"
+        de = f"DTEND:{h['end']:%Y%m%dT%H%M%S}"
+    lines += ["BEGIN:VEVENT", f"UID:{uid}", f"DTSTAMP:{stamp}", ds, de,
+              f"SUMMARY:{esc('Hold: ' + h['title'])}",
+              f"DESCRIPTION:{esc(h['reason'] + ' Drafted by Kit; save it in your calendar only if you want it.')}",
+              f"TRANSP:{transp.upper()}", "CLASS:PRIVATE", "STATUS:CONFIRMED"]
+    if alarm:
+        lines += ["BEGIN:VALARM", "ACTION:DISPLAY", f"TRIGGER:-PT{int(alarm)}M",
+                  f"DESCRIPTION:{esc('Hold: ' + h['title'])}", "END:VALARM"]
+    lines += ["END:VEVENT", "END:VCALENDAR"]
+    return "\r\n".join(fold(ln) for ln in lines) + "\r\n"
+
+
+# ---------- commands ----------------------------------------------------------------------------
+def latest_dir():
+    dirs = sorted(d for d in HOLDS.glob("????-??-??") if d.is_dir()) if HOLDS.is_dir() else []
+    return dirs[-1] if dirs else None
+
+
+def cmd_propose(args):
+    hours_start, hours_end, zone, note = working_hours()
+    hours = (hours_start, hours_end)
+    busy = busy_events(args.calendar_json)
+    holds, skipped = proposals(args, busy, hours)
+    out_dir = HOLDS / kd.today().isoformat()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    existing = sorted(out_dir.glob("*.ics"))
+    n0 = len(existing)
+    known = {re.search(r"UID:(\S+)", p.read_text()).group(1): p for p in existing
+             if re.search(r"UID:(\S+)", p.read_text())}
+    rows = []
+    for h in sorted(holds, key=lambda x: x["start"]):
+        body = ics(h, zone, args.transp, args.alarm)
+        uid = re.search(r"UID:(\S+)", body).group(1)
+        path = known.get(uid)
+        if not path:
+            n0 += 1
+            path = out_dir / f"{n0:02d}-{kd.slug(h['title'], 40)}.ics"
+        path.write_bytes(body.encode("utf-8"))
+        if os.name != "nt":
+            os.chmod(path, 0o600)
+        rows.append((path.name, h))
+    # index of everything in the folder
+    idx = ["# Draft calendar holds", "",
+           "Open a file to review it in your calendar app; it's saved only if you save it there. "
+           "Kit never writes to the calendar.", ""]
+    if note:
+        idx += [f"Note: {note}.", ""]
+    idx += [f"Time zone: {zone or 'floating local time (no zone set)'}", "",
+            "| # | File | When | Hold | Why |", "|---|---|---|---|---|"]
+    for i, p in enumerate(sorted(out_dir.glob("*.ics")), 1):
+        t = p.read_text()
+        when = re.search(r"DTSTART[^:]*:(\d{8}T\d{4})", t).group(1)
+        summ = re.search(r"SUMMARY:(.*)", t).group(1).replace("\\,", ",").replace("\\;", ";")
+        why = re.search(r"DESCRIPTION:(.*)", t.replace("\r\n ", "")).group(1).split(" Drafted by Kit")[0]
+        idx.append(f"| {i} | {p.name} | {when[:4]}-{when[4:6]}-{when[6:8]} {when[9:11]}:{when[11:13]} | "
+                   f"{summ} | {why.replace(chr(92), '')} |")
+    if skipped:
+        idx += ["", "## Skipped", ""] + [f"- {s}" for s in skipped]
+    kd.write(out_dir / "README.md", "\n".join(idx) + "\n")
+    for name, h in rows:
+        print(f"drafted {name}: {h['start']:%a %d-%b %H:%M}-{h['end']:%H:%M} Hold: {h['title']}")
+    for s in skipped:
+        print(f"skipped {s}")
+    if note:
+        print(f"kit-holds: {note}")
+    print(f"kit-holds: {len(rows)} draft hold(s) in {out_dir}; open them with: kit-holds open all")
+    return 0
+
+
+def cmd_list(args):
+    d = latest_dir()
+    if not d:
+        print("kit-holds: no draft holds yet")
+        return 0
+    print(kd.read(d / "README.md").rstrip())
+    return 0
+
+
+def cmd_open(args):
+    d = latest_dir()
+    files = sorted(d.glob("*.ics")) if d else []
+    if not files:
+        print("kit-holds: no draft holds to open")
+        return 1
+    pick = files if args.which == "all" else []
+    if args.which != "all":
+        try:
+            pick = [files[int(args.which) - 1]]
+        except (ValueError, IndexError):
+            sys.exit(f"kit-holds: no draft {args.which}; there are {len(files)}")
+    opener = os.environ.get("KIT_HOLDS_OPENER")
+    for p in pick:
+        if opener:
+            subprocess.run([opener, str(p)], check=False)
+        elif os.name == "nt":
+            os.startfile(str(p))  # noqa: S606  (opens the file in the default calendar app)
+        else:
+            subprocess.run(["open", str(p)], check=False)
+        print(f"opened {p.name}: review it in your calendar app and save it there if you want it")
+    return 0
+
+
+def cmd_clear(args):
+    if not HOLDS.is_dir():
+        print("kit-holds: nothing to clear")
+        return 0
+    cutoff = kd.today() - dt.timedelta(days=args.older_than)
+    n = 0
+    for d in sorted(HOLDS.glob("????-??-??")):
+        try:
+            when = dt.date.fromisoformat(d.name)
+        except ValueError:
+            continue
+        if d.is_dir() and when < cutoff:
+            shutil.rmtree(d)
+            n += 1
+            print(f"removed {d.name}")
+    print(f"kit-holds: removed {n} draft set(s) older than {args.older_than} day(s)")
+    return 0
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-holds", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("propose")
+    p.add_argument("--block", action="append", help='"YYYY-MM-DD HH:MM 90m Title"')
+    p.add_argument("--from-queue", action="store_true")
+    p.add_argument("--from-plan")
+    p.add_argument("--meeting-prep", metavar="LENGTH")
+    p.add_argument("--calendar-json")
+    p.add_argument("--prep", default="60m")
+    p.add_argument("--days", type=int, default=5)
+    p.add_argument("--alarm", type=int)
+    p.add_argument("--transp", choices=["opaque", "transparent"], default="opaque")
+    p.add_argument("--include-personal", action="store_true")
+    sub.add_parser("list")
+    o = sub.add_parser("open")
+    o.add_argument("which")
+    c = sub.add_parser("clear")
+    c.add_argument("--older-than", type=int, default=7)
+    args = ap.parse_args(argv)
+    if args.cmd == "propose" and not (args.block or args.from_queue or args.from_plan or args.meeting_prep):
+        ap.error("propose needs --block, --from-queue, --from-plan, or --meeting-prep")
+    return {"propose": cmd_propose, "list": cmd_list, "open": cmd_open, "clear": cmd_clear}[args.cmd](args)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

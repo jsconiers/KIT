@@ -17,7 +17,11 @@ import pathlib
 import re
 
 SCHEMA_DIR = pathlib.Path(__file__).resolve().parent / "records" / "schema"
-TYPES = ("status-snapshot", "decision", "lesson", "artifact-pointer", "demand-rollup", "handoff-pointer")
+TYPES = ("status-snapshot", "decision", "lesson", "artifact-pointer", "demand-rollup", "handoff-pointer",
+         "expertise")
+# Record types kit-publish produces are TYPES; message records are written only by kit-team send.
+MESSAGE_TYPES = ("message",)
+ALL_TYPES = TYPES + MESSAGE_TYPES
 
 # Credential-shaped text. Anything matching blocks the whole record from publishing.
 SECRET_PATTERNS = [
@@ -69,7 +73,7 @@ def load_schemas(folder=SCHEMA_DIR):
     for f in sorted(folder.glob("*.schema.json")):
         name = f.name[:-len(".schema.json")]
         t = re.sub(r"\.v\d+$", "", name)
-        if t not in TYPES:
+        if t not in ALL_TYPES:
             continue
         sch = json.loads(f.read_text())
         ver = split_version(sch.get("x-kit-version", ""))
@@ -193,3 +197,12 @@ def accept(rec, schemas):
     if ver[0] < cmaj:
         return True, f"{t} {ver[0]}.{ver[1]} is the previous major version; ask its Kit to update"
     return True, ""
+
+
+def current_version(schemas, t, default="1.0"):
+    """The current schema version string for record type t (what a publisher stamps)."""
+    try:
+        (maj, mi), _ = schemas[t][max(schemas[t])]
+        return f"{maj}.{mi}"
+    except (KeyError, ValueError):
+        return default

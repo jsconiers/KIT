@@ -1,0 +1,205 @@
+#!/usr/bin/env python3
+"""kit-roadmap: draft a 1-to-3-year technology roadmap from what the radar folder already holds.
+
+  kit-roadmap                       write a draft to the radar folder's roadmap/ and print its path
+  kit-roadmap --stdout              print the draft and write nothing
+  kit-roadmap --json                print the initiatives as JSON
+  kit-roadmap --start YYYY-MM-DD    the roadmap's first day (default: the first of next month)
+  kit-roadmap --root DIR            a library root other than the one in library.md
+  kit-roadmap --force               overwrite today's draft if it exists
+
+Sources, all in the radar folder unless noted, each optional:
+  RADAR.md                adopt -> roll out (year 1); trial -> pilot and decide (year 1);
+                          hold -> stop new use and plan the exit (year 2)
+  lifecycle/summary.json  from kit-lifecycle: past and urgent -> year 1; warning -> year 2
+  tech-debt.md            open items: by target date, else high risk -> year 1, medium -> year 2,
+                          low -> year 3
+  poc/INDEX.md            (library root) POCs with a "go" verdict -> deliver (year 1)
+
+The result is a DRAFT for the future tech planner to refine (themes, dependencies, sequencing) and
+for the voters and approvers to decide. Costs are left for the cost estimator. Nothing here is a
+commitment, and nothing is sent anywhere.
+"""
+import argparse
+import datetime as dt
+import json
+import pathlib
+import re
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import kit_radar as kr  # noqa: E402
+
+YEAR = {1: "Year 1", 2: "Year 2", 3: "Year 3"}
+
+
+def add_months(d, n):
+    m = d.month - 1 + n
+    return dt.date(d.year + m // 12, m % 12 + 1, 1)
+
+
+def horizon_for_date(target, start):
+    if not target:
+        return None
+    months = (target.year - start.year) * 12 + target.month - start.month
+    return 1 if months < 12 else 2 if months < 24 else 3
+
+
+def from_radar(radar):
+    f = radar / "RADAR.md"
+    out = []
+    if not f.exists():
+        return out
+    for r in kr.rows_with(f.read_text(errors="ignore"), "technology", "ring"):
+        tech, ring = kr.pick(r, "technology"), kr.norm(kr.pick(r, "ring"))
+        quad = kr.pick(r, "quadrant") or "Technology"
+        when = kr.pick(r, "vote", "decided", "date")
+        src = f"RADAR.md: {tech} ({ring}{', vote ' + when if when else ''})"
+        if ring == "adopt":
+            out.append(dict(title=f"Roll out {tech}", theme=quad, horizon=1, kind="radar adopt", source=src,
+                            note="standards to update after the adopt vote"))
+        elif ring == "trial":
+            out.append(dict(title=f"Pilot {tech} and decide on adoption", theme=quad, horizon=1,
+                            kind="radar trial", source=src, note="ballot for adopt or hold at the end"))
+        elif ring == "hold":
+            out.append(dict(title=f"Stop new use of {tech}; plan the exit", theme=quad, horizon=2,
+                            kind="radar hold", source=src, note="needs a lifecycle review"))
+    return out
+
+
+def from_lifecycle(radar):
+    f = radar / "lifecycle" / "summary.json"
+    out = []
+    if not f.exists():
+        return out
+    try:
+        s = json.loads(f.read_text(encoding="utf-8"))
+    except ValueError:
+        return out
+    for i in s.get("items", []):
+        flg = i.get("flag")
+        if flg not in ("past", "urgent", "warning"):
+            continue
+        name = f"{i.get('product', '')} {i.get('version', '')}".strip()
+        out.append(dict(title=f"Decide and act on {name} end of support (upgrade, migrate, or retire)",
+                        theme="Lifecycle", horizon=1 if flg in ("past", "urgent") else 2,
+                        kind=f"lifecycle {flg}",
+                        source=f"lifecycle/summary.json: {name}, end of support {i.get('eol') or 'unknown'}",
+                        note="verdict comes from the lifecycle review, decided by the roles in future-tech.md"))
+    return out
+
+
+def from_debt(radar, start):
+    f = radar / "tech-debt.md"
+    out = []
+    if not f.exists():
+        return out
+    for r in kr.rows_with(f.read_text(errors="ignore"), "item", "status"):
+        status = kr.norm(kr.pick(r, "status"))
+        if status and status not in ("open", "in progress", "planned"):
+            continue
+        item = kr.pick(r, "item")
+        if not item:
+            continue
+        rid = kr.pick(r, "id") or "TD"
+        risk = kr.norm(kr.pick(r, "risk"))
+        h = horizon_for_date(kr.parse_date(kr.pick(r, "target")), start) or {"high": 1, "medium": 2}.get(risk, 3)
+        out.append(dict(title=f"Fix {rid}: {item}", theme="Tech debt", horizon=h, kind="tech debt",
+                        source=f"tech-debt.md: {rid} ({risk or 'risk not set'})",
+                        note=kr.pick(r, "cost") and f"rough cost to fix: {kr.pick(r, 'cost')}" or ""))
+    return out
+
+
+def from_pocs(root):
+    f = root / "poc" / "INDEX.md"
+    out = []
+    if not f.exists():
+        return out
+    for r in kr.rows_with(f.read_text(errors="ignore"), "verdict"):
+        if kr.norm(kr.pick(r, "verdict")) != "go":
+            continue
+        pid, title = kr.pick(r, "id"), kr.pick(r, "title") or "POC"
+        out.append(dict(title=f"Deliver {title} ({pid} go)", theme="Delivery from POCs", horizon=1,
+                        kind="POC go", source=f"poc/INDEX.md: {pid}", note="the findings hold an IA starter"))
+    return out
+
+
+def build(root, start):
+    radar = kr.radar_dir(root)
+    items = from_radar(radar) + from_lifecycle(radar) + from_debt(radar, start) + from_pocs(root)
+    items.sort(key=lambda i: (i["horizon"], i["theme"].lower(), i["title"].lower()))
+    for n, i in enumerate(items, 1):
+        i["id"] = f"R-{n:02d}"
+        i["start"] = add_months(start, (i["horizon"] - 1) * 12).isoformat()
+        i["end"] = add_months(start, (i["horizon"] - 1) * 12 + (6 if i["horizon"] == 1 else 12)).isoformat()
+    return items
+
+
+def safe(s):
+    return re.sub(r"[:#;]", " ", s)[:60].strip()
+
+
+def to_markdown(items, start, today):
+    out = [f"# Technology roadmap: DRAFT, {kr.fmt(today)}", "",
+           "**Draft for the future tech planner and the voters and approvers in future-tech.md.** Written by "
+           "kit-roadmap from the radar, the lifecycle summary, the tech debt register, and POC verdicts. "
+           "Themes, dependencies, sequencing, and costs (from the cost estimator) are still to be set. "
+           "Nothing here is a commitment.", "",
+           f"Roadmap starts {kr.fmt(start)}.", ""]
+    if not items:
+        return "\n".join(out + ["No initiatives yet: the radar folder has no adopt, trial, or hold entries, "
+                                "lifecycle warnings, open tech debt, or POC go verdicts.", ""])
+    for h in (1, 2, 3):
+        rows = [i for i in items if i["horizon"] == h]
+        if not rows:
+            continue
+        out += [f"## {YEAR[h]}", "", "| Id | Initiative | Theme | Source | Depends on | Rough cost | Notes |",
+                "|---|---|---|---|---|---|---|"]
+        out += [f"| {i['id']} | {i['title']} | {i['theme']} | {i['source']} | to set | ask the cost estimator | "
+                f"{i['note']} |" for i in rows]
+        out.append("")
+    out += ["## Timeline", "", "```mermaid", "gantt", "  title Technology roadmap (draft)",
+            "  dateFormat YYYY-MM-DD"]
+    for h in (1, 2, 3):
+        rows = [i for i in items if i["horizon"] == h]
+        if rows:
+            out.append(f"  section {YEAR[h]}")
+            out += [f"  {safe(i['title'])} :{i['id'].lower().replace('-', '')}, {i['start']}, {i['end']}" for i in rows]
+    out += ["```", "", "## Risks", "", "<The planner adds the risks for each year: skills, dependencies, "
+            "vendor, budget, and end-of-support exposure left unfunded.>", ""]
+    return "\n".join(out)
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-roadmap", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--root"); ap.add_argument("--start"); ap.add_argument("--today")
+    ap.add_argument("--stdout", action="store_true"); ap.add_argument("--json", action="store_true")
+    ap.add_argument("--force", action="store_true")
+    a = ap.parse_args(argv)
+    root = kr.expand(a.root) if a.root else kr.library_root()
+    if not root:
+        print("kit-roadmap: no library root set in memory/context/library.md (or use --root)", file=sys.stderr)
+        return 2
+    today = dt.date.fromisoformat(a.today) if a.today else dt.date.today()
+    start = dt.date.fromisoformat(a.start) if a.start else add_months(today.replace(day=1), 1)
+    items = build(root, start)
+    if a.json:
+        print(json.dumps({"start": start.isoformat(), "draft": True, "initiatives": items}, indent=2))
+        return 0
+    md = to_markdown(items, start, today)
+    if a.stdout:
+        print(md)
+        return 0
+    out = kr.radar_dir(root) / "roadmap" / f"draft-{today.isoformat()}.md"
+    if out.exists() and not a.force:
+        print(f"kit-roadmap: {out} already exists; use --force to replace it", file=sys.stderr)
+        return 1
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(md, encoding="utf-8")
+    print(f"kit-roadmap: {len(items)} initiatives in a draft roadmap: {out}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
