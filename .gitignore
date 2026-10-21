@@ -4,3 +4,4 @@
 platform/mac/**/*.app
 __pycache__/
 *.pyc
+**/morning/models.env
