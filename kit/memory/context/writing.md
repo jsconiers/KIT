@@ -22,6 +22,9 @@ it current.
 - **Tools:** optional. Document-generation tools the writers may use, and any limits on them.
 - **Implementation documents:** optional. Templates for test plans, change requests, runbooks, and
   cutover checklists, for the implementation planner.
+- **Traceability matrix:** optional. `~/Claude/Agents/kit/templates/traceability-matrix-template.md`
+  is the layout `kit-trace` follows, tracing each IA requirement to the GDS, the test plan, the
+  change request, and any POC. Point this at the team's copy.
 - **Decks:** optional. The slide template, the IA and GDS deck templates with their slide order, the
   brand and slide skills, and slide counts by audience, for the deck builder.
 - **Research briefs:** optional. `~/Claude/Agents/kit/templates/research-brief-template.md` is the

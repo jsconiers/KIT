@@ -10,6 +10,7 @@ at the copy. Delete the guidance lines in angle brackets when filling it in.
 | System | <name> |
 | Also known as | <other names, abbreviations, configuration-management names> |
 | Owner | <role or team, not a person's name> |
+| FEAF reference models | <optional: any of Performance, Business, Data, Application, Infrastructure, Security; leave blank if the team doesn't use FEAF> |
 | Updated | <DD-Mmm-YYYY> |
 | Classification | <internal or confidential> |
 

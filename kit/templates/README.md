@@ -15,6 +15,11 @@ in `memory/context/writing.md`; none ship here.
 | Decisions | `build-buy-partner-template.md` | Kit, cost estimator, decision recorder | `decisions.md` |
 | Projects | `stakeholder-map-template.md` | status reporter, scheduler | `status.md` |
 | Systems | `system-profile-template.md` | curator, Kit (`kit-sysprofile`) | `knowledge.md` |
+| Standards | `zero-trust-rating-template.md` | standards checker (on request) | `standards.md` |
+| Design review | `red-team-review-template.md` | red team | `standards.md` |
+| Design review | `threat-model-template.md` | threat modeler (feeds risk and compliance mapper, implementation planner) | `standards.md` |
+| Compliance | `csf-mapping-template.md` | risk and compliance mapper (when NIST CSF 2.0 applies; `kit-csf`) | `compliance.md` |
+| Traceability | `traceability-matrix-template.md` | implementation planner, GDS writer, Kit (`kit-trace`) | `writing.md` |
 | Costs | `sizing-template.md` | cost estimator, Kit (`kit-sizing`) | `costs.md` |
 | POC | `poc-charter-template.md` | POC lead | `poc.md` |
 | POC | `poc-test-plan-template.md` | POC lead | `poc.md` |

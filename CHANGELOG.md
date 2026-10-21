@@ -8,6 +8,34 @@ versions follow [semantic versioning](https://semver.org).
 ## [Unreleased]
 
 ### Added
+- red-team agent (roadmap G1): adversarial architecture critic before peer review, with
+  `red-team-review-template.md`; threat-modeler agent (G2): STRIDE threat model per data flow,
+  feeding the risk and compliance mapper and implementation planner, with
+  `threat-model-template.md`. Staff is now 32 subagents.
+- `kit-trace` (G3): traceability matrix from IA requirements to GDS sections, test cases, change
+  steps, and POC verdicts, with gap counts, `--json`, and `--write`; the implementation planner and
+  GDS writer run it; `traceability-matrix-template.md`.
+- NIST CSF 2.0 mapping (J5): `csf-mapping-template.md` (6 Functions, 22 Categories) and `kit-csf`
+  (coverage per Function, gaps, blanks, ID checks against `shared/data/csf2.json`, `--portfolio`).
+- Weekly demand refresh (off by default): the Monday review has the demand tracker re-check its
+  register's demands, read-only and guarded, and adds "Demands: what changed". Keys `DEMAND_REFRESH`,
+  `DEMAND_SERVER`, `DEMAND_TOOLS`, `DEMAND_REGISTER_DIR`, `DEMAND_REFRESH_MAX`,
+  `DEMAND_REFRESH_MIN_LEFT`.
+- `kit-lifecycle --import FILE`: turns a CMDB export (JSON list, records, result, rows and columns,
+  or CSV) into `inventory.json`, with OS aliases, skip counts, and duplicate marking; a data-quality
+  section in the lifecycle summary.
+- `kit-audit`: "Searches that may have ignored their filter" warning (a stated total far above the
+  limit, or the same total for different queries); "not checkable" when the log has no totals.
+  connector-guard now logs a result's stated total (`result_total`, a count only).
+- Morning brief: a connector health line at the top (kit-connect test, no model cost, 120-second
+  limit, never fails the run; `CONNECTOR_CHECK`, `CONNECTOR_CHECK_TIMEOUT`).
+- Framework profile in the `compliance.md` setup; the risk and compliance mapper maps only against
+  frameworks that apply.
+- `zero-trust-rating-template.md` (CISA ZTMM 2.0); the standards checker fills it in on request.
+- Reviewer: ten Secure by Design questions (CISA 2023/2024) in the design-risk step.
+- Hardening baseline field in the lab runbook template; the standards checker checks designs for one;
+  `kit-labcheck` warns when a runbook has none.
+- Optional FEAF reference-model tags on system profiles, curator system pages, and catalog notes.
 - `kit-reliability`: success rate, duration, cost, timeouts, degraded briefs, retries, and skips per run
   type over 7, 30, and 90 days, with alerts; dashboard panel, metrics section, health check.
 - Auto-retry in run.sh and run.ps1: one retry after a transient failure (RETRY_ON, RETRY_DELAY).
@@ -103,6 +131,15 @@ versions follow [semantic versioning](https://semver.org).
   behaviour is unchanged (checked against a frozen copy of the old code).
 
 ### Changed
+- `kit-lifecycle` flags versions past standard support but inside paid extended support as
+  `extended` (urgency from the extended end) instead of `past`; `counts` gains `extended`, other
+  keys unchanged. `kit-roadmap` includes them (year 1 when the extended end is within 12 months).
+- Gateway: pages large results with an explicit sort order and offsets, and says whether ordering
+  was guaranteed.
+- Intake triager: checks precedent (through Kit) before the impact-assessment call and cites it, or
+  records "Precedent check requested".
+- To-do sync: confirmed both platform entries call the one `reconcile()` in
+  `shared/kit_sync_core.py`; nothing duplicated remains (issue #2).
 - First live connector runs: the demand tracker, intake triager, status reporter, and a lifecycle
   review (kit-lifecycle with researcher-sourced end-of-support dates) ran on real ServiceNow data
   through the gateway. INSTALL now says to check that a filtered search's count is plausible, since

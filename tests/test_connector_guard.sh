@@ -33,6 +33,18 @@ g pre  '{"session_id":"s1","tool_name":"mcp__wiki__get_page","tool_use_id":"tool
 g post '{"session_id":"s1","tool_name":"mcp__wiki__get_page","tool_use_id":"toolu_B","tool_response":{"ok":1}}'
 grep -q '"tool_use_id": "toolu_B"' "$LOG" && ok "success record carries tool_use_id" || bad "tool_use_id on post"
 
+# 2b. A search result's top-level total is logged as result_total (count only, no contents).
+g post '{"session_id":"s1","tool_name":"mcp__wiki__search","tool_use_id":"toolu_T1","tool_response":[{"type":"text","text":"{\"totalCount\": 7663, \"records\": [{\"number\": \"SECRET-ROW\"}]}"}]}'
+g post '{"session_id":"s1","tool_name":"mcp__wiki__search","tool_use_id":"toolu_T2","tool_response":{"content":[{"type":"text","text":"{\"total\": \"3\"}"}]}}'
+g post '{"session_id":"s1","tool_name":"mcp__wiki__get_page","tool_use_id":"toolu_T3","tool_response":{"title":"x"}}'
+python3 - "$LOG" <<'EOF' && ok "result_total logged from MCP text blocks, absent when not stated" || bad "result_total"
+import json,sys
+rs={r.get("tool_use_id"):r for r in map(json.loads,open(sys.argv[1]))}
+assert rs["toolu_T1"]["result_total"]==7663 and rs["toolu_T2"]["result_total"]==3, rs
+assert "result_total" not in rs["toolu_T3"]
+assert "SECRET-ROW" not in open(sys.argv[1]).read()
+EOF
+
 # 3. A call with no result at all, plus an old-style record pair without ids.
 g pre  '{"session_id":"s1","tool_name":"mcp__wiki__list_pages","tool_use_id":"toolu_C"}' >/dev/null
 g pre  '{"session_id":"s2","tool_name":"mcp__wiki__search"}' >/dev/null

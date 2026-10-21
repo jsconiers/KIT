@@ -8,6 +8,11 @@
   kit-lifecycle --eol FILE           use this EOL file instead of the radar folder's eol.json
   kit-lifecycle --root DIR           a library root other than the one in library.md
   kit-lifecycle --today YYYY-MM-DD   pretend it's another day (for checks and tests)
+  kit-lifecycle --import FILE        turn a configuration-management export (JSON or CSV) into
+                                     inventory.json in the radar folder, then stop
+      --out FILE                     write the imported inventory here instead
+      --source TEXT                  say where the export came from (recorded in the file)
+      --force                        replace an inventory.json that's already there
 
 Inputs, in the radar folder (radar/ in the library root unless future-tech.md says otherwise):
   inventory.csv or inventory.json    what runs where: product, version, system, owner (role),
@@ -18,10 +23,21 @@ Inputs, in the radar folder (radar/ in the library root unless future-tech.md sa
                                      it from the researcher's cited briefs, or someone enters dates
                                      by hand. Every entry needs a source.
 
+Import: --import reads an export saved from the gateway's configuration-management records: a
+JSON list of records, {"records": [...]}, {"result": [...]}, {"rows": [...], "columns": [...]}, or
+a CSV, with fields like name, os, os_version, support_group, environment, used_for, sys_class_name.
+OS names are tidied with the alias map below (OS_ALIASES; add an os-aliases.json in the radar
+folder to extend it), records with a blank or "Unknown" OS are skipped and counted, names ending
+"- duplicate" are kept and marked, and the source and date go in the file. It reads a file only.
+
 Output: lifecycle/summary.md and lifecycle/summary.json in the radar folder. Each product and
-version gets a flag: past (end of support has passed), urgent (12 months or less), warning (24
-months or less), ok, or unknown (no EOL data). Unknown ones go on a look-up list for the researcher
-with the product and version only, never a system name.
+version gets a flag: past (end of support has passed, with no paid extended support left),
+extended (standard support has ended but the extended date is still ahead; marked urgent or
+warning when that ends in 12 or 24 months, and only real if the subscription is held), urgent (12
+months or less), warning (24 months or less), ok, or unknown (no EOL data). Unknown ones go on a
+look-up list for the researcher with the product and version only, never a system name. A data
+quality section counts skipped, unknown, duplicate, ownerless, and environment-less records, and
+production records whose names look like dev, QA, test, UAT, or staging (inferred, to check).
 
 It never reaches outside this computer: no EOL website or API is called, so the inventory never
 leaves. It writes no verdicts: the planner recommends invest, maintain, migrate, or retire with the
@@ -32,6 +48,7 @@ import csv
 import datetime as dt
 import json
 import pathlib
+import re
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
@@ -44,30 +61,138 @@ ALIASES = {
     "system": ("system", "ci", "configuration item", "host", "server", "service"),
     "owner": ("owner", "owned by", "support group", "role"),
     "environment": ("environment", "env", "tier"),
+    "used_for": ("used for", "used_for", "usage"),
 }
 
+# Editable: OS names in exports (lower case) and the product name eol.json uses. Others are kept as-is.
+OS_ALIASES = {
+    "rhel": "Red Hat Linux",
+    "red hat enterprise linux": "Red Hat Linux",
+    "red hat enterprise linux server": "Red Hat Linux",
+    "linux red hat": "Red Hat Linux",
+    "redhat linux": "Red Hat Linux",
+    "oracle linux": "Oracle Enterprise Linux",
+}
+IMPORT_ALIASES = {
+    "system": ("name", "host", "hostname", "system", "ci", "configuration item", "server"),
+    "product": ("os", "operating system", "os name"),
+    "version": ("os_version", "os version", "version"),
+    "owner": ("support_group", "support group", "owner", "owned by", "assignment group"),
+    "environment": ("environment", "env", "tier"),
+    "used_for": ("used_for", "used for", "usage"),
+    "class": ("sys_class_name", "class", "ci class"),
+}
+DUP_RE = re.compile(r"\s*-\s*duplicate\s*$", re.I)
+NONPROD_RE = re.compile(r"(?<![a-z])(dev|qa|test|uat|stg)(?![a-z])")
+PROD = ("production", "prod")
 
-def field(row, key):
-    low = {kr.norm(k): (v or "").strip() for k, v in row.items() if k}
-    for a in ALIASES[key]:
+
+def text(v):
+    """A cell as plain text; export cells can be {"display_value": ..., "value": ...}."""
+    if isinstance(v, dict):
+        v = v.get("display_value") or v.get("value") or ""
+    return "" if v is None else str(v).strip()
+
+
+def field(row, key, aliases=ALIASES):
+    low = {kr.norm(k): text(v) for k, v in row.items() if k}
+    for a in aliases[key]:
         if low.get(a):
             return low[a]
     return ""
 
 
-def load_inventory(path):
-    if path.suffix.lower() == ".json":
-        data = json.loads(path.read_text(encoding="utf-8"))
-        rows = data.get("records", data) if isinstance(data, dict) else data
-    else:
+def read_rows(path):
+    """Rows (dicts) from a CSV or a JSON export, plus the JSON's top level when it was an object."""
+    if path.suffix.lower() != ".json":
         with path.open(newline="", encoding="utf-8-sig") as f:
-            rows = list(csv.DictReader(f))
+            return list(csv.DictReader(f)), {}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        return list(data), {}
+    if "rows" in data and "columns" in data:
+        cols = [text(c.get("name") or c.get("label") or c.get("key")) if isinstance(c, dict) else text(c)
+                for c in data["columns"]]
+        rows = [r if isinstance(r, dict) else dict(zip(cols, r)) for r in data["rows"]]
+        return rows, data
+    for k in ("records", "result", "rows"):
+        if isinstance(data.get(k), list):
+            return data[k], data
+    raise ValueError(f"{path.name}: no records, result, or rows list found")
+
+
+def is_dup(name):
+    return bool(DUP_RE.search(name or ""))
+
+
+def is_prod(rec):
+    return kr.norm(rec.get("environment")) in PROD or kr.norm(rec.get("used_for")) in PROD
+
+
+def maybe_mislabel(rec):
+    return is_prod(rec) and bool(NONPROD_RE.search(DUP_RE.sub("", rec.get("system") or "").lower()))
+
+
+def load_inventory(path):
+    """The inventory records, and its top level (source, skipped lists, quality block) if any."""
+    rows, meta = read_rows(path)
     out = []
     for r in rows:
         rec = {k: field(r, k) for k in ALIASES}
         if rec["product"]:
+            rec["duplicate"] = bool(r.get("duplicate")) or is_dup(rec["system"])
             out.append(rec)
-    return out
+    return out, meta
+
+
+def quality(inventory, meta):
+    """Data-quality counts from the inventory records and what the import skipped."""
+    q = meta.get("quality") if isinstance(meta.get("quality"), dict) else {}
+
+    def skipped(key):
+        if isinstance(q.get(key), int):
+            return q[key]
+        v = meta.get(key)
+        return len(v) if isinstance(v, list) else (v if isinstance(v, int) else 0)
+    return {"records": len(inventory),
+            "skipped_no_os": skipped("skipped_no_os"),
+            "skipped_unknown_os": skipped("skipped_unknown_os"),
+            "duplicates": sum(1 for r in inventory if r.get("duplicate")),
+            "blank_owner": sum(1 for r in inventory if not r["owner"]),
+            "blank_environment": sum(1 for r in inventory if not r["environment"]),
+            "possible_mislabel": sum(1 for r in inventory if maybe_mislabel(r)),
+            "source": text(meta.get("source")),
+            "imported": text(meta.get("imported")) or None}
+
+
+def os_aliases(radar):
+    m = dict(OS_ALIASES)
+    f = radar / "os-aliases.json" if radar else None
+    if f and f.exists():
+        m.update({kr.norm(k): v for k, v in json.loads(f.read_text(encoding="utf-8")).items()})
+    return m
+
+
+def import_export(path, aliases, source, today):
+    """An inventory.json document built from a configuration-management export."""
+    rows, _ = read_rows(path)
+    records, no_os, unknown = [], [], []
+    for r in rows:
+        rec = {k: field(r, k, IMPORT_ALIASES) for k in IMPORT_ALIASES}
+        if not rec["product"]:
+            no_os.append(rec["system"])
+            continue
+        if kr.norm(rec["product"]) == "unknown":
+            unknown.append(rec["system"])
+            continue
+        rec["product"] = aliases.get(kr.norm(rec["product"]), rec["product"])
+        rec["duplicate"] = is_dup(rec["system"])
+        records.append(rec)
+    doc = {"source": source or f"import of {path.name}", "imported": kr.fmt(today),
+           "generated_by": "kit-lifecycle --import", "skipped_no_os": no_os, "skipped_unknown_os": unknown}
+    doc["quality"] = {k: v for k, v in quality(records, doc).items() if k not in ("source", "imported")}
+    doc["records"] = records
+    return doc
 
 
 def load_eol(path):
@@ -98,12 +223,17 @@ def match(product, version, eol):
     return best
 
 
-def flag(eol_date, today):
+def band(d, today):
+    left = (d - today).days
+    return "urgent" if left <= URGENT_DAYS else "warning" if left <= WARNING_DAYS else "ok"
+
+
+def flag(eol_date, today, extended=None):
     if not eol_date:
         return "unknown"
     left = (eol_date - today).days
     if left < 0:
-        return "past"
+        return "extended" if extended and extended >= today else "past"
     if left <= URGENT_DAYS:
         return "urgent"
     if left <= WARNING_DAYS:
@@ -111,16 +241,19 @@ def flag(eol_date, today):
     return "ok"
 
 
-ORDER = {"past": 0, "urgent": 1, "warning": 2, "unknown": 3, "ok": 4}
+ORDER = {"past": 0, "extended": 1, "urgent": 2, "warning": 3, "unknown": 4, "ok": 5}
+EXTENDED_NOTE = ("Extended support is paid: it only applies if the extended support subscription is held "
+                 "for these systems. Without it, treat them as past end of support.")
 
 
-def summarize(inventory, eol, today):
+def summarize(inventory, eol, today, meta=None):
     groups = {}
     for rec in inventory:
         key = (rec["product"], rec["version"])
         g = groups.setdefault(key, {"product": rec["product"], "version": rec["version"], "instances": 0,
-                                    "systems": set(), "environments": set(), "owners": set()})
+                                    "duplicates": 0, "systems": set(), "environments": set(), "owners": set()})
         g["instances"] += 1
+        g["duplicates"] += 1 if rec.get("duplicate") else 0
         for k, s in (("system", "systems"), ("environment", "environments"), ("owner", "owners")):
             if rec[k]:
                 g[s].add(rec[k])
@@ -130,12 +263,17 @@ def summarize(inventory, eol, today):
         item = {**{k: v for k, v in g.items() if k not in ("systems", "environments", "owners")},
                 "systems": sorted(g["systems"]), "environments": sorted(g["environments"]),
                 "owners": sorted(g["owners"]), "eol": None, "extended": None, "months_left": None,
-                "source": "", "checked": None, "flag": "unknown"}
+                "source": "", "checked": None, "flag": "unknown",
+                "extended_months_left": None, "extended_urgency": None}
         if e:
             item.update(eol=kr.fmt(e["eol"]), extended=kr.fmt(e["extended"]) or None, source=e["source"],
-                        checked=kr.fmt(e["checked"]) or None, flag=flag(e["eol"], today))
+                        checked=kr.fmt(e["checked"]) or None, flag=flag(e["eol"], today, e["extended"]))
             if e["eol"]:
                 item["months_left"] = round((e["eol"] - today).days / 30.44, 1)
+            if e["extended"]:
+                item["extended_months_left"] = round((e["extended"] - today).days / 30.44, 1)
+            if item["flag"] == "extended":
+                item["extended_urgency"] = band(e["extended"], today)
             if not e["source"]:
                 notes.append(f"{product} {e['cycle']}: EOL date has no source; ask the researcher to confirm it")
                 item["flag"] = "unknown"
@@ -143,17 +281,21 @@ def summarize(inventory, eol, today):
                 notes.append(f"{product} {e['cycle']}: EOL date last checked "
                              f"{kr.fmt(e['checked']) or 'never'}; ask the researcher to recheck it")
         items.append(item)
-    items.sort(key=lambda i: (ORDER[i["flag"]], i["months_left"] if i["months_left"] is not None else 9e9,
-                              i["product"].lower()))
+    def left(i):
+        m = i["extended_months_left"] if i["flag"] == "extended" else i["months_left"]
+        return m if m is not None else 9e9
+    items.sort(key=lambda i: (ORDER[i["flag"]], left(i), i["product"].lower()))
     lookups = sorted({f"{i['product']} {i['version']}".strip() for i in items if i["flag"] == "unknown"})
     counts = {k: sum(1 for i in items if i["flag"] == k) for k in ORDER}
     return {"generated": today.isoformat(), "counts": counts, "items": items, "researcher_lookups": lookups,
-            "notes": sorted(set(notes)),
+            "notes": sorted(set(notes)), "extended_note": EXTENDED_NOTE,
+            "quality": quality(inventory, meta or {}),
             "policy": "No outside EOL service was called; dates come from eol.json (cited researcher "
                       "briefs or entered by hand). No verdicts: the planner recommends, people decide."}
 
 
-LABEL = {"past": "Past end of support", "urgent": "Urgent: 12 months or less",
+LABEL = {"past": "Past end of support", "extended": "Past standard support, inside paid extended support",
+         "urgent": "Urgent: 12 months or less",
          "warning": "Warning: 24 months or less", "unknown": "Unknown: no EOL data", "ok": "OK"}
 
 
@@ -165,9 +307,19 @@ def to_markdown(s):
            "decide. No outside EOL service was called.", "",
            "| Flag | Count |", "|---|---|"]
     out += [f"| {LABEL[k]} | {s['counts'][k]} |" for k in ORDER]
-    for k in ("past", "urgent", "warning", "unknown", "ok"):
+    for k in ORDER:
         rows = [i for i in s["items"] if i["flag"] == k]
         if not rows:
+            continue
+        if k == "extended":
+            out += ["", f"## {LABEL[k]}", "", s["extended_note"], "",
+                    "| Product | Version | Instances | Environments | Owner | End of support | Extended until | "
+                    "Months to extended end | Extended urgency | Source |",
+                    "|---|---|---|---|---|---|---|---|---|---|"]
+            for i in rows:
+                out.append(f"| {i['product']} | {i['version']} | {i['instances']} | {', '.join(i['environments'])} | "
+                           f"{', '.join(i['owners'])} | {i['eol'] or ''} | {i['extended'] or ''} | "
+                           f"{i['extended_months_left']} | {URGENCY[i['extended_urgency']]} | {i['source']} |")
             continue
         out += ["", f"## {LABEL[k]}", "",
                 "| Product | Version | Instances | Environments | Owner | End of support | Extended | Months left | Source |",
@@ -176,6 +328,20 @@ def to_markdown(s):
             out.append(f"| {i['product']} | {i['version']} | {i['instances']} | {', '.join(i['environments'])} | "
                        f"{', '.join(i['owners'])} | {i['eol'] or ''} | {i['extended'] or ''} | "
                        f"{'' if i['months_left'] is None else i['months_left']} | {i['source']} |")
+    q = s.get("quality")
+    if q:
+        out += ["", "## Data quality", "",
+                f"From the inventory{(' (' + q['source'].rstrip('.') + ')') if q['source'] else ''}"
+                f"{(', imported ' + q['imported']) if q['imported'] else ''}. Counts only; fix them at the source.", "",
+                "| Check | Records |", "|---|---|",
+                f"| In the inventory | {q['records']} |",
+                f"| Skipped: no OS | {q['skipped_no_os']} |",
+                f"| Skipped: OS \"Unknown\" | {q['skipped_unknown_os']} |",
+                f"| Names marked \"- duplicate\" (kept, counted in instances) | {q['duplicates']} |",
+                f"| No owner (support group) | {q['blank_owner']} |",
+                f"| No environment | {q['blank_environment']} |",
+                f"| Possible mislabel: Production, but the name has dev, qa, test, uat, or stg (inferred) | "
+                f"{q['possible_mislabel']} |"]
     if s["researcher_lookups"]:
         out += ["", "## For the researcher to look up", "",
                 "Public product names and versions only; never send system names or where they run.", ""]
@@ -183,6 +349,10 @@ def to_markdown(s):
     if s["notes"]:
         out += ["", "## Notes", ""] + [f"- {n}" for n in s["notes"]]
     return "\n".join(out) + "\n"
+
+
+URGENCY = {"urgent": "Urgent: ends in 12 months or less", "warning": "Warning: ends in 24 months or less",
+           "ok": "More than 24 months", None: ""}
 
 
 def find_inventory(radar):
@@ -198,12 +368,17 @@ def main(argv):
     ap.add_argument("--inventory"); ap.add_argument("--eol"); ap.add_argument("--root")
     ap.add_argument("--today"); ap.add_argument("--json", action="store_true")
     ap.add_argument("--no-write", action="store_true")
+    ap.add_argument("--import", dest="import_file"); ap.add_argument("--out"); ap.add_argument("--source")
+    ap.add_argument("--force", action="store_true")
     a = ap.parse_args(argv)
     root = kr.expand(a.root) if a.root else kr.library_root()
     if not root:
         print("kit-lifecycle: no library root set in memory/context/library.md (or use --root)", file=sys.stderr)
         return 2
     radar = kr.radar_dir(root)
+    today = dt.date.fromisoformat(a.today) if a.today else dt.date.today()
+    if a.import_file:
+        return do_import(a, radar, today)
     inv = pathlib.Path(a.inventory).expanduser() if a.inventory else find_inventory(radar)
     eolp = pathlib.Path(a.eol).expanduser() if a.eol else radar / "eol.json"
     if not inv or not inv.exists():
@@ -211,13 +386,12 @@ def main(argv):
               "management records through the gateway, or save an export there", file=sys.stderr)
         return 2
     try:
-        inventory = load_inventory(inv)
+        inventory, meta = load_inventory(inv)
         eol = load_eol(eolp) if eolp.exists() else []
     except (ValueError, OSError, csv.Error) as e:
         print(f"kit-lifecycle: couldn't read the inputs: {e}", file=sys.stderr)
         return 2
-    today = dt.date.fromisoformat(a.today) if a.today else dt.date.today()
-    s = summarize(inventory, eol, today)
+    s = summarize(inventory, eol, today, meta)
     if not eolp.exists():
         s["notes"].append(f"no eol.json yet in {radar}; every product is unknown until the planner records "
                           "sourced dates")
@@ -233,8 +407,32 @@ def main(argv):
     (out / "summary.md").write_text(md, encoding="utf-8")
     (out / "summary.json").write_text(json.dumps(s, indent=2) + "\n", encoding="utf-8")
     c = s["counts"]
-    print(f"kit-lifecycle: {len(s['items'])} product versions: {c['past']} past, {c['urgent']} urgent, "
+    print(f"kit-lifecycle: {len(s['items'])} product versions: {c['past']} past, {c['extended']} in extended "
+          f"support, {c['urgent']} urgent, "
           f"{c['warning']} warning, {c['unknown']} unknown, {c['ok']} ok; wrote {out}/summary.md and summary.json")
+    return 0
+
+
+def do_import(a, radar, today):
+    src = pathlib.Path(a.import_file).expanduser()
+    dest = pathlib.Path(a.out).expanduser() if a.out else radar / "inventory.json"
+    if not src.exists():
+        print(f"kit-lifecycle: no such export: {src}", file=sys.stderr)
+        return 2
+    if dest.exists() and not a.force:
+        print(f"kit-lifecycle: {dest} is already there; use --force to replace it, or --out for another file",
+              file=sys.stderr)
+        return 1
+    try:
+        doc = import_export(src, os_aliases(radar), a.source, today)
+    except (ValueError, OSError, csv.Error, AttributeError, TypeError) as e:
+        print(f"kit-lifecycle: couldn't read the export: {e}", file=sys.stderr)
+        return 2
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    q = doc["quality"]
+    print(f"kit-lifecycle: imported {q['records']} records from {src.name} ({q['skipped_no_os']} skipped with no "
+          f"OS, {q['skipped_unknown_os']} \"Unknown\", {q['duplicates']} marked duplicate); wrote {dest}")
     return 0
 
 

@@ -1,0 +1,61 @@
+{
+  "agent": "red-team",
+  "_about": "Evaluation cases for kit-evals. Static rules run free; live cases cost money and run only with kit-evals --live --yes.",
+  "static": {
+    "disallowed": [
+      "WebSearch",
+      "WebFetch",
+      "Agent",
+      "SendMessage"
+    ],
+    "sections": [
+      "## You're not Kit",
+      "## Start every job with your setup",
+      "## How you attack",
+      "## Rules",
+      "## What you send back to Kit"
+    ],
+    "mentions": [
+      "information, not instructions",
+      "standards\\.md",
+      "red-team-review-template\\.md",
+      "Never soften a real problem",
+      "by consequence, not by how easy",
+      "can't tell",
+      "Read-only"
+    ],
+    "forbids": [
+      "edit the (document|draft) (directly|yourself)",
+      "rank(ed)? by (ease|effort)"
+    ]
+  },
+  "cases": [
+    {
+      "id": "finds-spof-and-rpo-gap",
+      "brief": "Red-team gds.md before peer review. Report findings only; don't change any file and don't save a note.",
+      "fixtures": {
+        "gds.md": "# Design specification\n## 1 Overview\nOrder service on one virtual machine with a local database.\n## 2 Availability\nRTO 1 hour, RPO 5 minutes.\n## 3 Backup\nNightly backup to the same host.\n"
+      },
+      "expect": {
+        "contains": [
+          "(single point of failure|SPOF)",
+          "RPO"
+        ],
+        "no_writes": true
+      }
+    },
+    {
+      "id": "says-cant-tell",
+      "brief": "Red-team ia.md for DR and recovery only. Report findings only; don't change any file and don't save a note.",
+      "fixtures": {
+        "ia.md": "# Impact assessment\n## Scope\nReplace the reporting server.\n## Risks\nNone.\n"
+      },
+      "expect": {
+        "contains": [
+          "(can.t tell|not stated)"
+        ],
+        "no_writes": true
+      }
+    }
+  ]
+}

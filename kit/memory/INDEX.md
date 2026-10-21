@@ -17,7 +17,7 @@ when its line is relevant. Keep this under 100 lines and put detail in the files
 - `context/meetings.md`: the meeting inbox, where the architect's notes are, and the mail commands the meeting scribe uses
 - `context/status.md`: the status report's format, window, and audiences
 - `context/sharing.md`: what kit-publish shares with the team, the outbox, the Kit id, and the owner role
-- `context/standards.md`: the engineering standards, reference architectures, and baselines the standards checker uses
+- `context/standards.md`: the engineering standards, reference architectures, and baselines the standards checker, red team, and threat modeler use
 - `context/compliance.md`: control frameworks, data classes, and sign-off roles for the risk and compliance mapper
 - `context/costs.md`: rate cards, labor rates, currency, and contingency for the cost estimator
 - `context/changeboard.md`: the change board's template, risk matrix, checklist, and lead times

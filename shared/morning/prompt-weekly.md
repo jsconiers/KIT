@@ -103,6 +103,6 @@ Anything that needs {{OWNER}} goes in the review.
    briefs/weekly-text.txt: plain text, no markdown, under 700 characters, first line
    "Kit · week of " plus the date, like "Kit · week of 10-Oct". Then write two more versions,
    split by kind for separate delivery: briefs/weekly-text-work.txt with only work items (to-dos
-   tagged [work], work meetings, audit findings, the horizon scan, the quality loop, wins, the watch, the sprint review, cost) and briefs/weekly-text-personal.txt with the rest
+   tagged [work], work meetings, audit findings, demand changes, the horizon scan, the quality loop, wins, the watch, the sprint review, cost) and briefs/weekly-text-personal.txt with the rest
    (personal to-dos, pastoral care, trading). Same first line; "Nothing this week." if one is empty.
 17. Finish with one line: "done", or what went wrong.

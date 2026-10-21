@@ -1,0 +1,11 @@
+[
+ {"name": "host-a-01", "os": "Red Hat Enterprise Linux", "os_version": "7.9", "support_group": "Platform team", "environment": "Production", "used_for": "Production", "sys_class_name": "cmdb_ci_linux_server"},
+ {"name": "host-a-02", "os": "RHEL", "os_version": "7.9", "support_group": "", "environment": "Production", "sys_class_name": "cmdb_ci_linux_server"},
+ {"name": "host-a-03 - duplicate", "os": "Red Hat Enterprise Linux Server", "os_version": "8.8", "support_group": "Platform team", "environment": "", "sys_class_name": "cmdb_ci_linux_server"},
+ {"name": "host-dev-04", "os": "Windows Server", "os_version": "2012 R2", "support_group": "Windows team", "environment": "Production", "sys_class_name": "cmdb_ci_win_server"},
+ {"name": "host-a-uat05", "os": "Linux Red Hat", "os_version": "7.5", "support_group": "Platform team", "environment": "UAT", "sys_class_name": "cmdb_ci_linux_server"},
+ {"name": "host-a-06", "os": "", "os_version": "", "support_group": "Platform team", "environment": "Production"},
+ {"name": "host-a-07", "os": "Unknown", "os_version": "", "support_group": "", "environment": "Production"},
+ {"name": "host-a-08", "os": "Acme OS", "os_version": "3.1", "support_group": "Platform team", "environment": "Production"},
+ {"name": "host-latest-09", "os": "RHEL", "os_version": "8.6", "support_group": "Platform team", "environment": "", "used_for": "Production"}
+]

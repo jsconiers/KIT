@@ -23,7 +23,10 @@
       "connectors\\.md",
       "Never write",
       "Never ask for, read, repeat, or record credentials",
-      "read-only"
+      "read-only",
+      "explicit sort order",
+      "pages don't overlap or skip rows",
+      "whether the system guaranteed the order"
     ],
     "forbids": [
       "you may (create|update|comment|transition)",

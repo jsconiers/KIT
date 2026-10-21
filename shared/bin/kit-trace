@@ -1,0 +1,701 @@
+#!/usr/bin/env python3
+"""kit-trace: a requirement-to-evidence traceability matrix for a project.
+
+  kit-trace PROJECT                      print the matrix (nothing is written)
+  kit-trace --ia F --gds F --test-plan F --change F [--poc F ...]
+                                         use these files instead of (or on top of) a project folder
+  kit-trace PROJECT --json               the matrix as JSON
+  kit-trace PROJECT --write [--force]    save it to PROJECT/traceability/trace-<YYYY-MM-DD>.md
+  kit-trace PROJECT --prefix SEC         also treat SEC-1, SEC-2, ... as requirement IDs (repeatable)
+  kit-trace PROJECT --root DIR           use a library root other than the one in library.md
+
+PROJECT is a folder, or a project name under <library root>/artifacts/. In a folder it picks the
+latest version (by v<n>, then date changed) of the impact assessment (file name with "ia" or
+"impact-assessment"), the design specification ("gds" or "design-spec"), the test plan
+("test-plan"), and the change request ("change-request"), plus any POC files ("poc" in the name).
+Markdown, text, and .docx files are read; .docx text, headings, and tables come straight from the
+file, so Word isn't needed.
+
+Requirements come from the IA: IDs such as REQ-001, FR-1, NFR-2, or BR-3, and numbered rows in a
+table whose header names a requirement (these get IDs IA-1, IA-2, ...). For each requirement it
+finds the GDS section that addresses it, the test cases (TC-, TEST-, UAT-, SIT- IDs), the change
+request steps, and any POC that names it, with its go, no-go, or pivot verdict. It matches in this
+order: the requirement's ID; then a cited section ("IA 3.1" or "GDS section 4.2", or a GDS-section
+column in the IA's table); then a conservative keyword match, marked "(inferred)" for a person to
+check. It flags requirements not addressed in the GDS, addressed but untested, tested but with no
+change step, and test cases with no requirement. Read-only unless --write; it never overwrites a
+matrix without --force, and it never calls an outside service.
+"""
+import argparse
+import datetime as dt
+import json
+import os
+import pathlib
+import re
+import sys
+import xml.etree.ElementTree as ET
+import zipfile
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import kit_arch as ka  # noqa: E402
+
+REQ_PREFIXES = ["REQ", "FR", "NFR", "BR"]
+TEST_RX = re.compile(r"(?<![A-Za-z0-9])(TC|TEST|UAT|SIT)[-_]?(\d+(?:\.\d+)*)(?![A-Za-z0-9])")
+SECREF_RX = re.compile(r"(?<![A-Za-z0-9])(IA|GDS)\b\s*(?:section|sec\.|§)?\s*§?\s*(\d+(?:\.\d+)*)", re.I)
+ROWREF_RX = re.compile(r"(?<![A-Za-z0-9])(?:IA-(\d+)|requirement\s+#?(\d+))(?![A-Za-z0-9.])", re.I)
+HEAD_RX = re.compile(r"^\s*(#{1,6})\s+(.*?)\s*#*\s*$")
+NUM_RX = re.compile(r"^(\d+(?:\.\d+)*)\.?\s+")
+POC_RX = re.compile(r"(?<![A-Za-z0-9])POC-\d+")
+VERDICT_RX = re.compile(r"\b(?:verdict|recommendation|decision|outcome)\b[^\n]{0,40}?"
+                        r"(?<![A-Za-z-])(no-go|no go|go|pivot)(?![A-Za-z-])", re.I)
+SEP_RX = re.compile(r"^\s*\|[\s:|-]+\|\s*$")
+EXTRA_STOP = set("""shall must should required requirement requirements ensure ensures enable enables
+able user users given then when test tests tested testing case cases step steps expected result results
+verify verified confirm confirms check checks section document following include includes including
+""".split())
+MIN_SHARED, MIN_SHARE = 3, 0.6      # inferred match: 3+ shared terms and 60% of the requirement's terms
+SHOWN = {}                          # normalised ID -> as first written
+MAX_DOCX_XML = 50 * 1024 * 1024
+W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+
+
+# ---------- reading files ----------
+
+def docx_lines(path):
+    """Text of a .docx, one paragraph per line: headings as '#' lines, tables as '|' rows."""
+    with zipfile.ZipFile(path) as z:
+        info = z.getinfo("word/document.xml")
+        if info.file_size > MAX_DOCX_XML:
+            raise ValueError("document.xml is too large to read")
+        root = ET.fromstring(z.read(info))
+    body = root.find(f"{W}body")
+    out = []
+
+    def ptext(p):
+        parts = []
+        for el in p.iter():
+            if el.tag == f"{W}t" and el.text:
+                parts.append(el.text)
+            elif el.tag in (f"{W}tab", f"{W}br"):
+                parts.append(" ")
+        return re.sub(r"\s+", " ", "".join(parts)).strip()
+
+    for el in (body if body is not None else []):
+        if el.tag == f"{W}p":
+            text = ptext(el)
+            if not text:
+                continue
+            style = el.find(f"{W}pPr/{W}pStyle")
+            val = style.get(f"{W}val", "") if style is not None else ""
+            m = re.search(r"heading\s*(\d)", val, re.I)
+            if m:
+                text = "#" * min(int(m.group(1)), 6) + " " + text
+            elif val.lower() == "title":
+                text = "# " + text
+            out.append(text)
+        elif el.tag == f"{W}tbl":
+            for i, tr in enumerate(el.iter(f"{W}tr")):
+                cells = [" ".join(t for t in (ptext(p) for p in tc.iter(f"{W}p")) if t).replace("|", "/")
+                         for tc in tr.findall(f"{W}tc")]
+                out.append("| " + " | ".join(cells) + " |")
+                if i == 0:
+                    out.append("|" + "---|" * len(cells))
+            out.append("")
+    return out
+
+
+class Doc:
+    """A document's lines, with the section heading in effect at each line."""
+
+    def __init__(self, path):
+        self.path = pathlib.Path(path)
+        if self.path.suffix.lower() == ".docx":
+            self.lines = docx_lines(self.path)
+        else:
+            self.lines = ka.read_lines(self.path)
+        self.sec = []            # (number, label) at each line
+        self.sections = {}       # number -> label
+        self.section_text = {}   # label -> text
+        cur = ("", "(before the first heading)")
+        for line in self.lines:
+            m = HEAD_RX.match(line)
+            if m:
+                title = re.sub(r"[*_`]", "", m.group(2)).strip()
+                n = NUM_RX.match(title)
+                cur = (n.group(1) if n else "", title)
+                if cur[0] and cur[0] not in self.sections:
+                    self.sections[cur[0]] = title
+            self.sec.append(cur)
+            self.section_text.setdefault(cur[1], []).append(line)
+        self.section_text = {k: "\n".join(v) for k, v in self.section_text.items()}
+
+    def tables(self):
+        """Markdown table rows as (line index, header-lower list, cell list)."""
+        head = None
+        for i, line in enumerate(self.lines):
+            s = line.strip()
+            if not s.startswith("|"):
+                head = None
+                continue
+            cells = [c.strip() for c in s.strip("|").split("|")]
+            if head is None:
+                head = [re.sub(r"[*_`]", "", c).lower() for c in cells]
+                continue
+            if SEP_RX.match(s):
+                continue
+            yield i, head, cells + [""] * (len(head) - len(cells))
+
+
+# ---------- matching helpers ----------
+
+def make_req_rx(prefixes):
+    alt = "|".join(sorted({re.escape(p.upper()) for p in prefixes}, key=len, reverse=True))
+    return re.compile(r"(?<![A-Za-z0-9])(" + alt + r")[-_]?(\d+(?:\.\d+)*)(?![A-Za-z0-9])")
+
+
+def norm(prefix, digits):
+    return prefix.upper() + "-" + ".".join(str(int(p)) for p in digits.split("."))
+
+
+def terms(text):
+    out = set()
+    for w in ka.tokens(text):
+        w = w.strip(".")
+        if len(w) < 4 or w in EXTRA_STOP or w.replace(".", "").isdigit():
+            continue
+        if len(w) > 4 and w.endswith("s") and not w.endswith("ss"):
+            w = w[:-1]
+        out.add(w)
+    return out
+
+
+def inferred(req_terms, other_terms):
+    if len(req_terms) < MIN_SHARED:
+        return 0.0
+    shared = req_terms & other_terms
+    share = len(shared) / len(req_terms)
+    return share if len(shared) >= MIN_SHARED and share >= MIN_SHARE else 0.0
+
+
+def clean(s, n=90):
+    s = re.sub(r"\s+", " ", re.sub(r"[*`]", "", s or "")).strip().strip("|:-— ").strip()
+    return s if len(s) <= n else s[:n - 3].rstrip() + "..."
+
+
+def sec_refs(text):
+    return [(k.upper(), num) for k, num in SECREF_RX.findall(text)]
+
+
+def in_section(num, ref):
+    return bool(num) and (num == ref or num.startswith(ref + "."))
+
+
+# ---------- requirements ----------
+
+def requirements(ia, req_rx):
+    reqs, order = {}, []
+
+    def add(key, display, text, i, gds_cites=()):
+        r = reqs.get(key)
+        if r is None:
+            r = reqs[key] = {"id": display, "key": key, "text": text, "ia_section": ia.sec[i][0],
+                             "ia_location": f"{ia.path.name}:{i + 1}", "gds_cites": list(gds_cites),
+                             "gds": [], "tests": [], "changes": [], "poc": []}
+            order.append(key)
+        elif not r["text"] and text:
+            r["text"] = text
+        return r
+
+    # 1. tables: rows with an ID, or numbered rows in a requirement table
+    table_no, last_head = 0, None
+    for i, head, cells in ia.tables():
+        if head is not last_head:
+            table_no, last_head = table_no + 1, head
+        row = " | ".join(cells)
+        text_col = next((j for j, h in enumerate(head)
+                         if any(w in h for w in ("requirement", "description", "statement", "text"))
+                         and not re.fullmatch(r"(requirement )?(id|no\.?|#|number|ref)", h)), None)
+        gds_cols = [j for j, h in enumerate(head) if "gds" in h or "design" in h or "addressed" in h]
+        cites = [m for j in gds_cols if j < len(cells) for m in re.findall(r"\d+(?:\.\d+)*", cells[j])]
+        ids = list(req_rx.finditer(row))
+        if ids:
+            first = ids[0]
+            others = [c for j, c in enumerate(cells) if not req_rx.fullmatch(c.strip("* ")) and j not in gds_cols]
+            text = cells[text_col] if text_col is not None and text_col < len(cells) and not req_rx.fullmatch(
+                cells[text_col].strip("* ")) else max(others, key=len, default="")
+            add(norm(first.group(1), first.group(2)), f"{first.group(1)}-{first.group(2)}", clean(text), i, cites)
+            continue
+        if any("requirement" in h for h in head) and re.fullmatch(r"\d+\.?", cells[0].strip()):
+            n = cells[0].strip().rstrip(".")
+            key = f"IA-{int(n)}"
+            if key in reqs:
+                key = f"IA-{table_no}.{int(n)}"
+            text = cells[text_col] if text_col not in (None, 0) and text_col < len(cells) else max(cells[1:], key=len, default="")
+            add(key, key, clean(text), i, cites)
+    # 2. lines that start with an ID (lists, headings, paragraphs), then any other mention
+    for i, line in enumerate(ia.lines):
+        if line.strip().startswith("|"):
+            continue
+        m = req_rx.search(line)
+        if not m:
+            continue
+        lead = re.sub(r"^[\s#>*\-+\d.)]*", "", line[:m.start()])
+        if not lead.strip("*_ "):
+            add(norm(m.group(1), m.group(2)), f"{m.group(1)}-{m.group(2)}", clean(line[m.end():]), i)
+    for i, line in enumerate(ia.lines):
+        for m in req_rx.finditer(line):
+            add(norm(m.group(1), m.group(2)), f"{m.group(1)}-{m.group(2)}", "", i)
+    for r in reqs.values():
+        r["terms"] = terms(r["text"])
+    return reqs, order
+
+
+def explicit_keys(text, req_rx, reqs, shown=None):
+    keys = []
+    for a, b in req_rx.findall(text):
+        keys.append(norm(a, b))
+        if shown is not None:
+            shown.setdefault(norm(a, b), f"{a}-{b}")
+    for a, b in ROWREF_RX.findall(text):
+        n = int(a or b)
+        if f"IA-{n}" in reqs:
+            keys.append(f"IA-{n}")
+    out = []
+    for k in keys:
+        if k not in out:
+            out.append(k)
+    return out
+
+
+def link(lst, entry):
+    if not any(e["ref"] == entry["ref"] for e in lst):
+        lst.append(entry)
+
+
+# ---------- the GDS ----------
+
+def trace_gds(gds, reqs, req_rx, unknown):
+    for i, line in enumerate(gds.lines):
+        num, label = gds.sec[i]
+        where = f"{gds.path.name}:{i + 1}"
+        if line.strip().startswith("|"):      # a trace table row: a cell naming a GDS section wins
+            for c in line.strip().strip("|").split("|"):
+                m = re.fullmatch(r"(?:§|section\s*)?\s*(\d+(?:\.\d+)*)\.?", c.strip(), re.I)
+                if m and m.group(1) in gds.sections:
+                    num, label = m.group(1), gds.sections[m.group(1)]
+                    break
+        for k in explicit_keys(line, req_rx, reqs, SHOWN):
+            if k in reqs:
+                link(reqs[k]["gds"], {"ref": label, "section": num, "how": "id", "source": where})
+            else:
+                unknown.setdefault(k, where)
+        for kind, ref in sec_refs(line):
+            if kind != "IA":
+                continue
+            for r in reqs.values():
+                if in_section(r["ia_section"], ref):
+                    link(r["gds"], {"ref": label, "section": num, "how": f"cited IA {ref}", "source": where})
+    for r in reqs.values():
+        for ref in r["gds_cites"]:
+            if r["gds"]:
+                break
+            label = gds.sections.get(ref)
+            note = f"cited in the IA" if label else "cited in the IA; section not found in the GDS"
+            link(r["gds"], {"ref": label or f"GDS {ref}", "section": ref, "how": note, "source": r["ia_location"]})
+    sec_terms = {label: terms(text) for label, text in gds.section_text.items()}
+    nums = {label: num for num, label in gds.sections.items()}
+    for r in reqs.values():
+        if r["gds"]:
+            continue
+        best = max(((inferred(r["terms"], t), label) for label, t in sec_terms.items()), default=(0, ""))
+        if best[0]:
+            link(r["gds"], {"ref": best[1], "section": nums.get(best[1], ""), "how": "inferred",
+                            "source": gds.path.name})
+
+
+def reqs_for_gds_section(reqs, ref):
+    return [r for r in reqs.values()
+            if any(e["how"] != "inferred" and in_section(e["section"], ref) for e in r["gds"])]
+
+
+# ---------- tests and change steps ----------
+
+def units(doc, kind):
+    """Split a test plan into test cases, or a change request into steps: (label, text, line)."""
+    out, cur = [], None
+    for i, line in enumerate(doc.lines):
+        s = line.strip()
+        if s.startswith("|"):
+            cur = None
+            if SEP_RX.match(s) or s == "|":
+                continue
+            cells = [c.strip() for c in s.strip("|").split("|")]
+            if kind == "test":
+                m = next((TEST_RX.fullmatch(re.sub(r"[*`]", "", c)) for c in cells[:2]
+                          if TEST_RX.fullmatch(re.sub(r"[*`]", "", c))), None)
+                if m:
+                    out.append([m.group(0), s, i])
+            else:
+                m = re.fullmatch(r"(?:step\s*)?(\d+)\.?", re.sub(r"[*`]", "", cells[0]), re.I)
+                if m:
+                    out.append([f"step {m.group(1)}", s, i])
+            continue
+        if kind == "test":
+            m = TEST_RX.match(re.sub(r"^[\s#>*\-+]*(?:test case\s*)?", "", s, flags=re.I))
+            if m:
+                cur = [m.group(0), s, i]
+                out.append(cur)
+                continue
+        else:
+            m = re.match(r"^\s*(?:[*\-+]\s*)?(?:\*\*)?(?:step\s+(\d+)\b|(\d+)[.)]\s)", line, re.I)
+            if m:
+                cur = [f"step {m.group(1) or m.group(2)}", s, i]
+                out.append(cur)
+                continue
+        if HEAD_RX.match(line):
+            cur = None
+        elif cur is not None and s:
+            cur[1] += "\n" + s
+    # one entry per label; repeated labels in different sections get the section name
+    merged, seen = [], {}
+    for label, text, i in out:
+        if kind == "test" and label in seen:
+            seen[label][1] += "\n" + text
+            continue
+        if kind != "test" and any(m[0] == label for m in merged):
+            sec = doc.sec[i][1]
+            label = f"{label} ({clean(sec, 40)})"
+        entry = [label, text, i]
+        seen[label] = entry
+        merged.append(entry)
+    return merged
+
+
+def trace_units(doc, kind, reqs, req_rx, unknown, test_owner=None):
+    """Link each test case or change step to requirements. Returns the units and their links."""
+    field = "tests" if kind == "test" else "changes"
+    result = []
+    for label, text, i in units(doc, kind):
+        where = f"{doc.path.name}:{i + 1}"
+        linked = []
+        for k in explicit_keys(text, req_rx, reqs, SHOWN):
+            if k in reqs:
+                linked.append((k, "id"))
+            else:
+                unknown.setdefault(k, where)
+        if kind == "change" and test_owner:
+            for m in TEST_RX.finditer(text):
+                for k in test_owner.get(m.group(0), []):
+                    linked.append((k, f"via {m.group(0)}"))
+        if not linked:
+            for sk, ref in sec_refs(text):
+                hits = ([r for r in reqs.values() if in_section(r["ia_section"], ref)] if sk == "IA"
+                        else reqs_for_gds_section(reqs, ref))
+                linked += [(r["key"], f"cited {sk} {ref}") for r in hits]
+        first = text.split("\n")[0]
+        if first.startswith("|"):
+            first = " / ".join(c.strip() for c in first.strip("|").split("|")[1:] if c.strip())
+        else:
+            first = TEST_RX.sub("", first, count=1) if kind == "test" else first
+        result.append({"label": label, "text": clean(first, 120), "source": where,
+                       "terms": terms(text), "links": []})
+        for k, how in linked:
+            if not any(x[0] == k for x in result[-1]["links"]):
+                result[-1]["links"].append((k, how))
+                link(reqs[k][field], {"ref": label, "how": how, "source": where})
+    # inferred: requirements with nothing yet, against units
+    for r in reqs.values():
+        if r[field]:
+            continue
+        for u in result:
+            if inferred(r["terms"], u["terms"]):
+                u["links"].append((r["key"], "inferred"))
+                link(r[field], {"ref": u["label"], "how": "inferred", "source": u["source"]})
+    return result
+
+
+def trace_poc(docs, reqs, req_rx):
+    for d in docs:
+        text = "\n".join(d.lines)
+        m = POC_RX.search(text)
+        poc_id = m.group(0) if m else d.path.stem
+        verdicts = VERDICT_RX.findall(text)
+        verdict = verdicts[-1].lower().replace("no go", "no-go") if verdicts else "verdict not recorded"
+        for k in explicit_keys(text, req_rx, reqs):
+            if k in reqs:
+                link(reqs[k]["poc"], {"ref": f"{poc_id}: {verdict}", "how": "id", "source": d.path.name})
+
+
+# ---------- finding the files ----------
+
+def version(p):
+    m = re.search(r"v(\d+(?:\.\d+)?)", p.stem.lower())
+    return (float(m.group(1)) if m else 0.0, p.stat().st_mtime)
+
+
+def classify(p):
+    s = p.stem.lower()
+    if "handoff" in s or s.startswith("trace") or "traceab" in s or s.startswith("~$"):
+        return None
+    if re.search(r"(^|[-_ ])poc([-_ \d]|$)", s):
+        return "poc"
+    if re.search(r"test[-_ ]?plan", s):
+        return "test_plan"
+    if re.search(r"change[-_ ]?request|(^|[-_ ])cr([-_ ]v?\d|$)", s):
+        return "change"
+    if re.search(r"(^|[-_ ])gds([-_ ]|$)|design[-_ ]spec", s):
+        return "gds"
+    if re.search(r"(^|[-_ ])ia([-_ ]|$)|impact[-_ ]assessment", s):
+        return "ia"
+    return None
+
+
+def discover(folder):
+    found = {}
+    for dirpath, dirnames, files in os.walk(folder):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".") and d != "traceability"]
+        for f in files:
+            p = pathlib.Path(dirpath) / f
+            if p.suffix.lower() not in (".md", ".markdown", ".txt", ".docx") or f.startswith("."):
+                continue
+            kind = classify(p)
+            if kind:
+                found.setdefault(kind, []).append(p)
+    pick = {k: max(v, key=version) for k, v in found.items() if k != "poc"}
+    pick["poc"] = sorted(found.get("poc", []))
+    return pick
+
+
+# ---------- output ----------
+
+def cell_of(entries, show_section=False):
+    if not entries:
+        return ""
+    out = []
+    for e in entries:
+        s = e["ref"]
+        if e["how"] == "inferred":
+            s += " (inferred)"
+        elif e["how"] != "id":
+            s += f" ({e['how']})"
+        out.append(s)
+    return "; ".join(out).replace("|", "/")
+
+
+def build(a, root):
+    folder = None
+    if a.project:
+        p = ka.expand(a.project)
+        if not p.is_dir() and root:
+            p = root / "artifacts" / a.project
+        if not p.is_dir():
+            sys.exit(f"kit-trace: no project folder {a.project} (give a folder, or a project under "
+                     "<library root>/artifacts/)")
+        folder = p.resolve()
+    files = discover(folder) if folder else {"poc": []}
+    for k, v in (("ia", a.ia), ("gds", a.gds), ("test_plan", a.test_plan), ("change", a.change)):
+        if v:
+            files[k] = ka.expand(v)
+    if a.poc:
+        files["poc"] = [ka.expand(x) for x in a.poc]
+    if not files.get("ia"):
+        sys.exit("kit-trace: no impact assessment found (name it with 'ia' or 'impact-assessment', or use --ia)")
+    for k, v in files.items():
+        for f in (v if isinstance(v, list) else [v]):
+            if not f.is_file():
+                sys.exit(f"kit-trace: {f} not found")
+    try:
+        docs = {k: Doc(v) for k, v in files.items() if k != "poc" and v}
+        pocs = [Doc(p) for p in files.get("poc", [])]
+    except (zipfile.BadZipFile, KeyError, ET.ParseError, ValueError) as e:
+        sys.exit(f"kit-trace: couldn't read a .docx file ({e})")
+
+    req_rx = make_req_rx(REQ_PREFIXES + a.prefix)
+    reqs, order = requirements(docs["ia"], req_rx)
+    unknown = {}
+    if "gds" in docs:
+        trace_gds(docs["gds"], reqs, req_rx, unknown)
+    tests, test_owner = [], {}
+    if "test_plan" in docs:
+        tests = trace_units(docs["test_plan"], "test", reqs, req_rx, unknown)
+        for t in tests:
+            test_owner[t["label"]] = [k for k, how in t["links"] if how != "inferred"]
+    if "change" in docs:
+        trace_units(docs["change"], "change", reqs, req_rx, unknown, test_owner)
+    trace_poc(pocs, reqs, req_rx)
+
+    have = {k: k in docs for k in ("gds", "test_plan", "change")}
+    rows = []
+    for k in order:
+        r = reqs[k]
+        gaps = []
+        if have["gds"] and not r["gds"]:
+            gaps.append("not addressed in the GDS")
+        if have["test_plan"] and not r["tests"] and (r["gds"] or not have["gds"]):
+            gaps.append("addressed but untested" if have["gds"] else "untested")
+        if have["change"] and r["tests"] and not r["changes"]:
+            gaps.append("tested but no change step")
+        r["gaps"] = gaps
+        rows.append(r)
+    orphans = [t for t in tests if not t["links"]]
+    inferred_n = sum(1 for r in rows for f in ("gds", "tests", "changes") for e in r[f] if e["how"] == "inferred")
+    summary = {
+        "requirements": len(rows),
+        "addressed_in_gds": sum(1 for r in rows if r["gds"]) if have["gds"] else None,
+        "tested": sum(1 for r in rows if r["tests"]) if have["test_plan"] else None,
+        "with_change_step": sum(1 for r in rows if r["changes"]) if have["change"] else None,
+        "with_poc": sum(1 for r in rows if r["poc"]),
+        "test_cases": len(tests),
+        "inferred_links": inferred_n,
+        "gaps": {
+            "not_addressed_in_gds": sum(1 for r in rows if "not addressed in the GDS" in r["gaps"]),
+            "addressed_but_untested": sum(1 for r in rows if any("untested" in g for g in r["gaps"])),
+            "tested_but_no_change_step": sum(1 for r in rows if "tested but no change step" in r["gaps"]),
+            "orphan_test_cases": len(orphans),
+        },
+    }
+    name = folder.name if folder else docs["ia"].path.parent.name
+    return {"project": name, "folder": str(folder) if folder else None,
+            "generated": dt.date.today().strftime("%d-%b-%Y"),
+            "sources": {"ia": str(files["ia"]), "gds": str(files["gds"]) if files.get("gds") else None,
+                        "test_plan": str(files["test_plan"]) if files.get("test_plan") else None,
+                        "change": str(files["change"]) if files.get("change") else None,
+                        "poc": [str(p) for p in files.get("poc", [])]},
+            "summary": summary, "rows": rows, "orphans": orphans,
+            "unknown_ids": unknown, "checked": have}
+
+
+def as_json(res):
+    def entries(lst):
+        return [{"ref": e["ref"], "how": e["how"], "source": e["source"]} for e in lst]
+    return {
+        "project": res["project"], "folder": res["folder"], "generated": res["generated"],
+        "sources": res["sources"], "summary": res["summary"],
+        "requirements": [{"id": r["id"], "text": r["text"], "ia_location": r["ia_location"],
+                          "gds": entries(r["gds"]), "tests": entries(r["tests"]),
+                          "changes": entries(r["changes"]), "poc": entries(r["poc"]), "gaps": r["gaps"]}
+                         for r in res["rows"]],
+        "orphan_tests": [{"id": t["label"], "text": t["text"], "source": t["source"]} for t in res["orphans"]],
+        "ids_not_in_ia": [{"id": SHOWN.get(k, k), "first_seen": v} for k, v in res["unknown_ids"].items()],
+    }
+
+
+def render(res):
+    s, src, chk = res["summary"], res["sources"], res["checked"]
+
+    def n(v):
+        return "not checked (no file)" if v is None else str(v)
+
+    def rel(p):
+        if not p:
+            return "not found"
+        if res["folder"]:
+            try:
+                return str(pathlib.Path(p).relative_to(res["folder"]))
+            except ValueError:
+                pass
+        return p
+
+    g = s["gaps"]
+    out = [f"# Traceability matrix: {res['project']}", "",
+           "| Field | Value |", "|---|---|",
+           f"| Project | {res['project']} |",
+           f"| Generated | {res['generated']}, by kit-trace |",
+           f"| Impact assessment | {rel(src['ia'])} |",
+           f"| Design specification | {rel(src['gds'])} |",
+           f"| Test plan | {rel(src['test_plan'])} |",
+           f"| Change request | {rel(src['change'])} |",
+           f"| POC files | {', '.join(rel(p) for p in src['poc']) or 'none'} |",
+           "| Classification | internal (raise it if any source is confidential) |", "",
+           "## Summary", "",
+           f"- Requirements in the IA: {s['requirements']}",
+           f"- Addressed in the GDS: {n(s['addressed_in_gds'])}",
+           f"- Tested: {n(s['tested'])} (test cases in the plan: {s['test_cases']})",
+           f"- With a change step: {n(s['with_change_step'])}",
+           f"- Named in a POC: {s['with_poc']}",
+           f"- Gaps: {g['not_addressed_in_gds']} not addressed in the GDS, {g['addressed_but_untested']} "
+           f"addressed but untested, {g['tested_but_no_change_step']} tested but no change step, "
+           f"{g['orphan_test_cases']} orphan test cases",
+           f"- Inferred links: {s['inferred_links']}; each is a keyword match a person should confirm", ""]
+    if not res["rows"]:
+        out += ["No requirements found in the IA. Give them IDs (REQ-001, FR-1, NFR-2) or number them in a "
+                "table whose header says Requirement.", ""]
+    out += ["## Matrix", "",
+            "| Requirement | Statement | GDS section | Test cases | Change steps | POC / verdict | Gaps |",
+            "|---|---|---|---|---|---|---|"]
+    for r in res["rows"]:
+        out.append("| " + " | ".join([
+            r["id"], (r["text"] or "(no statement found)").replace("|", "/"),
+            cell_of(r["gds"]) or ("none" if chk["gds"] else "not checked"),
+            cell_of(r["tests"]) or ("none" if chk["test_plan"] else "not checked"),
+            cell_of(r["changes"]) or ("none" if chk["change"] else "not checked"),
+            cell_of(r["poc"]) or "none",
+            "; ".join(r["gaps"]) or "none"]) + " |")
+    out.append("")
+    out += ["## Gaps", ""]
+    for title, test in (("Not addressed in the GDS", lambda r: "not addressed in the GDS" in r["gaps"]),
+                        ("Addressed but untested", lambda r: any("untested" in x for x in r["gaps"])),
+                        ("Tested but no change step", lambda r: "tested but no change step" in r["gaps"])):
+        hits = [r for r in res["rows"] if test(r)]
+        out.append(f"### {title}")
+        out.append("")
+        out += [f"- {r['id']}: {r['text'] or '(no statement found)'} [{r['ia_location']}]" for r in hits] or ["- none"]
+        out.append("")
+    out += ["### Orphan test cases", ""]
+    out += [f"- {t['label']}: {t['text']} [{t['source']}]" for t in res["orphans"]] or ["- none"]
+    out.append("")
+    if res["unknown_ids"]:
+        out += ["### IDs not in the IA", ""]
+        out += [f"- {SHOWN.get(k, k)} [{v}]" for k, v in res["unknown_ids"].items()]
+        out.append("")
+    out += ["## How this was matched", "",
+            "- First by requirement ID; then by a cited section (\"IA 3.1\", \"GDS section 4.2\", or the "
+            "IA's GDS-section column), shown in brackets; then by shared keywords, marked (inferred).",
+            "- Inferred links are suggestions, not evidence. Confirm each one, or add the requirement's ID "
+            "to the GDS section, test case, or change step.",
+            "- Every requirement needs a test case or a stated reason why not; record the reason in the "
+            "test plan.", ""]
+    return "\n".join(out)
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-trace", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("project", nargs="?")
+    ap.add_argument("--ia")
+    ap.add_argument("--gds")
+    ap.add_argument("--test-plan", dest="test_plan")
+    ap.add_argument("--change")
+    ap.add_argument("--poc", action="append", default=[])
+    ap.add_argument("--prefix", action="append", default=[])
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--write", action="store_true")
+    ap.add_argument("--force", action="store_true")
+    ap.add_argument("--root")
+    a = ap.parse_args(argv)
+    if not a.project and not a.ia:
+        ap.error("give a project folder or --ia")
+    if a.write and not a.project:
+        ap.error("--write needs a project folder to save into")
+    root = ka.expand(a.root) if a.root else ka.library_root()
+    res = build(a, root)
+    if a.json:
+        print(json.dumps(as_json(res), indent=2))
+        return 0
+    text = render(res)
+    if not a.write:
+        print(text, end="")
+        return 0
+    dest = pathlib.Path(res["folder"]) / "traceability" / f"trace-{dt.date.today().isoformat()}.md"
+    if dest.exists() and not a.force:
+        sys.exit(f"kit-trace: {dest} exists; add --force to replace it")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(".tmp")
+    tmp.write_text(text)
+    tmp.replace(dest)
+    print(f"kit-trace: wrote {dest}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

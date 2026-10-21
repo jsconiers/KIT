@@ -1,0 +1,42 @@
+{
+  "framework": "NIST Cybersecurity Framework (CSF)",
+  "version": "2.0",
+  "source": "NIST CSF 2.0 (NIST CSWP 29, Feb 2024)",
+  "note": "Function and Category IDs and names only. NIST CSF 2.0 is a US government work; read the framework itself for the Subcategories and their text.",
+  "functions": [
+    {"id": "GV", "name": "Govern", "categories": [
+      {"id": "GV.OC", "name": "Organizational Context"},
+      {"id": "GV.RM", "name": "Risk Management Strategy"},
+      {"id": "GV.RR", "name": "Roles, Responsibilities, and Authorities"},
+      {"id": "GV.PO", "name": "Policy"},
+      {"id": "GV.OV", "name": "Oversight"},
+      {"id": "GV.SC", "name": "Cybersecurity Supply Chain Risk Management"}
+    ]},
+    {"id": "ID", "name": "Identify", "categories": [
+      {"id": "ID.AM", "name": "Asset Management"},
+      {"id": "ID.RA", "name": "Risk Assessment"},
+      {"id": "ID.IM", "name": "Improvement"}
+    ]},
+    {"id": "PR", "name": "Protect", "categories": [
+      {"id": "PR.AA", "name": "Identity Management, Authentication, and Access Control"},
+      {"id": "PR.AT", "name": "Awareness and Training"},
+      {"id": "PR.DS", "name": "Data Security"},
+      {"id": "PR.PS", "name": "Platform Security"},
+      {"id": "PR.IR", "name": "Technology Infrastructure Resilience"}
+    ]},
+    {"id": "DE", "name": "Detect", "categories": [
+      {"id": "DE.CM", "name": "Continuous Monitoring"},
+      {"id": "DE.AE", "name": "Adverse Event Analysis"}
+    ]},
+    {"id": "RS", "name": "Respond", "categories": [
+      {"id": "RS.MA", "name": "Incident Management"},
+      {"id": "RS.AN", "name": "Incident Analysis"},
+      {"id": "RS.CO", "name": "Incident Response Reporting and Communication"},
+      {"id": "RS.MI", "name": "Incident Mitigation"}
+    ]},
+    {"id": "RC", "name": "Recover", "categories": [
+      {"id": "RC.RP", "name": "Incident Recovery Plan Execution"},
+      {"id": "RC.CO", "name": "Incident Recovery Communication"}
+    ]}
+  ]
+}

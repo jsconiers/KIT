@@ -1,7 +1,8 @@
 #!/bin/bash
 # Tests the Windows runner (platform/windows/morning/run.ps1) under PowerShell 7 (pwsh) on this
 # machine: the model hook (models.env), per-run time limits, the one-run-at-a-time lock, the
-# kit-pause kill switch, the kit-cost budget guard, and cost recording from JSON output. It uses a
+# kit-pause kill switch, the kit-cost budget guard, cost recording from JSON output, and the weekly
+# demand refresh. It uses a
 # fake Kit and a fake claude in a throwaway folder. This exercises the script's logic, not Windows
 # itself: Task Scheduler, NTFS, and the py launcher are still untested on a real Windows machine.
 # Skips (passes) when pwsh or python isn't installed.
@@ -126,6 +127,59 @@ printf 'OUTLOOK_CHECK="off"\nRETRY_DELAY="0"\nRETRY_ON="off"\n' > "$M/config"
 fresh; rm -f "$S/flaky-count"; FAKE_FLAKY=1 run worklist
 ! grep -q "retrying" "$LOG" && [ "$(calls)" = "1" ] && ok "retry: RETRY_ON=off turns it off" || bad "RETRY_ON off"
 rm -f "$S/flaky-count"
+
+# ---- connector health line (morning only) -------------------------------------------------------
+grep -q 'connector_health.py' "$HERE/platform/windows/morning/run.ps1" && grep -q 'CONNECTOR_CHECK' "$HERE/platform/windows/morning/run.ps1" \
+  && ok "connectors: run.ps1 calls connector_health.py and honours CONNECTOR_CHECK" || bad "connector wiring"
+cp "$HERE/shared/morning/connector_health.py" "$M/"
+KC="$KIT/.install/shared/bin/kit-connect"
+cat > "$KC" <<'KC'
+import json, os, sys, time
+time.sleep(float(os.environ.get("FAKE_KC_SLEEP", "0")))
+assert sys.argv[1:] == ["test", "--json"], sys.argv
+print(json.dumps({"read": False, "servers": [
+    {"server": "tracker", "pass": True, "checks": []},
+    {"server": "wiki", "pass": False, "checks": [{"check": "health", "pass": False, "detail": "Failed to connect"}]}]}))
+KC
+printf 'OUTLOOK_CHECK="off"\n' > "$M/config"
+fresh; run morning
+grep -qF "Connectors: tracker PASS; wiki FAIL (health: Failed to connect)." "$S/claude-args.txt" \
+  && ok "connectors: one PASS/FAIL line per server reaches the morning prompt" || bad "connector line"
+printf 'OUTLOOK_CHECK="off"\nCONNECTOR_CHECK_TIMEOUT="2"\n' > "$M/config"
+fresh; start=$(date +%s); FAKE_KC_SLEEP=20 run morning; took=$(( $(date +%s) - start ))
+grep -qF "didn't finish in 2 s" "$S/claude-args.txt" && [ "$took" -lt 15 ] && grep -q "start morning" "$LOG" \
+  && ok "connectors: a hung kit-connect is stopped at the limit ($took s) and the run goes on" || bad "connector timeout ($took s)"
+printf 'OUTLOOK_CHECK="off"\nCONNECTOR_CHECK="off"\n' > "$M/config"
+fresh; run morning
+! grep -q "Connector check" "$S/claude-args.txt" && ok "connectors: CONNECTOR_CHECK=off skips it" || bad "connector off"
+rm -f "$KC" "$M/connector_health.py"
+
+# ---- weekly demand refresh (DEMAND_REFRESH) -----------------------------------------------------
+P="$HERE/platform/windows/morning/run.ps1" pwsh -NoProfile -Command '$e=$null; [void][System.Management.Automation.Language.Parser]::ParseFile($env:P,[ref]$null,[ref]$e); exit $e.Count' \
+  && ok "demands: run.ps1 parses" || bad "run.ps1 parse errors"
+grep -q 'demand_refresh.py' "$HERE/platform/windows/morning/run.ps1" && grep -q '"DEMAND_REFRESH" "off"' "$HERE/platform/windows/morning/run.ps1" \
+  && ok "demands: run.ps1 calls demand_refresh.py, off by default" || bad "demands wiring"
+mkdir -p "$KIT/memory/context"
+cp "$HERE/shared/morning/demand_refresh.py" "$HERE/shared/morning/prompt-demand-refresh.md" "$M/"
+cp "$HERE/shared/bin/connector-guard" "$KIT/.install/shared/bin/"
+printf '{"allowed_servers": ["tracker"], "allow_tools": ["mcp__tracker__get_demand", "mcp__tracker__create_demand"]}\n' \
+  > "$KIT/memory/context/connector-guard.json"
+ARGS="$S/claude-args.txt"
+DCONF='OUTLOOK_CHECK="off"\nDEMAND_SERVER="tracker"\nDEMAND_REGISTER_DIR="~/library/demands"\n'
+printf "$DCONF" > "$M/config"
+fresh; run weekly
+! grep -q "Demand refresh" "$ARGS" && ! grep -q "mcp__tracker" "$ARGS" && ok "demands: off by default" || bad "demands default off"
+printf "${DCONF}DEMAND_REFRESH=\"on\"\n" > "$M/config"
+fresh; run weekly
+grep -q "Demand refresh (DEMAND_REFRESH is on)" "$ARGS" && grep -qxF "mcp__tracker__get_demand" "$ARGS" && grep -qxF "Agent" "$ARGS" \
+  && grep -qxF "Edit(~/library/demands/**)" "$ARGS" && ! grep -q "create_demand" "$ARGS" \
+  && ok "demands: on, the brief and only the read tools are added" || bad "demands on"
+fresh; run morning
+! grep -q "Demand refresh" "$ARGS" && ! grep -q "mcp__tracker" "$ARGS" && ok "demands: the morning run is unaffected" || bad "demands morning"
+printf 'OUTLOOK_CHECK="off"\nDEMAND_REFRESH="on"\n' > "$M/config"
+fresh; run weekly
+grep -q "Refresh skipped: DEMAND_SERVER isn't set" "$ARGS" && ! grep -q "mcp__" "$ARGS" && ok "demands: incomplete setup is skipped with a line" || bad "demands skip"
+rm -f "$M/demand_refresh.py" "$M/prompt-demand-refresh.md" "$KIT/memory/context/connector-guard.json"
 
 echo "run.ps1 tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

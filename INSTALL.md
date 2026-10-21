@@ -112,7 +112,7 @@ missing. Fill in what applies to you, in roughly this order:
 | File | Used by | What to fill in |
 |---|---|---|
 | `library.md` | librarian and most agents | The library root folder, published document libraries, read-only sources |
-| `writing.md` | IA and GDS writers, reviewer, planner, deck builder | Templates, examples, style skills, output format, quality loop thresholds |
+| `writing.md` | IA and GDS writers, reviewer, planner, deck builder, `kit-trace` | Templates, examples, style skills, output format, quality loop thresholds, traceability matrix template |
 | `calendar.md` | scheduler, `kit-holds`, `kit-meetprep` | Calendar command, working hours and time zone (for example `09:00-17:00 America/New_York`; holds assume 09:00 to 17:00 until set), habits |
 | `meetings.md` | meeting scribe, `kit-awaiting` | Meeting inbox, your notes folders, project managers, mail commands, vendor template, "Awaiting reply after" (days) |
 | `connectors.md` | gateway and its callers | Which outside systems, which records to read first |
@@ -120,7 +120,7 @@ missing. Fill in what applies to you, in roughly this order:
 | `intake.md` | intake triager | Intake checklist, when an impact assessment is needed, project naming |
 | `knowledge.md` | curator, handoff, `kit-sysprofile` | Knowledge base location and first topics, where system profiles go |
 | `standards.md` | standards checker, `kit-refarch` | Engineering standards, reference architectures (the index `kit-refarch` reads, for example `published/<library>-index.md`), security baselines, DR tiers, waivers |
-| `compliance.md` | risk and compliance mapper | Control frameworks, policies, data classes, sign-off roles, risk rating |
+| `compliance.md` | risk and compliance mapper | Control frameworks, policies, data classes, sign-off roles, risk rating, and a framework profile: which frameworks apply (NIST CSF 2.0, PCI DSS, CIS, CISA Zero Trust and Secure by Design, SOX ITGC, others), to what, and the owner role; the mapper maps only against those, and fills the NIST CSF 2.0 mapping (`csf-mapping-template.md`, `kit-csf`) when CSF 2.0 applies |
 | `costs.md` | cost estimator | Rate cards, labor rates, currency, contingency, sizing basis (`kit-sizing`) |
 | `estimating.md` | PMO estimator | Past project data, phase model, roles |
 | `changeboard.md` | change board prep | Template, risk scoring, checklist, lead times, cadence |
@@ -137,7 +137,7 @@ missing. Fill in what applies to you, in roughly this order:
 | `oneonone.md` | `kit-oneonone` | Manager role (not a name), cadence, day, last 1:1, look-back |
 | `triage.md` | `kit-triage` | Your name or address (to tell direct mail from copies), priority senders, delegated topics |
 | `expertise.md` | `kit-publish`, `kit-team experts` | Optional self-declared topics (Topic, Level, Evidence); shared only if `expertise` is in Publish |
-| `audit.md` | auditor, `kit-audit`, `kit-audit-export` | Audit folder, reviewers, working hours, thresholds |
+| `audit.md` | auditor, `kit-audit`, `kit-audit-export` | Audit folder, reviewers, working hours, thresholds (including the filter check: `filter_total_min`, `filter_limit_factor`, `filter_same_min`, `filter_same_pct`) |
 | `retention.md` + `retention.json` | `kit-retention` | Records rules from your policy (default: keep everything) |
 | `sharing.md` + `sharing-policy.json` (+ `sharing-db.json` for SQL) | `kit-publish`, `kit-team` | Kit id, role, what to publish, transport, shared root, overload threshold (default 8), organization limits |
 | `connector-guard.json` | connector guard, `kit-connect` | Allowed servers and tools, denied tools, audit folder, optional probe tools and credential variable names |
@@ -210,6 +210,27 @@ rule written with `~/` doesn't match a command spelled with the full home path.
 `kit-settings` changes delivery and to-do sync; everything else is a key in
 `~/Claude/Agents/kit/.install/shared/morning/config` (every key is documented in
 `shared/morning/config.example`).
+
+The morning brief opens with a connector health line (each connector PASS or FAIL, from
+`kit-connect test`, no model cost). It gives up after `CONNECTOR_CHECK_TIMEOUT` seconds (default
+120) and never fails the run; `CONNECTOR_CHECK="off"` skips it.
+
+**Weekly demand refresh** (off by default). Set `DEMAND_REFRESH="on"`, `DEMAND_SERVER` (the
+connector name, also in connector-guard.json `allowed_servers`), and `DEMAND_REGISTER_DIR` (the
+folder holding the demand tracker's REGISTER.md and LOG.md). `DEMAND_TOOLS` names the read tools
+the Monday run may call (`mcp__<server>__<tool>`, separated by semicolons); empty uses that
+server's `allow_tools`. Only tools the guard would allow, and whose names don't read as writes, are
+used. `DEMAND_REFRESH_MAX` (25) caps the demands checked; `DEMAND_REFRESH_MIN_LEFT` (10) skips it
+when the run is nearly out of time.
+
+The red team and threat modeler need no setup beyond `standards.md` and `compliance.md`; name a
+team copy of their templates under "Design review templates" in `standards.md`.
+
+To start the lifecycle radar, save a configuration-management export (JSON or CSV with fields such
+as name, os, os_version, support_group, environment) and run
+`kit-lifecycle --import FILE --source "where it came from"`. It writes `radar/inventory.json`
+(`--force` replaces one, `--out` writes elsewhere); then `kit-lifecycle` writes the summary. OS
+names are tidied with the tool's alias map; `radar/os-aliases.json` extends it.
 
 ```bash
 kit-settings                                  # show current choices

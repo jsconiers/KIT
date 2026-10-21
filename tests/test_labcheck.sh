@@ -69,5 +69,63 @@ printf -- '- **Data rule check terms:** not set. Extra terms.\n' > "$K/memory/co
 out="$(python3 "$TOOL" --terms)"
 check "not set falls back to built-in" "built-in only" "$out"
 
+# Hardening baseline warning (lab runbooks only; a warning, not a finding)
+out="$(python3 "$TOOL" "$T/clean.md")"; rc=$?
+[ $rc -eq 0 ] && ok "missing baseline still exits 0" || bad "missing baseline still exits 0 (rc=$rc)"
+check "warns on runbook with no hardening baseline" "clean.md: warning: no hardening baseline" "$out"
+check "summary counts the warning" "1 warning" "$out"
+out="$(python3 "$TOOL" --json "$T/clean.md")"
+check "json lists the warning" '"warnings": \[' "$out"
+check "json warning names the file" '"warning": "no hardening baseline' "$out"
+
+cp "$HERE/kit/templates/lab-runbook-template.md" "$T/tmpl-runbook.md"
+out="$(python3 "$TOOL" "$T/tmpl-runbook.md")"
+check "blank template guidance doesn't count as a baseline" "warning: no hardening baseline" "$out"
+
+cat > "$T/hard-row.md" <<'EOF'
+# Lab runbook: LAB-0002
+| Field | Value |
+|---|---|
+| Hardening baseline | Vendor OS benchmark v3.0, Level 1, exception: SSH banner off (lab only) |
+EOF
+out="$(python3 "$TOOL" "$T/hard-row.md")"
+checknot "filled field silences the warning" "warning" "$out"
+
+cat > "$T/hard-unset.md" <<'EOF'
+# Lab runbook: LAB-0003
+| Hardening baseline | not set |
+EOF
+out="$(python3 "$TOOL" "$T/hard-unset.md")"
+check "not set field still warns" "warning: no hardening baseline" "$out"
+
+cat > "$T/hard-none.md" <<'EOF'
+# Lab runbook: LAB-0004
+| Hardening baseline | none, because the appliance is vendor-sealed and can't be changed |
+EOF
+out="$(python3 "$TOOL" "$T/hard-none.md")"
+checknot "none with a reason counts as stated" "warning" "$out"
+
+cat > "$T/hard-cis.md" <<'EOF'
+# Lab runbook: LAB-0005
+Build the hosts from the image hardened to the CIS Benchmark for the OS, Level 1.
+EOF
+out="$(python3 "$TOOL" "$T/hard-cis.md")"
+checknot "CIS Benchmark mention silences the warning" "warning" "$out"
+
+cat > "$T/hard-line.md" <<'EOF'
+# Lab runbook: LAB-0006
+- **Hardening baseline:** internal server baseline v2, Level 2, no exceptions
+EOF
+out="$(python3 "$TOOL" "$T/hard-line.md")"
+checknot "bold field line silences the warning" "warning" "$out"
+
+printf '# Lab request: LAB-0007\nSynthetic data only.\n' > "$T/request.md"
+out="$(python3 "$TOOL" "$T/request.md")"
+checknot "lab requests aren't checked for a baseline" "warning" "$out"
+
+cp "$T/hard-unset.md" "$T/dirty-runbook.md"; cat "$T/dirty.md" >> "$T/dirty-runbook.md"
+out="$(python3 "$TOOL" "$T/dirty-runbook.md")"; rc=$?
+[ $rc -eq 1 ] && ok "findings plus warning exits 1" || bad "findings plus warning exits 1 (rc=$rc)"
+
 echo "kit-labcheck tests: $pass passed, $fail failed"
 [ $fail -eq 0 ]

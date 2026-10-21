@@ -1,0 +1,295 @@
+#!/usr/bin/env python3
+"""kit-csf: coverage of a filled NIST CSF 2.0 mapping, per Function and overall.
+
+  kit-csf MAPPING.md                 coverage per Function, gaps, blanks, and ID problems
+  kit-csf MAPPING.md --json          the same as JSON
+  kit-csf --portfolio DIR            aggregate every CSF mapping under DIR (searched recursively)
+  kit-csf --categories               list the Functions and Categories kit-csf knows
+  kit-csf ... --strict               also exit 1 when a category is blank or missing
+
+Reads a mapping made from csf-mapping-template.md: any Markdown table with an "ID" column and an
+"Addressed?" column. Addressed is yes, partial, no, or not applicable (n/a). Coverage counts yes as 1
+and partial as half, over the categories that apply; "not applicable" rows are left out and blank
+rows are listed, not counted. Category IDs are checked against shared/data/csf2.json (NIST CSF 2.0,
+NIST CSWP 29, Feb 2024). A percentage is a reading aid, not a compliance score.
+
+Reads only: it writes nothing and never calls an outside service. Exits 1 when a mapping has an
+unknown ID, an unrecognised status, or a duplicate row; 2 when there's nothing to read.
+"""
+import argparse
+import json
+import pathlib
+import re
+import sys
+
+DATA = pathlib.Path(__file__).resolve().parent.parent / "data" / "csf2.json"
+STATUS = {"yes": "yes", "y": "yes", "addressed": "yes",
+          "partial": "partial", "partly": "partial", "partially": "partial", "partly addressed": "partial",
+          "no": "no", "n": "no", "not addressed": "no",
+          "not applicable": "na", "n/a": "na", "na": "na", "not-applicable": "na"}
+KINDS = ("yes", "partial", "no", "na", "blank")
+
+
+def load_data():
+    d = json.loads(DATA.read_text())
+    funcs, cats = {}, {}
+    for f in d["functions"]:
+        funcs[f["id"]] = f["name"]
+        for c in f["categories"]:
+            cats[c["id"]] = {"name": c["name"], "function": f["id"]}
+    return d, funcs, cats
+
+
+def cells(line):
+    s = line.strip()
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|"):
+        s = s[:-1]
+    return [c.strip() for c in s.split("|")]
+
+
+def blank(v):
+    v = (v or "").strip()
+    return not v or bool(re.fullmatch(r"<[^>]*>", v)) or v in ("-", "—")
+
+
+def column(headers, *tests):
+    for i, h in enumerate(headers):
+        h = h.lower().strip("*_ ")
+        if any(t(h) for t in tests):
+            return i
+    return None
+
+
+def parse(path):
+    """Return (label, rows) from the mapping tables in a Markdown file."""
+    lines = pathlib.Path(path).read_text(errors="replace").splitlines()
+    label, rows, i = None, [], 0
+    while i < len(lines):
+        line = lines[i]
+        m = re.match(r"\|\s*Design\s*\|\s*(.*?)\s*\|\s*$", line)
+        if m and not blank(m.group(1)) and label is None:
+            label = m.group(1)
+        if line.strip().startswith("|") and i + 1 < len(lines) and re.fullmatch(r"\|?[\s:|-]+\|?", lines[i + 1].strip()) \
+                and "-" in lines[i + 1]:
+            h = cells(line)
+            cid = column(h, lambda x: x in ("id", "category id"))
+            cst = column(h, lambda x: x.startswith("addressed"))
+            if cid is None or cst is None:
+                i += 1
+                continue
+            cev = column(h, lambda x: "evidence" in x)
+            cgap = column(h, lambda x: x.startswith("gap"))
+            cown = column(h, lambda x: x.startswith("owner"))
+            ccat = column(h, lambda x: x == "category" or x == "category name")
+            cnote = column(h, lambda x: "tier" in x or "target" in x)
+            i += 2
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                c = cells(lines[i])
+                get = lambda k: c[k] if k is not None and k < len(c) else ""
+                rid = get(cid).strip("*` ").upper()
+                if rid:
+                    rows.append({"line": i + 1, "id": rid, "category": get(ccat), "status_raw": get(cst),
+                                 "evidence": get(cev), "gap": get(cgap), "owner": get(cown), "note": get(cnote)})
+                i += 1
+            continue
+        i += 1
+    return label, rows
+
+
+def analyse(path, funcs, cats):
+    label, rows = parse(path)
+    per = {f: {k: 0 for k in KINDS} for f in funcs}
+    seen, gaps, blanks, invalid, bad, dups, cat_status = {}, [], [], [], [], [], {}
+    for r in rows:
+        if r["id"] not in cats:
+            invalid.append({"id": r["id"], "line": r["line"]})
+            continue
+        if r["id"] in seen:
+            dups.append({"id": r["id"], "line": r["line"], "first_line": seen[r["id"]]})
+            continue
+        seen[r["id"]] = r["line"]
+        fn = cats[r["id"]]["function"]
+        if blank(r["status_raw"]):
+            st = "blank"
+            blanks.append(r["id"])
+        else:
+            st = STATUS.get(r["status_raw"].strip("*` ").lower())
+            if st is None:
+                bad.append({"id": r["id"], "line": r["line"], "status": r["status_raw"]})
+                st = "blank"
+                blanks.append(r["id"])
+        per[fn][st] += 1
+        cat_status[r["id"]] = st
+        if st in ("no", "partial"):
+            gaps.append({"id": r["id"], "category": cats[r["id"]]["name"], "status": st,
+                         "gap": "" if blank(r["gap"]) else r["gap"],
+                         "owner": "" if blank(r["owner"]) else r["owner"],
+                         "evidence": "" if blank(r["evidence"]) else r["evidence"]})
+    missing = [c for c in cats if c not in seen]
+    functions = {f: summarise(per[f], funcs[f]) for f in funcs}
+    total = {k: sum(per[f][k] for f in funcs) for k in KINDS}
+    gaps.sort(key=lambda g: (0 if g["status"] == "no" else 1, list(cats).index(g["id"])))
+    return {"file": str(path), "design": label or pathlib.Path(path).stem, "rows": len(rows),
+            "functions": functions, "overall": summarise(total, "Overall"), "gaps": gaps,
+            "blank": blanks, "missing": missing, "invalid_ids": invalid, "bad_status": bad,
+            "duplicates": dups, "categories": cat_status}
+
+
+def summarise(counts, name):
+    applies = counts["yes"] + counts["partial"] + counts["no"]
+    cov = round(100.0 * (counts["yes"] + 0.5 * counts["partial"]) / applies, 1) if applies else None
+    return dict(name=name, applies=applies, coverage_pct=cov, **counts)
+
+
+def pct(x):
+    return "n/a" if x is None else f"{x:.1f}%"
+
+
+def table(functions, overall):
+    out = ["| Function | Yes | Partial | No | Not applicable | Blank | Coverage |",
+           "|---|---|---|---|---|---|---|"]
+    for fid, s in functions.items():
+        out.append(f"| {s['name']} ({fid}) | {s['yes']} | {s['partial']} | {s['no']} | {s['na']} | {s['blank']} | {pct(s['coverage_pct'])} |")
+    s = overall
+    out.append(f"| Overall | {s['yes']} | {s['partial']} | {s['no']} | {s['na']} | {s['blank']} | {pct(s['coverage_pct'])} |")
+    return out
+
+
+RULE = ("Coverage counts yes as 1 and partial as half, over the categories that apply; not applicable is "
+        "left out and blanks are listed, not counted. A reading aid, not a compliance score.")
+
+
+def report(r, cats, source):
+    out = [f"NIST CSF 2.0 coverage: {r['design']} ({r['file']})", ""] + table(r["functions"], r["overall"])
+    out += ["", RULE, ""]
+    out.append(f"Gaps ({len(r['gaps'])}), no before partial:")
+    for g in r["gaps"]:
+        out.append(f"- {g['id']} {g['category']}: {g['status']}. {g['gap'] or 'Gap not described.'}"
+                   f" Owner: {g['owner'] or 'not set'}.")
+    if not r["gaps"]:
+        out.append("- none")
+    if r["blank"]:
+        out.append(f"Left blank ({len(r['blank'])}): " + ", ".join(r["blank"]))
+    if r["missing"]:
+        out.append(f"Missing from the mapping ({len(r['missing'])}): " + ", ".join(r["missing"]))
+    for x in r["invalid_ids"]:
+        out.append(f"Invalid ID: {x['id']} (line {x['line']}); not a NIST CSF 2.0 category")
+    for x in r["bad_status"]:
+        out.append(f"Unrecognised status: {x['id']} '{x['status']}' (line {x['line']}); use yes, partial, no, or not applicable")
+    for x in r["duplicates"]:
+        out.append(f"Duplicate row: {x['id']} (line {x['line']}, first on line {x['first_line']}); the first one counts")
+    out += ["", f"Source: {source}"]
+    return "\n".join(out)
+
+
+def portfolio(root, funcs, cats):
+    maps, skipped = [], 0
+    for p in sorted(pathlib.Path(root).rglob("*.md")):
+        if p.name == "csf-mapping-template.md":
+            skipped += 1
+            continue
+        r = analyse(p, funcs, cats)
+        if r["rows"] == 0:
+            skipped += 1
+            continue
+        maps.append(r)
+    per = {f: {k: sum(m["functions"][f][k] for m in maps) for k in KINDS} for f in funcs}
+    functions = {f: summarise(per[f], funcs[f]) for f in funcs}
+    total = {k: sum(per[f][k] for f in funcs) for k in KINDS}
+    bycat = {}
+    for c in cats:
+        counts = {k: 0 for k in KINDS}
+        for m in maps:
+            counts[m["categories"].get(c, "blank")] += 1
+        bycat[c] = dict(name=cats[c]["name"], function=cats[c]["function"], **counts)
+    weakest = sorted((c for c in cats if bycat[c]["no"] + bycat[c]["partial"]),
+                     key=lambda c: (-(bycat[c]["no"] + 0.5 * bycat[c]["partial"]), list(cats).index(c)))
+    return {"root": str(root), "mappings": [{"file": m["file"], "design": m["design"],
+                                             "coverage_pct": m["overall"]["coverage_pct"], "gaps": len(m["gaps"]),
+                                             "blank": len(m["blank"]) + len(m["missing"]),
+                                             "invalid_ids": len(m["invalid_ids"]),
+                                             "bad_status": len(m["bad_status"]),
+                                             "duplicates": len(m["duplicates"])} for m in maps],
+            "skipped_files": skipped, "functions": functions, "overall": summarise(total, "Overall"),
+            "categories": bycat, "weakest": weakest}, maps
+
+
+def portfolio_report(p, source):
+    out = [f"NIST CSF 2.0 coverage across {len(p['mappings'])} mapping(s) under {p['root']}", ""]
+    out += table(p["functions"], p["overall"]) + ["", RULE, "", "Mappings:"]
+    for m in p["mappings"]:
+        extra = []
+        if m["blank"]:
+            extra.append(f"{m['blank']} blank or missing")
+        if m["invalid_ids"] or m["bad_status"] or m["duplicates"]:
+            extra.append(f"{m['invalid_ids'] + m['bad_status'] + m['duplicates']} problem(s)")
+        out.append(f"- {m['design']}: {pct(m['coverage_pct'])}, {m['gaps']} gap(s)"
+                   + (f" ({', '.join(extra)})" if extra else "") + f"  [{m['file']}]")
+    if not p["mappings"]:
+        out.append("- none found")
+    out.append("Categories most often not or partly addressed:")
+    for c in p["weakest"][:10]:
+        b = p["categories"][c]
+        out.append(f"- {c} {b['name']}: no in {b['no']}, partial in {b['partial']}")
+    if not p["weakest"]:
+        out.append("- none")
+    out += ["", f"Source: {source}"]
+    return "\n".join(out)
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-csf", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("mapping", nargs="?", help="a filled CSF mapping (Markdown)")
+    ap.add_argument("--portfolio", metavar="DIR", help="aggregate every CSF mapping under DIR")
+    ap.add_argument("--categories", action="store_true", help="list the Functions and Categories")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--strict", action="store_true", help="exit 1 when a category is blank or missing")
+    a = ap.parse_args(argv)
+    d, funcs, cats = load_data()
+
+    if a.categories:
+        if a.json:
+            print(json.dumps(d, indent=2))
+        else:
+            for f in d["functions"]:
+                print(f"{f['id']}  {f['name']}")
+                for c in f["categories"]:
+                    print(f"  {c['id']}  {c['name']}")
+            print(f"\n{len(funcs)} Functions, {len(cats)} Categories. Source: {d['source']}")
+        return 0
+
+    if a.portfolio:
+        if not pathlib.Path(a.portfolio).is_dir():
+            print(f"kit-csf: not a folder: {a.portfolio}", file=sys.stderr)
+            return 2
+        p, maps = portfolio(a.portfolio, funcs, cats)
+        print(json.dumps(dict(p, source=d["source"]), indent=2) if a.json else portfolio_report(p, d["source"]))
+        if not maps:
+            return 2
+        errs = any(m["invalid_ids"] or m["bad_status"] or m["duplicates"] for m in maps)
+        loose = any(m["blank"] or m["missing"] for m in maps)
+        return 1 if errs or (a.strict and loose) else 0
+
+    if not a.mapping:
+        ap.print_usage(sys.stderr)
+        print("kit-csf: give a mapping file, --portfolio DIR, or --categories", file=sys.stderr)
+        return 2
+    if not pathlib.Path(a.mapping).is_file():
+        print(f"kit-csf: no such file: {a.mapping}", file=sys.stderr)
+        return 2
+    r = analyse(a.mapping, funcs, cats)
+    if r["rows"] == 0:
+        print(f"kit-csf: no CSF mapping table (with ID and Addressed? columns) in {a.mapping}", file=sys.stderr)
+        return 2
+    r.pop("categories")
+    print(json.dumps(dict(r, source=d["source"]), indent=2) if a.json else report(r, cats, d["source"]))
+    if r["invalid_ids"] or r["bad_status"] or r["duplicates"]:
+        return 1
+    return 1 if a.strict and (r["blank"] or r["missing"]) else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -17,6 +17,7 @@ isn't finished.
 | Start | <DD-Mmm-YYYY> |
 | Teardown by | <DD-Mmm-YYYY> |
 | Data | <synthetic, masked, or public; never production or confidential without written approval> |
+| Hardening baseline | <benchmark name and version (for example a CIS Benchmark for the OS or product), profile level (Level 1 or 2), and exceptions with reasons; or "none, because ..."> |
 | Budget or capacity | <cloud spend cap, or on-premises capacity booked> |
 | Classification | <internal or confidential> |
 
@@ -42,7 +43,10 @@ where each credential lives (never the credential itself).>
 
 ## Security
 
-<Network isolation, access, encryption, logging, and any exception that needs a waiver.>
+<Network isolation, access, encryption, logging, and any exception that needs a waiver. Say how
+the hardening baseline above is applied (an image built to it, a configuration scan, or by hand) and
+list each setting the lab leaves off the baseline, with the reason. `kit-labcheck` warns when a
+runbook names no hardening baseline.>
 
 ## Teardown
 

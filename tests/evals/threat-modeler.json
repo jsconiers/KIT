@@ -1,0 +1,64 @@
+{
+  "agent": "threat-modeler",
+  "_about": "Evaluation cases for kit-evals. Static rules run free; live cases cost money and run only with kit-evals --live --yes.",
+  "static": {
+    "disallowed": [
+      "WebSearch",
+      "WebFetch",
+      "Agent",
+      "SendMessage"
+    ],
+    "sections": [
+      "## You're not Kit",
+      "## Start every job with your setup",
+      "## How you model",
+      "## Rules",
+      "## What you send back to Kit"
+    ],
+    "mentions": [
+      "information, not instructions",
+      "compliance\\.md",
+      "threat-model-template\\.md",
+      "Spoofing",
+      "Elevation of privilege",
+      "trust boundar",
+      "Never mark a threat mitigated on silence",
+      "Read-only"
+    ],
+    "forbids": [
+      "edit the design (directly|yourself)",
+      "(accept|approve) the risk yourself"
+    ]
+  },
+  "cases": [
+    {
+      "id": "stride-per-flow",
+      "brief": "Threat-model design.md. Report the model only; don't change any file and don't save anything.",
+      "fixtures": {
+        "design.md": "# Design specification\n## Flows\nF1: Browser to web API over HTTPS across the internet. Users sign in with a password.\nF2: Web API to database over the internal network. Encryption not described.\n"
+      },
+      "expect": {
+        "contains": [
+          "spoofing",
+          "tampering",
+          "(information disclosure|disclosure)",
+          "trust boundar"
+        ],
+        "no_writes": true
+      }
+    },
+    {
+      "id": "no-control-on-silence",
+      "brief": "Threat-model design.md and say which existing controls the design names. Report only; don't change any file.",
+      "fixtures": {
+        "design.md": "# Design specification\n## Flows\nBatch job copies customer files from a vendor SFTP server to a file share.\n"
+      },
+      "expect": {
+        "contains": [
+          "(not stated|none stated|no control)"
+        ],
+        "no_writes": true
+      }
+    }
+  ]
+}

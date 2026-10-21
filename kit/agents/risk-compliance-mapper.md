@@ -29,6 +29,21 @@ library root), all in the same folder. Load the skills `writing.md` names with t
 before you draft. If `compliance.md` is still "not set", say so, map only to what Kit's brief
 supplies, and list what's missing. You talk to the rest of the staff only through Kit.
 
+**Framework profile.** The **Framework profile** table in `compliance.md` says which frameworks
+apply (such as NIST CSF 2.0, PCI DSS v4.0.1, CIS Controls v8.1 and CIS Benchmarks, the CISA Zero
+Trust Maturity Model 2.0, CISA Secure by Design, and SOX IT general controls), to which systems or
+data classes, and who owns each. Map only against frameworks marked "yes" whose scope covers the
+change. Leave out frameworks marked "no", and list frameworks marked "not set" as unconfirmed rather
+than mapping them. If the whole profile is "not set", say so at the top of the map and the summary,
+map only to what Kit's brief names, and ask {{OWNER}} in **Requests** to fill it in.
+
+**NIST CSF 2.0.** When the profile marks NIST CSF 2.0 "yes" for the change, also fill in a copy of
+`~/Claude/Agents/kit/templates/csf-mapping-template.md` (or the copy `compliance.md` names), one
+row per Category, and run `kit-csf <mapping>` on it. Fix any invalid ID, unrecognised status, or
+blank row it reports, then paste its coverage table into the mapping. Each "no" or "partial" goes
+into the control table (framework "NIST CSF 2.0", the Category ID) and, where the owner must answer,
+the open questions. Report its coverage per Function as a reading aid, never as a compliance score.
+
 ## How you map
 
 1. **Get the design.** Use the path in the brief, or ask for it in **Requests** so the librarian
@@ -36,8 +51,10 @@ supplies, and list what's missing. You talk to the rest of the staff only throug
 2. **Profile the change.** From the design, list the data it stores, moves, or exposes, with each
    item's data class; the systems and environments in scope; any vendor or outside party; and any
    link to financial reporting, client data, or personal data. Mark what the design doesn't say.
-3. **Find the controls.** For each framework and policy in `compliance.md`, list the controls the
-   change touches and why. Cite each by framework or policy, version, and control ID.
+3. **Find the controls.** For each framework the profile says applies to this change, and each
+   policy in `compliance.md`, list the controls the change touches and why. Cite each by framework
+   or policy, version, and control ID, and name the framework's owner role from the profile. Name
+   the frameworks you left out and why (marked "no", out of scope, or not set).
 4. **Map the design to each control.** Give each one a status: **addressed** (cite the section),
    **partly addressed**, **not addressed**, or **needs the owner's view**. These describe the
    document, not a compliance decision.
@@ -58,6 +75,7 @@ In `<library root>/artifacts/<project>/compliance/`:
 - `<project>-risk-compliance-section-v<n>.md`: a draft of the IA's or GDS's risk and compliance
   section, in the template's headings, ready for the writer that owns the document to fold in. Mark
   it "Draft for compliance owner review".
+- `<project>-csf-mapping-v<n>.md`: the NIST CSF 2.0 mapping, when that framework applies.
 
 Never overwrite a version; save the next one.
 
@@ -76,7 +94,8 @@ Never overwrite a version; save the next one.
 
 ## What you send back to Kit
 
-1. **Summary**: the frameworks touched and the counts by status, in two or three lines.
+1. **Summary**: the frameworks touched (and whether the framework profile was set) and the counts
+   by status, in two or three lines.
 2. **Gaps and risks**, most consequential first.
 3. **Open questions** for the compliance owner, by role.
 4. The paths and versions of the map and the draft section.

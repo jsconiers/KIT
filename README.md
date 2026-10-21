@@ -33,13 +33,13 @@ affiliated with them.)
 
 ## Kit's staff
 
-Thirty agents in five groups. Each reads its own setup file in `memory/context/`, and
+Thirty-two agents in five groups. Each reads its own setup file in `memory/context/`, and
 `memory/context/agents.md` describes them all.
 
 | Group | Agents |
 |---|---|
 | Knowledge and documents | researcher, librarian, curator, precedent finder, onboarding guide, handoff |
-| Writing and review | IA writer, GDS writer, reviewer, standards checker, risk and compliance mapper, diagrammer, deck builder |
+| Writing and review | IA writer, GDS writer, reviewer, red team, threat modeler, standards checker, risk and compliance mapper, diagrammer, deck builder |
 | Delivery and planning | intake triager, dependency mapper, implementation planner, change board prep, cost estimator, PMO estimator, decision recorder, status reporter, meeting scribe |
 | Outside systems and oversight | gateway, demand tracker, auditor, scheduler |
 | Exploration | POC lead, lab planner, training lead, future tech planner |
@@ -93,10 +93,12 @@ The installer links these into `~/.local/bin` (all in `shared/bin/`):
 | `kit-refarch` | Suggests which published reference architectures fit a demand, ranked, with why |
 | `kit-precedent` | Ranked search of the library's indexes and registers for precedent |
 | `kit-sysprofile` | One-page profile of a system from the library's records, every line cited |
+| `kit-trace` | Requirement-to-evidence matrix: IA requirement to GDS section, test case, change step, and POC verdict, with gaps flagged |
+| `kit-csf` | Coverage of a NIST CSF 2.0 mapping per Function, with gaps, blanks, and ID checks; `--portfolio` across projects |
 | `kit-sizing` | Rough-order compute, storage, and network sizing, every assumption shown |
 | `kit-diagram-diff` | What changed between two versions of a draw.io or Visio diagram |
-| `kit-labcheck` | Flags production or confidential data in lab requests and runbooks |
-| `kit-lifecycle` | End-of-support early warning from an inventory and sourced dates |
+| `kit-labcheck` | Flags production or confidential data in lab requests and runbooks; warns when a runbook names no hardening baseline |
+| `kit-lifecycle` | End-of-support early warning from an inventory and sourced dates: past, extended (inside paid extended support), urgent, warning; a data-quality section; `--import` turns a CMDB export into the inventory |
 | `kit-roadmap` | Drafts a 1-to-3-year technology roadmap |
 | `kit-project` | Creates a project's folder skeleton by type (dry run unless `--yes`) |
 | `kit-quality` | Recurring review findings become proposed lessons and template changes |
@@ -135,7 +137,7 @@ The installer links these into `~/.local/bin` (all in `shared/bin/`):
 | `kit-version` | Installed version and commit, and whether GitHub is ahead |
 
 Also in `shared/bin/`, called by Kit or the scheduled runs rather than by hand:
-`connector-guard` (the read-only hook and audit log), `kit-audit` (daily and weekly audit
+`connector-guard` (the read-only hook and audit log, with each result's size and stated total), `kit-audit` (daily and weekly audit
 checks), `kit-publish` (writes this Kit's shareable records), `kit-grammar` (optional offline
 grammar pass), `kit-drawio` (editable draw.io files), and `vsdx-finish` (Visio title blocks and
 legends).

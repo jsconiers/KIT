@@ -1,0 +1,7 @@
+[
+ {"product": "Red Hat Linux", "cycle": "7", "eol": "2024-06-30", "extended": "2029-05-31", "source": "https://example.org/rhel", "checked": "2026-10-01"},
+ {"product": "Red Hat Linux", "cycle": "8.8", "eol": "2025-05-31", "extended": "2027-05-31", "source": "https://example.org/rhel", "checked": "2026-10-01"},
+ {"product": "Red Hat Linux", "cycle": "8.6", "eol": "2024-05-31", "extended": "2028-01-31", "source": "https://example.org/rhel", "checked": "2026-10-01"},
+ {"product": "Windows Server", "cycle": "2012 R2", "eol": "2023-10-10", "extended": "2026-10-13", "source": "https://example.org/win", "checked": "2026-10-01"},
+ {"product": "Red Hat Linux", "cycle": "7.5", "eol": "2020-04-30", "source": "https://example.org/rhel", "checked": "2026-10-01"}
+]

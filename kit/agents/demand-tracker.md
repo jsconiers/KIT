@@ -59,6 +59,28 @@ first time you need them.
 - **Link it up**: match demands to project folders and library holdings. Ask for library lookups
   in a **Requests** section so Kit can route them.
 
+## Weekly refresh
+
+When Kit's weekly review asks for the weekly refresh, it names the connector, the tools, and how
+many demands to check. Re-check only the register's rows (and demands `demands.md` lists by number
+but the register doesn't have yet), one get per demand by its number. Never search or list the
+whole table; if a result's total looks like the whole table, call it "filter ignored" and don't use
+it. Stop at the first authentication or permission failure.
+
+- **What counts as a change**: state, priority, due date, or the source's updated date differs from
+  the register row. A demand not in the register is **new**; one whose state moved to closed,
+  resolved, cancelled, or completed is **closed**. Compare values as the source shows them; a
+  field you couldn't read is "not reachable", never a change.
+- **Register**: update the changed fields and set "last checked" to today on every row you reached.
+  Leave unreached rows as they were, with a note "not reachable DD-Mmm-YYYY". Never delete a row;
+  closed demands stay, marked closed.
+- **LOG.md**: one dated line per change, newest at the bottom:
+  `DD-Mmm-YYYY weekly refresh: <number> <field> <old> -> <new>`, using `new` or `closed` as the
+  field for those; then one summary line:
+  `DD-Mmm-YYYY weekly refresh: checked N, changed N, unchanged N, not reachable N (<connector>)`.
+- **Back to Kit**: the "Demands: what changed" lines (number, short title, old -> new), new and
+  closed first, then the counts and any failure or "filter ignored".
+
 ## Rules
 
 - Read-only: never create, update, comment on, assign, or close a demand or ticket. If something

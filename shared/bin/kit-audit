@@ -23,6 +23,14 @@ open-issue flag) and <out>/audit.txt (plain text, issues first, "No audit issues
 changes the logs. It exits 0 even when it finds problems or can't read something, so a scheduled run
 never fails because of it; only a usage error exits non-zero.
 
+Filter check: a search-type call (search, query, list, find) whose result reports a total far above
+what was asked for (default: over 1,000 and over 20 times the limit), or the same total as a different
+query to the same tool, is a warning: the connector probably ignored the filter. It reads the total from
+the post record (result_total, or total, total_count, totalCount, totalSize) and the limit from the
+call's logged input; it reports the tool, time, total, and limit only, never the query. When the log
+has no totals it says the check was not checkable. Thresholds in audit.md: `filter_total_min: 1000`,
+`filter_limit_factor: 20`, `filter_same_min: 100`, `filter_same_pct: 1`.
+
 Severity: critical (act today), warning (look at it), info (standing known gaps and context).
 """
 import argparse
@@ -49,7 +57,19 @@ DEFAULTS = {
     "repeat_minutes": 60,      # a call to the same connector this soon after a failure is a repeat
     "open_session_hours": 2,   # sessions newer than this may still be running
     "min_baseline_days": 5,    # active days needed before the volume checks run
+    "filter_total_min": 1000,  # a search whose result reports a total above this...
+    "filter_limit_factor": 20,  # ...and above this many times the requested limit looks unfiltered
+    "filter_same_min": 100,    # totals at least this big, repeated for different queries...
+    "filter_same_pct": 1,      # ...within this percent of each other, look unfiltered too
 }
+SEARCH_WORDS = {"search", "query", "list", "find", "browse", "lookup"}
+# Where a result's total count and a call's limit may be recorded. The guard logs result sizes, not
+# contents, so totals appear only when the post record carries one of these fields.
+TOTAL_KEYS = ("result_total", "total", "total_count", "totalCount", "totalSize", "total_results", "count")
+LIMIT_KEYS = ("limit", "max_results", "maxResults", "sysparm_limit", "page_size", "pageSize", "per_page",
+              "top", "size", "rows", "max")
+PAGING_KEYS = {k.lower() for k in LIMIT_KEYS} | {"offset", "start", "startat", "start_at", "page", "cursor",
+                                                  "sysparm_offset", "skip", "next_page_token", "page_token"}
 DEFAULT_HOURS = (7 * 60, 19 * 60, {0, 1, 2, 3, 4})
 DEFAULT_CALLERS = {"gateway", "intake-triager", "dependency-mapper", "status-reporter"}
 AUTH = re.compile(r"auth|\b401\b|\b403\b|unauthori[sz]ed|forbidden|sign.?in|log.?in|credential|"
@@ -108,6 +128,16 @@ def kb(n):
     if n >= 1024 * 1024:
         return f"{n / 1024 / 1024:.1f} MB"
     return f"{n / 1024:.0f} KB" if n >= 1024 else f"{n} bytes"
+
+
+def as_int(v):
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return int(v)
+    if isinstance(v, str) and v.strip().isdigit():
+        return int(v.strip())
+    return None
 
 
 def read_text(path):
@@ -491,10 +521,70 @@ class Audit:
             self.add("warning", "no-result", "Allowed calls with no result record",
                      self.describe(noresult) + "." + hint + " Result sizes and failures for these calls are unknown.",
                      len(noresult))
+        self.check_filters(pre, post)
         nosess = [e for e in evs if not e.get("session")]
         if nosess:
             self.add("warning", "malformed", "Records with no session id", self.describe(nosess), len(nosess))
         return evs
+
+    def check_filters(self, pre, post):
+        """Searches whose result total is far above what was asked for, or the same total for different
+        queries: signs that the connector ignored a filter and returned everything. Reports the tool,
+        time, total, and limit only, never the query, which may hold personal data."""
+        searches = [p for p in post if not p.get("is_error") and set(words(split(p.get("tool"))[1])) & SEARCH_WORDS]
+        if not searches:
+            return
+        by_id = {e["tool_use_id"]: e for e in pre if e.get("tool_use_id")}
+        rows = []
+        for p in searches:
+            total = next((as_int(p.get(k)) for k in TOTAL_KEYS if as_int(p.get(k)) is not None), None)
+            if total is None:
+                continue
+            call = by_id.get(p.get("tool_use_id")) if p.get("tool_use_id") else None
+            if call is None:
+                call = next((e for e in reversed(pre) if e.get("session") == p.get("session")
+                             and e.get("tool") == p.get("tool") and e["_t"] <= p["_t"]), None)
+            inp = (call or {}).get("input") if isinstance((call or {}).get("input"), dict) else {}
+            limit = as_int(p.get("result_limit"))
+            if limit is None:
+                limit = next((as_int(inp.get(k)) for k in LIMIT_KEYS if as_int(inp.get(k)) is not None), None)
+            # A fingerprint of the query without its paging fields, kept in memory only.
+            key = json.dumps({k: v for k, v in inp.items() if k.lower() not in PAGING_KEYS}, sort_keys=True, default=str)
+            rows.append((p, total, limit, key))
+        if not rows:
+            self.notes.append(f"Filter check: not checkable; the audit log has no result totals for the "
+                              f"{len(searches)} search call{'s' if len(searches) != 1 else ''} in this window.")
+            return
+        th = self.th
+        flagged = []
+        for p, total, limit, _ in rows:
+            if total > th["filter_total_min"] and (limit is None or total > th["filter_limit_factor"] * limit):
+                flagged.append((p, total, limit, "total far above the limit" if limit else "total with no limit"))
+        seen = {id(f[0]) for f in flagged}
+        by_tool = defaultdict(list)
+        for r in rows:
+            if r[1] >= th["filter_same_min"]:
+                by_tool[r[0].get("tool")].append(r)
+        for tool, items in by_tool.items():
+            for i, (p, total, limit, key) in enumerate(items):
+                twins = [o for o in items[:i] + items[i + 1:] if o[3] != key
+                         and abs(o[1] - total) <= max(total, o[1]) * th["filter_same_pct"] / 100]
+                if twins and id(p) not in seen:
+                    flagged.append((p, total, limit, "same total as a different query"))
+                    seen.add(id(p))
+        if flagged:
+            flagged.sort(key=lambda f: f[0]["_t"])
+            parts = [f"{p.get('tool')} at {fmt(p['_t'])}: total {total:,}, limit {limit if limit is not None else 'none'}"
+                     f" ({why})" for p, total, limit, why in flagged[:5]]
+            more = f"; and {len(flagged) - 5} more" if len(flagged) > 5 else ""
+            self.add("warning", "filter-ignored", "Searches that may have ignored their filter",
+                     "; ".join(parts) + more + ". A total far above the limit, or the same total for different "
+                     "queries, usually means the connector dropped the filter and matched everything; check the "
+                     "query and page with an explicit sort order.", len(flagged))
+        unchecked = len(searches) - len(rows)
+        if unchecked:
+            self.notes.append(f"Filter check: {unchecked} search call{'s' if unchecked != 1 else ''} had no result "
+                              "total, so they were not checkable.")
 
     def is_auth(self, e):
         for k in ("error", "error_type", "error_class", "status", "message", "reason"):

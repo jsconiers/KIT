@@ -1,5 +1,6 @@
 #!/bin/bash
-# Tests run.sh's per-run time limits, the one-run-at-a-time lock, and the model hook (models.env).
+# Tests run.sh's per-run time limits, the one-run-at-a-time lock, the model hook (models.env), and
+# the weekly demand refresh (DEMAND_REFRESH).
 # Everything runs in a throwaway folder with a fake Kit and a fake claude; nothing real is touched.
 #   bash tests/test_runsh.sh
 set -u
@@ -139,6 +140,107 @@ printf 'OUTLOOK_CHECK="off"\nRETRY_DELAY="0"\nRETRY_ON="off"\n' > "$M/config"
 fresh; rm -f "$S/flaky-count"; FAKE_FLAKY=1 run worklist
 ! grep -q "retrying" "$LOG" && [ "$(calls)" = "1" ] && ok "retry: RETRY_ON=off turns it off" || bad "RETRY_ON off"
 rm -f "$S/flaky-count"
+
+# ---- connector health line (morning only) -------------------------------------------------------
+cp "$HERE/shared/morning/connector_health.py" "$M/"
+KC="$KIT/.install/shared/bin/kit-connect"
+cat > "$KC" <<'KC'
+import json, os, sys, time
+time.sleep(float(os.environ.get("FAKE_KC_SLEEP", "0")))
+if os.environ.get("FAKE_KC_BROKEN"):
+    print("Traceback: something broke", file=sys.stderr); sys.exit(1)
+assert sys.argv[1:] == ["test", "--json"], sys.argv   # never --read: no model run, no cost
+print(json.dumps({"read": False, "servers": [
+    {"server": "tracker", "pass": True, "checks": [{"check": "health", "pass": True, "detail": "Connected"}]},
+    {"server": "wiki", "pass": False, "checks": [{"check": "guard", "pass": True, "detail": "ok"},
+                                                 {"check": "health", "pass": False, "detail": "Failed to connect"}]}]}))
+sys.exit(1)
+KC
+printf 'OUTLOOK_CHECK="off"\n' > "$M/config"
+fresh; run morning
+grep -qF "Connectors: tracker PASS; wiki FAIL (health: Failed to connect)." "$S/claude-args.txt" \
+  && ok "connectors: one PASS/FAIL line per server reaches the morning prompt" || bad "connector line"
+grep -qF "Connectors: tracker PASS" "$LOG" && grep -q "end morning rc=0" "$LOG" && ok "connectors: line logged, run goes on" || bad "connector log"
+fresh; run worklist
+! grep -q "Connector check" "$S/claude-args.txt" && ok "connectors: not checked on other runs" || bad "connector line on worklist"
+printf 'OUTLOOK_CHECK="off"\nCONNECTOR_CHECK_TIMEOUT="2"\n' > "$M/config"
+fresh; start=$(date +%s); FAKE_KC_SLEEP=20 run morning; took=$(( $(date +%s) - start ))
+grep -qF "Connectors: not checked (kit-connect didn't finish in 2 s)." "$S/claude-args.txt" && [ "$took" -lt 15 ] \
+  && grep -q "end morning rc=0" "$LOG" && ok "connectors: a hung kit-connect is stopped at the limit ($took s) and the run goes on" || bad "connector timeout ($took s)"
+printf 'OUTLOOK_CHECK="off"\n' > "$M/config"
+fresh; FAKE_KC_BROKEN=1 run morning
+grep -qF "Connectors: not checked (Traceback: something broke)." "$S/claude-args.txt" && grep -q "end morning rc=0" "$LOG" \
+  && ok "connectors: a kit-connect error becomes 'not checked' and the run goes on" || bad "connector error"
+printf 'OUTLOOK_CHECK="off"\nCONNECTOR_CHECK="off"\n' > "$M/config"
+fresh; run morning
+! grep -q "Connector check" "$S/claude-args.txt" && ok "connectors: CONNECTOR_CHECK=off skips it" || bad "connector off"
+rm -f "$KC" "$M/connector_health.py"
+
+# ---- weekly demand refresh (DEMAND_REFRESH) -----------------------------------------------------
+mkdir -p "$KIT/memory/context" "$KIT/.install/shared/bin"
+cp "$HERE/shared/morning/demand_refresh.py" "$HERE/shared/morning/prompt-demand-refresh.md" "$M/"
+cp "$HERE/shared/bin/connector-guard" "$KIT/.install/shared/bin/"
+cat > "$KIT/memory/context/connector-guard.json" <<'GJ'
+{"audit_dir": "~/Claude/Agents/kit/audit", "allowed_servers": ["tracker"],
+ "allow_tools": ["mcp__tracker__get_demand", "mcp__tracker__create_demand", "mcp__wiki__get_page"],
+ "deny_tools": []}
+GJ
+ARGS="$S/claude-args.txt"
+has() { grep -qxF -- "$1" "$ARGS"; }
+DCONF='OUTLOOK_CHECK="off"\nDEMAND_SERVER="tracker"\nDEMAND_REGISTER_DIR="~/library/demands"\n'
+printf "$DCONF" > "$M/config"
+fresh; run weekly
+! grep -q "Demand refresh" "$ARGS" && ! grep -q "mcp__tracker" "$ARGS" && ! has "Agent" \
+  && ok "demands: off by default (no prompt text, no connector tools, no Agent)" || bad "demands default off"
+printf "${DCONF}DEMAND_REFRESH=\"on\"\n" > "$M/config"
+fresh; run weekly
+grep -q "Demand refresh (DEMAND_REFRESH is on)" "$ARGS" && grep -q "Never search or list the whole table" "$ARGS" \
+  && grep -q "filter ignored" "$ARGS" && grep -q "Demands: what changed" "$ARGS" \
+  && ok "demands: on, the weekly prompt carries the refresh brief" || bad "demands prompt"
+grep -qF "$S/home/library/demands/REGISTER.md" "$ARGS" && ok "demands: the brief names the register folder" || bad "demands register path"
+has "mcp__tracker__get_demand" && has "Agent" && has "Edit(~/library/demands/**)" \
+  && ok "demands: on, the read tool, Agent, and Edit on the register are allowed" || bad "demands allowed tools"
+! has "mcp__tracker__create_demand" && ! has "mcp__wiki__get_page" \
+  && ok "demands: write tools and other servers' tools are never allowed" || bad "demands write/other tool allowed"
+grep -q "weekly: demand refresh on (tracker" "$LOG" && ok "demands: logged" || bad "demands log"
+printf "${DCONF}DEMAND_REFRESH=\"on\"\nALLOW_TOOLS_WEEKLY=\"Agent\"\n" > "$M/config"
+fresh; run weekly
+[ "$(grep -cx "Agent" "$ARGS")" = "1" ] && ok "demands: Agent isn't doubled when ALLOW_TOOLS_WEEKLY has it" || bad "Agent doubled"
+printf "${DCONF}DEMAND_REFRESH=\"on\"\nDEMAND_TOOLS=\"mcp__tracker__fetch_demand;mcp__tracker__update_demand;mcp__wiki__get_page\"\n" > "$M/config"
+fresh; run weekly
+has "mcp__tracker__fetch_demand" && ! has "mcp__tracker__get_demand" && ! has "mcp__tracker__update_demand" && ! has "mcp__wiki__get_page" \
+  && ok "demands: DEMAND_TOOLS replaces allow_tools, and is filtered the same way" || bad "DEMAND_TOOLS"
+printf 'OUTLOOK_CHECK="off"\nDEMAND_REFRESH="on"\nDEMAND_SERVER="wiki"\nDEMAND_REGISTER_DIR="~/library/demands"\n' > "$M/config"
+fresh; run weekly
+grep -q "Refresh skipped: 'wiki' isn't in connector-guard.json's allowed_servers" "$ARGS" && ! grep -q "mcp__" "$ARGS" && ! has "Agent" \
+  && ok "demands: a server the guard doesn't allow is skipped, with a line in the review" || bad "demands unguarded server"
+printf 'OUTLOOK_CHECK="off"\nDEMAND_REFRESH="on"\nDEMAND_SERVER="tracker"\n' > "$M/config"
+fresh; run weekly
+grep -q "Refresh skipped: DEMAND_REGISTER_DIR isn't set" "$ARGS" && ! grep -q "mcp__" "$ARGS" \
+  && ok "demands: no register folder, skipped with a line" || bad "demands no register"
+printf "${DCONF}DEMAND_REFRESH=\"on\"\n" > "$M/config"
+fresh; run morning
+! grep -q "Demand refresh" "$ARGS" && ! grep -q "mcp__tracker" "$ARGS" && ! has "Agent" \
+  && ok "demands: the morning run is unaffected" || bad "demands leaked into morning"
+cat > "$KIT/.install/shared/bin/kit-cost" <<'KC'
+import sys
+if sys.argv[1:2] == ["check"]:
+    print("stop 97%; budget 100")
+KC
+printf "${DCONF}DEMAND_REFRESH=\"on\"\nCOST_ESSENTIAL_MODES=\"morning weekly\"\n" > "$M/config"
+fresh; run weekly
+grep -q "Refresh skipped: the monthly budget is at its stop level" "$ARGS" && ! grep -q "mcp__tracker" "$ARGS" \
+  && ok "demands: skipped at the budget's stop level" || bad "demands budget"
+rm -f "$KIT/.install/shared/bin/kit-cost"
+printf "${DCONF}DEMAND_REFRESH=\"on\"\nRUN_TIMEOUT_WEEKLY=\"300\"\n" > "$M/config"
+fresh; run weekly
+grep -q "Refresh skipped: the run's time limit is too short" "$ARGS" && ok "demands: skipped when the time limit is too short" || bad "demands timeout"
+rm -f "$KIT/.install/shared/bin/connector-guard"
+printf "${DCONF}DEMAND_REFRESH=\"on\"\n" > "$M/config"
+fresh; run weekly
+grep -q "Refresh skipped: connector-guard can't be loaded" "$ARGS" && ! grep -q "mcp__" "$ARGS" \
+  && ok "demands: fails closed without the connector guard" || bad "demands no guard"
+rm -f "$M/demand_refresh.py" "$M/prompt-demand-refresh.md" "$KIT/memory/context/connector-guard.json"
 
 echo "run.sh tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

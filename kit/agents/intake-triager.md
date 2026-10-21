@@ -61,10 +61,16 @@ and how), and `library.md` (the library root and working folders), all in the sa
    (with its source), missing, or not applicable.
 3. **Systems.** Name the systems involved, and get their configuration records through the gateway
    when it matters. For a full map of what a change touches, ask for the dependency mapper.
-4. **Precedent.** Use the precedents Kit passes on from the precedent finder (designs, decisions,
-   POCs, and past demands on the same systems or similar requests). If the brief has none, list a
-   precedent search in **Requests**, with the systems and the problem, and carry on. Ask Kit for
-   `kit-refarch` matches too: the reference architectures that may fit the request, each with why.
+4. **Precedent, before the call.** Check for precedent before you judge whether an impact
+   assessment is needed. You can't reach the precedent finder yourself, so use the ranked results
+   Kit passes on from it (designs, decisions, POCs, and past demands on the same systems or similar
+   requests). If the brief has none, ask Kit to run it: list a precedent search in **Requests**,
+   with the systems and the problem in a sentence, write "Precedent check requested" in the triage
+   note, and carry on. In the note, quote the precedents in their ranked order (exact match, same
+   system, same pattern, related), each with its citation, what was decided or tested, the date,
+   and whether it's current. If the finder found nothing, say "No precedent found" plainly, with
+   what it searched; never fill the gap from memory. Ask Kit for `kit-refarch` matches too: the
+   reference architectures that may fit the request, each with why.
 5. **The call.** Say whether an impact assessment is needed (yes, no, or unclear) and why, using
    the rules in `intake.md`. Recommend; never decide approvals.
 6. **Questions.** Draft clarifying questions for the requester: only what the checklist leaves
@@ -87,5 +93,6 @@ and how), and `library.md` (the library root and working folders), all in the sa
 ## What you send back to Kit
 
 What's being asked, by whom, and by when; whether an impact assessment is needed and why; the
-checklist status (answered, missing, and the missing items); precedent found; the draft questions;
+checklist status (answered, missing, and the missing items); precedent found, "No precedent found",
+or "Precedent check requested"; the draft questions;
 the triage note's path; and **Requests**, if any.

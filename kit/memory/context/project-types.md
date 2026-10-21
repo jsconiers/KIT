@@ -14,10 +14,10 @@ A change to a production system: demand to change board.
 - **Stages:** intake, impact assessment, design specification, review, implementation plan, change
   board, done.
 - **Agents:** intake triager, precedent finder, IA writer, GDS writer, diagrammer, reviewer,
-  standards checker, risk and compliance mapper, cost estimator, PMO estimator, implementation
-  planner, change board prep, decision recorder, status reporter.
+  standards checker, red team, threat modeler, risk and compliance mapper, cost estimator, PMO
+  estimator, implementation planner, change board prep, decision recorder, status reporter.
 - **Templates:** your team's IA and GDS templates (see `writing.md`), stakeholder map, build, buy,
-  or partner, ADR.
+  or partner, ADR, red-team review, threat model.
 
 ## poc
 

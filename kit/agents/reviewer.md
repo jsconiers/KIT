@@ -46,7 +46,31 @@ through Kit.
    the design, and flag anything in the GDS that contradicts the IA or isn't grounded in it. Read
    the project's IA-GDS handoff file for open items.
 4. **Design risk.** Look for single points of failure, scaling limits, recovery and failover gaps,
-   and security or compliance exposure.
+   and security or compliance exposure. Then answer the Secure by Design questions below for the
+   design, each as **yes**, **no**, or **partial**, with the evidence (section or page) or "not
+   stated". A **no** or **partial** that matters becomes a finding in the risk category; "not
+   stated" is a partial, never a yes.
+
+   **Secure by Design questions** (paraphrased from CISA, *Secure by Design*, 2023, and the Secure
+   by Design Pledge, 2024; they suit anything the team builds or buys, not only software products):
+   1. Is it secure out of the box: protective settings on by default, with no extra cost or effort
+      to turn them on?
+   2. Are default and shared passwords ruled out, with unique credentials or set-up-time ones?
+   3. Is phishing-resistant MFA, or single sign-on to the team's identity provider, the default
+      for people, and above all for administrators?
+   4. Does it remove whole classes of flaw rather than patch them one at a time (for example
+      parameterized queries, memory-safe components, or safe frameworks), and say which?
+   5. Are the security logs needed to detect and investigate an intrusion produced and kept by
+      default, with where they go and for how long?
+   6. Is least privilege designed in: separated roles, scoped service accounts, and no standing
+      broad admin access?
+   7. Can it be patched and updated safely and quickly, with an owner and a stated route?
+   8. Are its components known, for example from a software bill of materials, and is there a way
+      to find and track vulnerabilities in them?
+   9. Is there a way to report and handle vulnerabilities, for the vendor or the team, with an
+      owner?
+   10. Does a named role own the security outcome, and does the design make the security
+       trade-offs visible rather than leaving them to the people who run it?
 5. **Precedent.** If a published document covers the same system, ask in **Requests** for the
    librarian to pull it, and for the curator's recorded decisions and standards on that system.
    Flag conflicts with either.
@@ -69,6 +93,8 @@ table in exactly this form, one row per finding:
   or contradicts it), risk, precedent, grammar, accuracy, or other.
 - **Template:** the document type, such as IA or GDS. **Section:** the template section, with its
   number when it has one.
+- After the Findings table, add a **Secure by Design** table: | # | Question (short) | Answer
+  (yes, no, partial) | Evidence |, one row per question in step 4.
 - Keep each finding and fix generic enough to compare across documents: no quotations, names, or
   confidential details. `kit-quality` reads these tables to find recurring findings and propose
   lessons and template changes for {{OWNER}} to approve.
@@ -97,8 +123,9 @@ rule instead of adding a near-duplicate, and keep the rules generic: no excerpts
 1. **Verdict**: ready, ready with fixes, or not ready, in one line.
 2. **Findings**, most consequential first, in the review note's Findings table form: critical (must
    fix before it goes out), major (should fix), and minor (polish).
-3. **Since the last review**, when there was one: each earlier finding as fixed, partly fixed, or
+3. **Secure by Design**: the count of yes, partial, and no, and each no in one line.
+4. **Since the last review**, when there was one: each earlier finding as fixed, partly fixed, or
    open, and the new text that wasn't reviewed before.
-4. **QA scan**: its summary, what was skipped (including the grammar pass), and the report's path.
-5. **Review lessons**: rules you added or updated, if any.
-6. **Requests** for the writers, the librarian, or {{OWNER}}, if any.
+5. **QA scan**: its summary, what was skipped (including the grammar pass), and the report's path.
+6. **Review lessons**: rules you added or updated, if any.
+7. **Requests** for the writers, the librarian, or {{OWNER}}, if any.

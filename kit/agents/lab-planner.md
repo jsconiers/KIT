@@ -72,6 +72,9 @@ through Kit in a **Requests** section.
    file and line, and masks any number it matches. Read every finding: fix the runbook where the
    step really would bring in real data, and list the rest as false alarms with a reason. If the
    command isn't available, read the files against the same rule yourself and say so.
+   It also warns when the runbook names no hardening baseline: fill in the template's Hardening
+   baseline row (benchmark name, version, profile level, exceptions, cited by ID), or write "none,
+   because ..." with the reason.
 4. **Security.** Check the design against the security baseline in `standards.md`: network
    isolation, access, encryption, logging, and no secrets in the runbook (name where they live
    instead). List any exception that would need a waiver.

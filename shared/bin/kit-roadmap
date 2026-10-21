@@ -78,11 +78,13 @@ def from_lifecycle(radar):
         return out
     for i in s.get("items", []):
         flg = i.get("flag")
-        if flg not in ("past", "urgent", "warning"):
+        if flg not in ("past", "urgent", "warning", "extended"):
             continue
         name = f"{i.get('product', '')} {i.get('version', '')}".strip()
+        # Inside paid extended support: horizon 1 only when the extended end is near.
+        near = flg in ("past", "urgent") or (flg == "extended" and i.get("extended_urgency") == "urgent")
         out.append(dict(title=f"Decide and act on {name} end of support (upgrade, migrate, or retire)",
-                        theme="Lifecycle", horizon=1 if flg in ("past", "urgent") else 2,
+                        theme="Lifecycle", horizon=1 if near else 2,
                         kind=f"lifecycle {flg}",
                         source=f"lifecycle/summary.json: {name}, end of support {i.get('eol') or 'unknown'}",
                         note="verdict comes from the lifecycle review, decided by the roles in future-tech.md"))

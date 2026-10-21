@@ -27,7 +27,8 @@
 #   powershell -ExecutionPolicy Bypass -NoProfile -File run.ps1 morning   (or open, weekly)
 #
 # Settings live in .install\shared\morning\config (shared with the Mac, KEY="value" lines):
-#   OWNER_NAME, SKIP_DAYS, BLOCK_TOOLS, ALLOW_TOOLS, ALLOW_TOOLS_WEEKLY, the time limits
+#   OWNER_NAME, SKIP_DAYS, BLOCK_TOOLS, ALLOW_TOOLS, ALLOW_TOOLS_WEEKLY, the weekly demand refresh
+#   (DEMAND_REFRESH, DEMAND_SERVER, DEMAND_TOOLS, DEMAND_REGISTER_DIR), the time limits
 #   RUN_TIMEOUT (1200 s), RUN_TIMEOUT_WEEKLY (3000), RUN_TIMEOUT_WORKLIST (900), RUN_LOCK_WAIT
 #   (1800), the budget keys COST_BUDGET_MONTHLY, COST_STOP_PCT, COST_ESSENTIAL_MODES, and the
 #   delivery keys:
@@ -274,6 +275,28 @@ if ($Mode -eq "morning" -or $Mode -eq "weekly") {
     }
 }
 
+# Connector health (morning only): kit-connect test, with no read call and so no model cost, gives
+# one PASS/FAIL line per server for the top of the brief. connector_health.py stops it after
+# CONNECTOR_CHECK_TIMEOUT seconds (default 120) and never fails the run; CONNECTOR_CHECK="off" skips it.
+$ConnectLine = ""
+$connHealth = Join-Path $ShareDir "connector_health.py"
+if ($Mode -eq "morning" -and (Cfg "CONNECTOR_CHECK" "on") -ne "off" -and (Test-Path -LiteralPath $connHealth)) {
+    $connOut = Join-Path $KitHome "briefs\connectors.txt"
+    try {
+        Remove-Item -LiteralPath $connOut -Force -ErrorAction SilentlyContinue
+        $connPy = Resolve-Python
+        if ($null -ne $connPy) {
+            & $connPy.Exe @($connPy.Args + @($connHealth, "--timeout", (Cfg "CONNECTOR_CHECK_TIMEOUT" "120"), "--out", $connOut)) *> $null
+        }
+        if (Test-Path -LiteralPath $connOut) {
+            $ConnectLine = ((Get-Content -LiteralPath $connOut -TotalCount 1) -join "").Trim()
+        }
+    } catch {
+        $ConnectLine = ""
+    }
+    if ($ConnectLine -ne "") { Write-Log "== $(Get-Date) $ConnectLine" }
+}
+
 # Build the prompt (substitute {{OWNER}}) and the claude argument list.
 $promptText = (Get-Content -LiteralPath $Prompt -Raw) -replace '\{\{OWNER\}\}', $OwnerName
 if ($Mode -eq "morning" -or $Mode -eq "weekly") {
@@ -285,12 +308,58 @@ if ($Mode -eq "morning" -or $Mode -eq "weekly") {
             $promptText += "`n`nActive legal holds (nothing in these projects may be deleted, moved, or rewritten; list them in a `"Legal holds`" section near the top of the brief, by project name only): $holds"
         }
     }
+    if ($ConnectLine -ne "") {
+        $promptText += "`n`nConnector check before this run (kit-connect test): put this line, as written, at the top of the brief (below the Audit issue section, if there is one), and if any server says FAIL, add `"Connectors: `" plus the failing server names to the health problems at the top of the text: $ConnectLine"
+    }
 }
 if ($CostLevel -eq "warn" -or $CostLevel -eq "stop") {
     $promptText += "`n`nBudget: $CostPct of this month's budget for Kit's scheduled runs is used. Add the line `"Budget: $CostPct used`" to the health section of what you write and as the last line before the closing line of every short text."
     if ($Mode -eq "weekly") {
         $promptText += " Keep this run lean: skip the horizon scan's researcher call (list the due items only) and the optional parts of the monthly retrospective (keep only the three most important points)."
     }
+}
+# Time limit for this run, in seconds. The weekly review does the most, so it gets longer.
+$Timeout = switch ($Mode) {
+    "weekly"   { [int](Cfg "RUN_TIMEOUT_WEEKLY" "3000") }
+    "worklist" { [int](Cfg "RUN_TIMEOUT_WORKLIST" "900") }
+    default    { [int](Cfg "RUN_TIMEOUT" "1200") }
+}
+
+# Weekly demand refresh (DEMAND_REFRESH="on" in the config; off by default): the weekly review has
+# the demand tracker re-check the demands in its register through its connector, read-only and under
+# its connector-guard hooks. demand_refresh.py (no connector or model call) checks DEMAND_SERVER,
+# DEMAND_TOOLS (or the server's allow_tools in connector-guard.json, kept only if the guard would
+# allow them), and DEMAND_REGISTER_DIR, and gives the prompt text plus the extra allowed tools. It's
+# skipped, with a line in the review, at the budget's stop level or if the settings are incomplete.
+$demandRules = @()
+if ($Mode -eq "weekly" -and (Cfg "DEMAND_REFRESH" "off") -eq "on") {
+    $demandOut = Join-Path $LogDir ".demand-refresh-$PID.txt"
+    $demandPy = Join-Path $ShareDir "demand_refresh.py"
+    $demandLines = @()
+    if ($null -ne $pyc -and (Test-Path -LiteralPath $demandPy)) {
+        # --key=value keeps an empty setting from being dropped as an argument.
+        $demandLines = @(& $pyc.Exe @($pyc.Args + @($demandPy,
+            "--server=$(Cfg 'DEMAND_SERVER' '')", "--tools=$(Cfg 'DEMAND_TOOLS' '')",
+            "--register-dir=$(Cfg 'DEMAND_REGISTER_DIR' '')", "--timeout=$Timeout", "--cost-level=$CostLevel",
+            "--max=$(Cfg 'DEMAND_REFRESH_MAX' '25')", "--min-left=$(Cfg 'DEMAND_REFRESH_MIN_LEFT' '10')",
+            "--owner=$OwnerName", "--home=$($env:USERPROFILE)",
+            "--prompt=$(Join-Path $ShareDir 'prompt-demand-refresh.md')", "--out=$demandOut")) 2>$null)
+    }
+    if ($demandLines.Count -gt 0 -and "$($demandLines[0])".Trim() -eq "on") {
+        $demandRules = @($demandLines | Select-Object -Skip 1 | ForEach-Object { "$_".Trim() } | Where-Object { $_ -ne "" })
+        Write-Log "== $(Get-Date) weekly: demand refresh on ($(Cfg 'DEMAND_SERVER' ''), $($demandRules.Count) allowed-tool rules added)"
+    } else {
+        $why = if ($demandLines.Count -gt 0) { "$($demandLines[0])".Trim() } else { "skip (demand_refresh.py failed)" }
+        Write-Log "== $(Get-Date) weekly: demand refresh $why"
+    }
+    $demandText = ""
+    if (Test-Path -LiteralPath $demandOut) { $demandText = "$(Get-Content -LiteralPath $demandOut -Raw)".TrimEnd() }
+    if ($demandText -ne "") {
+        $promptText += "`n`n" + $demandText
+    } else {
+        $promptText += "`n`nDemand refresh: skipped this week (its setup check failed). Add a `"Demands: what changed`" section to the review with only the line `"Refresh skipped: setup check failed.`" Don't call the demand tracker or any connector for it."
+    }
+    Remove-Item -LiteralPath $demandOut -Force -ErrorAction SilentlyContinue
 }
 # claude tool-permission globs use forward slashes; build them from the real kit home.
 $kitFwd      = $KitHome -replace '\\', '/'
@@ -304,6 +373,7 @@ $allowed = @("Bash(date:*)", $briefGlob, $journalGlob,
 # Rules are separated by semicolons, since a rule can contain spaces.
 $allowed += @($AllowTools -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
 if ($Mode -eq "weekly") { $allowed += @($AllowToolsWeekly -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }) }
+foreach ($r in $demandRules) { if ($allowed -notcontains $r) { $allowed += $r } }
 # A run id tags this run's claude process, so a run that hits its time limit can be found and
 # stopped (stopping the PowerShell job alone leaves the claude process running).
 $RunId = "kit-$Mode-" + [guid]::NewGuid().ToString("N")
@@ -321,13 +391,6 @@ $ModelsEnv = Read-Config (Join-Path $ShareDir "models.env")
 $modelKey = "MODEL_" + $Mode.ToUpper()
 if ($ModelsEnv.ContainsKey($modelKey) -and $ModelsEnv[$modelKey] -ne "") {
     $claudeArgs += @("--model", $ModelsEnv[$modelKey])
-}
-
-# Time limit for this run, in seconds. The weekly review does the most, so it gets longer.
-$Timeout = switch ($Mode) {
-    "weekly"   { [int](Cfg "RUN_TIMEOUT_WEEKLY" "3000") }
-    "worklist" { [int](Cfg "RUN_TIMEOUT_WORKLIST" "900") }
-    default    { [int](Cfg "RUN_TIMEOUT" "1200") }
 }
 
 # One scheduled run at a time: if another is still going, wait for it, up to RUN_LOCK_WAIT

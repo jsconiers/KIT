@@ -132,7 +132,7 @@ Code and must pass before an agent moves to another model.
 | Permission rules | `~/.claude/settings.json` (added by `kit_setup.py`) | Allow Kit's own notes; ask for editing Kit's rules and Claude Code settings, deleting, pushing, posting, installing, `launchctl`, `osascript`. |
 | Kit's ask-first rules | `kit/KIT.md` | Sending, deleting, installing, money, commitments, and anything outward-facing need the owner's yes, for Kit and every agent. |
 | Connector guard | `shared/bin/connector-guard` | Hook on guarded agents: allows only servers and tools in `connector-guard.json`, denies writes, records each call, result, and failure (with the tool use id) in the audit log. Denies on its own errors. |
-| Audit review | `shared/bin/kit-audit`, auditor agent | Daily and weekly checks: denied calls, calls with no result, unguarded agents, volume, off-hours use. Issues go to the top of the brief and a dashboard banner. |
+| Audit review | `shared/bin/kit-audit`, auditor agent | Daily and weekly checks: denied calls, calls with no result, unguarded agents, volume, off-hours use, and searches that may have ignored their filter (a stated total far above the limit, or the same total for different queries; tool, time, total, and limit only, never the query). Issues go to the top of the brief and a dashboard banner. |
 | Kill switch | `shared/bin/kit-pause` | A pause file stops every scheduled run and makes the guard deny every connector call. |
 | Sharing policy | `memory/context/sharing-policy.json`, `kit_transport.policy_check` | Allowed transports and roots, blocked folders, classification ceiling, confidential never leaves unless allowed. A policy that can't be read refuses all sharing. |
 | Model policy | `models.json` `org_profile`, `kit_models.py` | Allowed providers, `enabled_phase`, data-class ceilings per provider and for non-Claude providers. Refused profiles fall back to Claude. |
@@ -156,6 +156,8 @@ launchd/Task Scheduler -> run.sh <mode>
   budget guard (kit-cost check): stop -> skip non-essential modes
   kit-outlook check (morning, weekly) -> stale notice if Outlook doesn't answer
   doctor --brief, kit-audit (morning, weekly)
+  connector_health.py -> kit-connect test --json (morning; time-limited, no model cost)
+  demand_refresh.py (weekly, DEMAND_REFRESH on) -> brief + guard-allowed read tools for the demand tracker
   prompt = shared/morning/prompt[-<mode>].md + notices (budget, stale, legal holds)
   allowlist = base rules + ALLOW_TOOLS (+ ALLOW_TOOLS_WEEKLY); ~/ rules get full-path twins
   model = MODEL_<MODE> from models.env (kit-models apply)
@@ -235,6 +237,41 @@ overridable per-unit assumptions, with low, likely, and high ranges, handed to t
 `kit-diagram-diff` parses draw.io (including compressed pages) and Visio `.vsdx`, matches pages by
 name, compares components by id and connections by component id, so a rename doesn't look like
 rewiring.
+
+`kit-lifecycle` stays local: `--import` reads a file the gateway already produced. A version past
+standard support with an `extended` date still ahead is flagged `extended`, with its own urgency,
+and the summary says it only counts if the subscription is held; `kit-roadmap` carries those items
+too. A data-quality section counts records with no OS, duplicates, blank owners and environments,
+and production names that look non-production (inferred).
+
+Framework coverage is set per team: the framework profile in `compliance.md` says which frameworks
+apply, and the risk and compliance mapper maps only against those. Frameworks are cited by name, ID,
+and version; no benchmark or standard text is copied. The reviewer asks ten Secure by Design
+questions paraphrased from CISA; the standards checker checks for a named hardening baseline and,
+on request, fills in `zero-trust-rating-template.md` (CISA ZTMM 2.0); `kit-labcheck` warns when a
+lab runbook names none. FEAF reference-model tags are optional on system profiles and catalog notes.
+
+`kit-csf` reads a filled NIST CSF 2.0 mapping, checks Category IDs against `shared/data/csf2.json`
+(IDs and names only, NIST CSWP 29), counts yes as 1 and partial as half over applicable categories,
+and lists blanks without counting them; `--portfolio` aggregates mappings. The percentage is a
+reading aid; compliance stays the framework owner's call. `kit-trace` traces each IA requirement to
+the GDS section, test cases, change steps, and POC verdict (ID first, then cited section, then a
+conservative keyword match marked "(inferred)") and flags requirements not addressed, untested, or
+with no change step, plus orphan tests; missing documents show as "not checked".
+
+**Design review pipeline.** A GDS draft goes to the red team first (it assumes the design is wrong
+and ranks failure scenarios by consequence), then the threat modeler (STRIDE per data flow), then
+the reviewer and standards checker. Both new agents run on a tools allowlist (no connector, web, or
+agent tools) and write only to their own project folders (`red-team/`, `threat-model/`), outside
+`reviews/`, so kit-quality reads only the reviewer's notes. Threat-model controls go to the risk and
+compliance mapper and test cases to the implementation planner, through Kit.
+
+**Weekly demand refresh.** With `DEMAND_REFRESH` on, the weekly review delegates a scoped refresh to
+the demand tracker after the audit: register rows only, one get per demand under its guard hooks,
+never a whole-table search, a whole-table total treated as "filter ignored", stop on an
+authentication failure. `demand_refresh.py` validates the settings against connector-guard.json and
+adds only guard-allowed read tools; it skips with a line in the review at the budget stop level, when
+settings are incomplete, or when time is short.
 
 ## 8. Model routing and kit-run
 
@@ -330,9 +367,12 @@ or `kit-run`, never as Claude Code's own model. Precedence: organization ceiling
 - The connector guard only governs agents that carry its hooks (the gateway, status reporter, and
   demand tracker); Kit's own session and other agents with connector tools can still call connectors
   unlogged (`kit-audit` reports this standing gap).
-- `kit-lifecycle` flags on the standard end-of-support date. Paid extended support (ELS, ESU,
-  Extended Support) is shown in its own column but doesn't change the flag; the lifecycle review
-  separates "past, with a paid path" from "past, no path".
+- `kit-lifecycle` can't tell whether a paid extended-support subscription is held; `extended` items
+  count as covered only once the owner confirms it.
+- With the weekly demand refresh on, the connector's read tools are allowed for the whole unattended
+  weekly session; only the prompt keeps Kit from calling them outside the guarded demand tracker.
+- The filter check needs a connector to state a total at the top of its result; for one that
+  doesn't, `kit-audit` reports "not checkable".
 - Interactive session costs aren't in the cost ledger; Claude Code's `/cost` and `/usage` show them.
 - Phone access is limited to Microsoft 365 routes and low-tier approvals until remote sessions are
   allowed.

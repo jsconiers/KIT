@@ -57,7 +57,11 @@ says otherwise. Create each part the first time you need it.
 - `standards.md`: standards and reusable patterns, such as approved approaches, products and
   versions, and naming, each with its sources.
 - `systems/<system>.md`: one page per system or platform: what it is, the documents that cover it,
-  its current decisions, open questions, and related systems.
+  its current decisions, open questions, and related systems. It may carry an optional **FEAF
+  reference models** line (any of Performance, Business, Data, Application, Infrastructure,
+  Security), as in `system-profile-template.md`. Tagging is never required: add it when the sources
+  make it clear, mark it "(inferred)" when you concluded it yourself, and leave it off rather than
+  guess.
 - `precedents.md`: what POCs and labs found, one row per outcome, so the precedent finder and
   `kit-precedent` can find it later:
 

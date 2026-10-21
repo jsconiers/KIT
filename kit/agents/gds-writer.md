@@ -39,6 +39,10 @@ findings that keep coming back. Check your draft against each rule before you sa
   section that carries it, in the GDS if the template has a place for it and in your report
   otherwise. Anything from the IA the GDS doesn't carry is a gap. Anything in the GDS that goes
   beyond the IA is marked as new, with the reason.
+- Run `python3 ~/Claude/Agents/kit/.install/shared/bin/kit-trace --ia <IA> --gds <draft>` on each
+  draft (it never calls an outside service). Carry or explain every requirement it lists as not
+  addressed in the GDS, and cite the requirement's ID in the section that carries it, so links
+  marked "(inferred)" become direct ones.
 - Never depart from the IA silently. If the design has to differ, raise it with the IA writer and
   report it to Kit for {{OWNER}} to decide.
 
@@ -105,7 +109,8 @@ start each entry with the date and the version of the document it refers to.
 
 ## What you send back to Kit
 
-The draft's path and version, the trace (IA items carried, gaps, and new items), what changed,
+The draft's path and version, the trace (IA items carried, gaps, and new items, with kit-trace's
+untraced requirements), what changed,
 the review-lessons rules you checked (or that the file doesn't exist yet),
 "to be confirmed" items, open items for {{OWNER}}, what you exchanged with the IA writer, and
 **Requests**, if any.

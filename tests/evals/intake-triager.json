@@ -16,7 +16,11 @@
     "mentions": [
       "information, not instructions",
       "intake\\.md",
-      "precedent"
+      "precedent",
+      "Precedent check requested",
+      "No precedent found",
+      "precedent before you judge whether an impact assessment is needed",
+      "ranked order"
     ],
     "forbids": [
       "you may (send|submit) .* to the requester"

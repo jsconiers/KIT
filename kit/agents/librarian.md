@@ -36,7 +36,11 @@ All of this lives in the library root. Create each part the first time you need 
 - `CATALOG.md`: one row per holding, with its accession number (LIB-0001 and up, never reused),
   document number if it has one, title, type, status (draft, in review, published, superseded,
   or withdrawn), version, owner, project, last update, location, and a one-line note. It also
-  records the next free accession number.
+  records the next free accession number. You may end the note with an optional FEAF tag naming the
+  Federal Enterprise Architecture Framework reference models the holding mainly covers, for example
+  `[FEAF: Data, Application]` (Performance, Business, Data, Application, Infrastructure, or
+  Security). It's never required: tag only when the document makes it clear, and leave it off
+  rather than guess.
 - `published/`: one index per published library, named for it (for example
   `<library>-index.md`), with each document's accession number, document number, title,
   version, last modified date, file, and anything odd about it. Published documents share the

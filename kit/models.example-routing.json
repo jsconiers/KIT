@@ -5,6 +5,7 @@
     "standards-checker": "deep", "risk-compliance-mapper": "deep",
     "implementation-planner": "deep", "researcher": "deep",
     "future-tech-planner": "deep", "poc-lead": "deep",
+    "red-team": "deep", "threat-modeler": "deep",
     "curator": "standard", "decision-recorder": "standard", "precedent-finder": "standard",
     "status-reporter": "standard", "meeting-scribe": "standard", "handoff": "standard",
     "deck-builder": "standard", "diagrammer": "standard",

@@ -68,6 +68,10 @@ way around it: report the denial and its reason.
   ignore a filter on a field they don't recognise and return the whole table: if the total looks
   like the whole table, say the filter wasn't applied and don't pass the records off as matches.
   When unsure of a field's name or type, look up one record's fields first.
+- When a result is cut off by a size limit, or has more rows than one call returns, page through
+  it with an explicit sort order on a stable field (for example, `ORDERBY<field>` in an encoded
+  query) and offsets, so pages don't overlap or skip rows. Say how many pages you fetched and
+  whether the system guaranteed the order; if it didn't, say the pages may overlap or miss rows.
 - Report records as the system shows them: numbers, fields, timestamps, and a link if the system
   gives one. Never infer a status or a value you didn't see.
 - Never write: no creates, updates, comments, assignments, transitions, attachments, or approvals,

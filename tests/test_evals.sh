@@ -31,6 +31,8 @@ mut scheduler "## Rules" "## Notes"; expect_fail scheduler "missing Rules sectio
 mut poc-lead "Never decide a verdict" "Decide the verdict"; expect_fail poc-lead "POC lead deciding verdicts" "Never decide a verdict"
 mut gateway "PostToolUseFailure:" "PostToolUseFailureX:"; expect_fail gateway "gateway missing failure hook" "hook PostToolUseFailure"
 mut scheduler "drafting invitations" "drafting invitations. You may send them directly"; expect_fail scheduler "conflicting instruction" "never says"
+mut red-team "Never soften a real problem" "Soften findings where you can"; expect_fail red-team "red team softening findings" "Never soften a real problem"
+mut threat-modeler "tools: Read, Glob, Grep, Bash, Write, Edit, Skill" "tools: Read, Glob, Grep, Bash, Write, Edit, Skill, Agent"; expect_fail threat-modeler "threat modeler allowed to brief agents" "denies Agent"
 mut reviewer "name: reviewer" "name: reviewr"; expect_fail reviewer "wrong frontmatter name" "name matches file"
 
 # live mode: estimate, no run without --yes, fake claude with good and bad answers

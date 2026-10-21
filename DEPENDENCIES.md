@@ -23,7 +23,7 @@ For installing and configuring, see INSTALL.md; for how the pieces fit, see DESI
 | Claude Code (`claude` on the PATH) | Kit and its staff run inside it; subagents, hooks, skills, and MCP connectors are Claude Code features | The installer warns but continues if `claude` isn't on the PATH yet |
 | Python 3.8 or newer | The installer (`kit_setup.py`), every shared tool, and the connector guard hook | Standard library only, except the optional extras in section 4 |
 | git | Kit's private local history (`~/Claude/Agents/kit/.git`), `protect_folder.py` (adds its file to a repo's ignore list), the health check's history age | Kit's own repo must never get a remote |
-| A Claude Code account with subagent support | The 30 agents in `kit/agents/` | Copy them into `~/.claude/agents/` with `doctor.py --fix-agents` |
+| A Claude Code account with subagent support | The 32 agents in `kit/agents/` | Copy them into `~/.claude/agents/` with `doctor.py --fix-agents` |
 
 ### Kit's command-line tools
 
@@ -52,6 +52,7 @@ For installing and configuring, see INSTALL.md; for how the pieces fit, see DESI
 | `kit-quality` | Python 3.8 | Same code | Recurring findings are spotted by hand |
 | `kit-refarch` | Python 3.8; a reference-architecture index in the library | Same code | Match by hand with kit-precedent |
 | `kit-sysprofile` | Python 3.8; the library root | Same code | Assemble profiles by hand |
+| `kit-trace` | Python 3.8; the project's IA (Markdown or .docx), plus its GDS, test plan, and change request when they exist | Same code | Trace requirements by hand in the template |
 | `kit-sizing` | Python 3.8 | Same code | Size by hand from the template |
 | `kit-diagram-diff` | Python 3.8 | Same code | Compare diagrams by eye |
 | `kit-wins` | Python 3.8 | Same code | Wins collected by hand |
@@ -363,6 +364,28 @@ session, including MCP connectors, minus the ones listed.
 | Skills | Document skills (to read the design) |
 | Other agents | Librarian and curator through Kit |
 | If missing | `standards.md` "not set": checks only what Kit's brief supplies and lists what's missing |
+
+### red-team
+
+| | |
+|---|---|
+| Setup | `standards.md`, `writing.md`, `library.md` |
+| Tools | Read, Glob, Grep, Bash, Write, Edit, Skill (no connectors, web, or agent tools) |
+| Skills | Document skills (to read the draft and the IA) |
+| Templates | `red-team-review-template.md` |
+| Other agents | Writers, librarian, and threat modeler through Kit |
+| If missing | `standards.md` "not set": judges the design against what it claims for itself and says so. No IA: asks for it in Requests |
+
+### threat-modeler
+
+| | |
+|---|---|
+| Setup | `compliance.md`, `standards.md`, `diagrams.md`, `library.md` |
+| Tools | Read, Glob, Grep, Bash, Write, Edit, Skill (no connectors, web, or agent tools) |
+| Skills | Document skills (to read the design) |
+| Templates | `threat-model-template.md` |
+| Other agents | Red team (abuse paths), risk and compliance mapper (controls), implementation planner (test cases), all through Kit |
+| If missing | No risk scale in `compliance.md`: likelihood x impact (1 to 3 each), rule shown. No diagram specs: decomposes from the text alone |
 
 ### risk-compliance-mapper
 

@@ -1,0 +1,135 @@
+{
+ "columns": [
+  {
+   "name": "name"
+  },
+  {
+   "name": "os"
+  },
+  {
+   "name": "os_version"
+  },
+  {
+   "name": "support_group"
+  },
+  {
+   "name": "environment"
+  },
+  {
+   "name": "used_for"
+  },
+  {
+   "name": "sys_class_name"
+  }
+ ],
+ "rows": [
+  [
+   {
+    "display_value": "host-a-01",
+    "value": "x"
+   },
+   "Red Hat Enterprise Linux",
+   "7.9",
+   "Platform team",
+   "Production",
+   "Production",
+   "cmdb_ci_linux_server"
+  ],
+  [
+   {
+    "display_value": "host-a-02",
+    "value": "x"
+   },
+   "RHEL",
+   "7.9",
+   "",
+   "Production",
+   "",
+   "cmdb_ci_linux_server"
+  ],
+  [
+   {
+    "display_value": "host-a-03 - duplicate",
+    "value": "x"
+   },
+   "Red Hat Enterprise Linux Server",
+   "8.8",
+   "Platform team",
+   "",
+   "",
+   "cmdb_ci_linux_server"
+  ],
+  [
+   {
+    "display_value": "host-dev-04",
+    "value": "x"
+   },
+   "Windows Server",
+   "2012 R2",
+   "Windows team",
+   "Production",
+   "",
+   "cmdb_ci_win_server"
+  ],
+  [
+   {
+    "display_value": "host-a-uat05",
+    "value": "x"
+   },
+   "Linux Red Hat",
+   "7.5",
+   "Platform team",
+   "UAT",
+   "",
+   "cmdb_ci_linux_server"
+  ],
+  [
+   {
+    "display_value": "host-a-06",
+    "value": "x"
+   },
+   "",
+   "",
+   "Platform team",
+   "Production",
+   "",
+   ""
+  ],
+  [
+   {
+    "display_value": "host-a-07",
+    "value": "x"
+   },
+   "Unknown",
+   "",
+   "",
+   "Production",
+   "",
+   ""
+  ],
+  [
+   {
+    "display_value": "host-a-08",
+    "value": "x"
+   },
+   "Acme OS",
+   "3.1",
+   "Platform team",
+   "Production",
+   "",
+   ""
+  ],
+  [
+   {
+    "display_value": "host-latest-09",
+    "value": "x"
+   },
+   "RHEL",
+   "8.6",
+   "Platform team",
+   "",
+   "Production",
+   ""
+  ]
+ ]
+}

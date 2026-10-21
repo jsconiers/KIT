@@ -1,0 +1,10 @@
+name,os,os_version,support_group,environment,used_for,sys_class_name
+host-a-01,Red Hat Enterprise Linux,7.9,Platform team,Production,Production,cmdb_ci_linux_server
+host-a-02,RHEL,7.9,,Production,,cmdb_ci_linux_server
+host-a-03 - duplicate,Red Hat Enterprise Linux Server,8.8,Platform team,,,cmdb_ci_linux_server
+host-dev-04,Windows Server,2012 R2,Windows team,Production,,cmdb_ci_win_server
+host-a-uat05,Linux Red Hat,7.5,Platform team,UAT,,cmdb_ci_linux_server
+host-a-06,,,Platform team,Production,,
+host-a-07,Unknown,,,Production,,
+host-a-08,Acme OS,3.1,Platform team,Production,,
+host-latest-09,RHEL,8.6,Platform team,,Production,

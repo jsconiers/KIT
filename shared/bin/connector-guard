@@ -20,7 +20,9 @@ pre   Allows a call only when its connector (MCP server) is in allowed_servers a
       doesn't recognize. It fails closed: if it can't read its config or write the audit log, the
       call is denied. It never auto-approves; allowed calls still go through normal permissions.
       While Kit is paused (kit-pause), every connector call is denied.
-post  Logs the size of the result and whether it was an error. Result contents are never logged.
+post  Logs the size of the result, whether it was an error, and the result's total count when the
+      response states one at its top level (result_total, so kit-audit can spot an ignored filter).
+      Result contents are never logged.
 fail  Logs a failed call. Claude Code runs PostToolUse only when a call succeeds; a failed call (an
       auth error, a timeout, a server that's down) runs PostToolUseFailure instead. Without this
       hook, failed calls leave a "pre" record with no result. Logged as a "post" record with
@@ -151,6 +153,36 @@ def deny(reason):
                                              "permissionDecisionReason": f"connector-guard: {reason}"}}))
 
 
+TOTAL_KEYS = ("totalCount", "total_count", "total", "totalSize", "total_results", "count")
+
+
+def result_total(resp):
+    """The total count a response states at its top level, or None. Looks in a dict, in an MCP
+    content list's text blocks that hold JSON, and nowhere deeper. Only the number is kept."""
+    def from_obj(o):
+        if isinstance(o, dict):
+            for k in TOTAL_KEYS:
+                v = o.get(k)
+                if isinstance(v, int) and not isinstance(v, bool):
+                    return v
+                if isinstance(v, str) and v.isdigit():
+                    return int(v)
+        return None
+    blocks = resp.get("content") if isinstance(resp, dict) and isinstance(resp.get("content"), list) else resp
+    found = from_obj(resp)
+    if found is None and isinstance(blocks, list):
+        for b in blocks:
+            t = b.get("text") if isinstance(b, dict) else None
+            if isinstance(t, str) and t.lstrip().startswith("{") and len(t) < 5_000_000:
+                try:
+                    found = from_obj(json.loads(t))
+                except ValueError:
+                    continue
+                if found is not None:
+                    break
+    return found
+
+
 def main(event, agent, raw):
     data = json.loads(raw) if raw.strip() else {}
     tool = data.get("tool_name")
@@ -173,6 +205,9 @@ def main(event, agent, raw):
         resp = data.get("tool_response")
         entry.update(result_bytes=len(json.dumps(resp, ensure_ascii=False, default=str)) if resp is not None else 0,
                      is_error=bool(isinstance(resp, dict) and (resp.get("isError") or resp.get("is_error"))))
+        total = result_total(resp)
+        if total is not None:
+            entry["result_total"] = total
         write_log(load_config(), entry)
     elif event == "fail":
         entry.update(event="post", hook="failure", result_bytes=0, is_error=True, error=scrub(data.get("error")),

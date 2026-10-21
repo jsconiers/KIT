@@ -30,7 +30,9 @@ cat > "$R/lifecycle/summary.json" <<'EOF'
 {"items": [
  {"product": "Postgres", "version": "12.4", "flag": "past", "eol": "14-Nov-2024"},
  {"product": "Java", "version": "8", "flag": "warning", "eol": "30-Jun-2028"},
- {"product": "Kafka", "version": "3.6", "flag": "ok", "eol": "01-Sep-2029"}
+ {"product": "Kafka", "version": "3.6", "flag": "ok", "eol": "01-Sep-2029"},
+ {"product": "LinuxA", "version": "7.9", "flag": "extended", "eol": "30-Jun-2024", "extended_urgency": "ok"},
+ {"product": "LinuxB", "version": "8.8", "flag": "extended", "eol": "31-May-2025", "extended_urgency": "urgent"}
 ]}
 EOF
 cat > "$R/tech-debt.md" <<'EOF'
@@ -62,6 +64,8 @@ checknot "assess entries make no initiative" "Graph database" "$titles"
 check "past end of support -> year 1" "Postgres 12.4 end of support.*| Y1" "$titles"
 check "warning -> year 2" "Java 8 end of support.*| Y2" "$titles"
 checknot "ok lifecycle items make no initiative" "Kafka" "$titles"
+check "extended support, end not near -> year 2" "LinuxA 7.9 end of support.*| Y2" "$titles"
+check "extended support ending within 12 months -> year 1" "LinuxB 8.8 end of support.*| Y1" "$titles"
 check "high-risk debt -> year 1" "Fix TD-001: Hard-coded hostnames in batch jobs | Y1" "$titles"
 check "debt with a target date over two years out -> year 3" "Fix TD-002: Manual certificate renewal | Y3" "$titles"
 checknot "closed debt is left out" "TD-003" "$titles"

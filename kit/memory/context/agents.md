@@ -219,6 +219,35 @@ computer.
 - **Routine:** run it on each GDS draft alongside the reviewer, before {{OWNER}} shares it.
 - **Setup:** `memory/context/standards.md`.
 
+## red-team
+
+- **Does:** attacks an IA or GDS draft before peer review: single points of failure, DR and recovery
+  gaps (RTO and RPO stated against achievable), scaling limits, blast radius, dependency and vendor
+  concentration, operational failure modes, design-level abuse paths, and assumptions that would
+  break it. Ranks findings by consequence, each with a failure scenario, evidence, likelihood, and a
+  mitigation; says "can't tell" when the design is silent. Read-only on the document; saves a note
+  in the project's `red-team/` folder. No connector, web, or agent tools.
+- **Reach it:** the draft and version, the IA it's based on, its project, and any diagram specs or
+  dependency map.
+- **Routine:** run it on each GDS draft (and an IA with a design) before the reviewer's pass and
+  before {{OWNER}} shares it; send its findings to the writer that owns the draft. When it asks for
+  a threat model, brief the threat modeler.
+- **Setup:** `memory/context/standards.md` (DR tiers, baselines, template), `writing.md`.
+
+## threat-modeler
+
+- **Does:** a STRIDE threat model of a design: elements, trust boundaries, and data flows from the
+  GDS or IA and diagram specs; threats per flow and element by category; existing controls cited
+  from the design; gaps; a risk rating (the `compliance.md` scale if set, else likelihood x impact
+  with the rule shown); mitigations and test cases. Read-only on the design; saves in the project's
+  `threat-model/` folder. No connector, web, or agent tools.
+- **Reach it:** the design and version, its project, the diagram specs, and any abuse paths the red
+  team handed on.
+- **Routine:** run it on each GDS with a security-relevant change, after the red team. Send its
+  controls list to the risk and compliance mapper and its test cases to the implementation planner.
+- **Setup:** `memory/context/compliance.md` (data classes, risk scale), `standards.md`,
+  `diagrams.md`.
+
 ## risk-compliance-mapper
 
 - **Does:** maps a design to the regulatory and policy controls it touches, and drafts the IA's or

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""kit-labcheck: flag production or confidential data in lab requests and runbooks.
+"""kit-labcheck: flag production or confidential data in lab requests and runbooks, and lab runbooks
+with no hardening baseline.
 
   kit-labcheck FILE...           check each file; print one line per finding
   kit-labcheck --json FILE...    the same, as JSON
@@ -13,6 +14,12 @@ number shapes, hostnames with "prod" in them), and the lab planner or a person r
 It skips guidance in angle brackets (template text such as <synthetic, masked, or public>) and
 negated mentions such as "no production data" or "non-production". Matched numbers are masked in
 the output, so a real card number found in a runbook isn't repeated on screen.
+
+For a lab runbook (its title or file name says "runbook"), it also warns when the runbook names no
+hardening baseline: no filled-in **Hardening baseline** field and no CIS Benchmark mentioned outside
+guidance. A field value of "none, because ..." with a reason counts as stated. This is a warning,
+not a finding: it's printed and listed under "warnings" in --json, but it doesn't change the exit
+code.
 
 Extra terms come from the **Data rule check terms:** line in memory/context/labs.md (comma-separated;
 a term in slashes is a regular expression, for example /\\bcorp-db\\d+\\b/). KIT_DIR overrides the
@@ -142,6 +149,36 @@ def check_file(path, rule_list):
     return findings
 
 
+HARDEN_ROW = re.compile(r"^\s*\|\s*\**hardening baseline\**\s*\|([^|]*)\|", re.I | re.M)
+HARDEN_LINE = re.compile(r"^\s*[-*]?\s*\**hardening baseline\**\s*:\s*\**\s*(.*)$", re.I | re.M)
+CIS_REF = re.compile(r"\bCIS\b[^\n|]{0,60}?\bbenchmarks?\b", re.I)
+UNSET = re.compile(r"^(not set|tbd|tbc|todo|to do|n/?a|none|unknown|\?+|-+)?[\s.]*$", re.I)
+
+
+def is_runbook(path, text):
+    title = next((ln for ln in text.splitlines() if ln.startswith("# ")), "")
+    return "runbook" in title.lower() or "runbook" in pathlib.Path(path).name.lower()
+
+
+def hardening_warning(path):
+    """A warning string when a lab runbook names no hardening baseline, else None."""
+    text = pathlib.Path(path).read_text(errors="ignore")
+    if not is_runbook(path, text):
+        return None
+    clean = GUIDANCE.sub(" ", text)
+    if CIS_REF.search(clean):
+        return None
+    for rx in (HARDEN_ROW, HARDEN_LINE):
+        for m in rx.finditer(clean):
+            val = " ".join(m.group(1).split()).strip("|").strip()
+            if val.lower().startswith("none") and len(val) > len("none") + 8:
+                return None
+            if not UNSET.match(val):
+                return None
+    return ("no hardening baseline: fill in the Hardening baseline field (benchmark, version, "
+            "profile level, exceptions), for example a CIS Benchmark, or say why there is none")
+
+
 def main(argv):
     ap = argparse.ArgumentParser(prog="kit-labcheck", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -160,21 +197,27 @@ def main(argv):
     if not a.files:
         ap.print_usage()
         return 2
-    rule_list, findings, errors = rules(), [], []
+    rule_list, findings, errors, warnings = rules(), [], [], []
     for f in a.files:
         try:
             findings += check_file(f, rule_list)
+            w = hardening_warning(f)
+            if w:
+                warnings.append({"file": str(f), "warning": w})
         except OSError as e:
             errors.append(f"{f}: {e.strerror or e}")
     if a.json:
-        print(json.dumps({"findings": findings, "errors": errors}, indent=2))
+        print(json.dumps({"findings": findings, "warnings": warnings, "errors": errors}, indent=2))
     else:
         for x in findings:
             print(f"{x['file']}:{x['line']}: {x['term']}: {x['excerpt']}")
+        for w in warnings:
+            print(f"{w['file']}: warning: {w['warning']}")
         for e in errors:
             print(f"kit-labcheck: can't read {e}", file=sys.stderr)
         print(f"kit-labcheck: {len(findings)} finding(s) in {len(a.files) - len(errors)} file(s)"
-              + ("; a person checks each one against the data rule" if findings else ""))
+              + ("; a person checks each one against the data rule" if findings else "")
+              + (f"; {len(warnings)} warning(s)" if warnings else ""))
     if errors:
         return 2
     return 1 if findings else 0

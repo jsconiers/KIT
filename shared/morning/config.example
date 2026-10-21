@@ -46,6 +46,24 @@ BLOCK_TOOLS=""
 ALLOW_TOOLS=""
 # More tools for the weekly review only (semicolon-separated), for example "Agent" for the auditor.
 ALLOW_TOOLS_WEEKLY=""
+
+# Weekly demand refresh: in the Monday weekly review, the demand tracker re-checks the demands in its
+# register through its connector (read-only, under its connector-guard hooks, one get per demand),
+# records what changed in REGISTER.md and LOG.md, and the review gets a "Demands: what changed"
+# section. Leave it "off" until a connector is set up. DEMAND_SERVER is the connector (MCP server)
+# name, which must also be in connector-guard.json's allowed_servers. DEMAND_TOOLS lists the read
+# tools the run may call, as full names (mcp__<server>__<tool>) separated by semicolons; empty takes
+# that server's entries in connector-guard.json's allow_tools. Only tools the guard would allow are
+# used. DEMAND_REGISTER_DIR is the folder holding REGISTER.md and LOG.md (the register's place from
+# demands.md, under the library root). It's skipped, with a line in the review, at the budget's stop
+# level or when fewer than DEMAND_REFRESH_MIN_LEFT minutes of the run are left; DEMAND_REFRESH_MAX
+# caps the demands checked in one run.
+DEMAND_REFRESH="off"
+DEMAND_SERVER=""
+DEMAND_TOOLS=""
+DEMAND_REGISTER_DIR=""
+DEMAND_REFRESH_MAX="25"
+DEMAND_REFRESH_MIN_LEFT="10"
 # Optional: a command that prints today's events as a JSON list, for the dashboard's Today panel
 # (fields start, end, all_day, title or subject, calendar). Empty uses the macOS kitcal tool.
 CALENDAR_JSON_CMD=""
@@ -66,6 +84,12 @@ BACKUP_KEY_ENV=""
 # retries, and "off" to skip it on setups without Outlook.
 OUTLOOK_RETRY_WAITS="30 90"
 OUTLOOK_CHECK="on"
+
+# Connector check before the morning brief (kit-connect test, with no read call, so no model cost):
+# one PASS/FAIL line per connector at the top of the brief. Seconds before it gives up, and "off"
+# to skip it. It never fails the run.
+CONNECTOR_CHECK="on"
+CONNECTOR_CHECK_TIMEOUT="120"
 
 # Cost (kit-cost): every scheduled run records its estimated cost in .install/logs/cost.jsonl.
 # COST_BUDGET_MONTHLY is the monthly budget for scheduled runs in US dollars (empty: no budget, no

@@ -4,6 +4,8 @@
 #   run.sh weekly   weekly review (Monday 6:30)
 #   run.sh worklist proposed work list for the owner to approve (Monday to Thursday 9:00)
 #   run.sh eod      end-of-day wrap-up (weekdays 17:30; EOD="off" in the config skips it)
+# With DEMAND_REFRESH="on", the weekly review also has the demand tracker re-check the demands in
+# its register (demand_refresh.py, prompt-demand-refresh.md); off by default.
 # Nothing runs while Kit is paused (kit-pause). Before the morning and weekly runs, kit-outlook
 # checks that Outlook answers (set OUTLOOK_CHECK="off" in the config to skip it).
 # Every run records its estimated cost in .install/logs/cost.jsonl (kit-cost). With
@@ -127,6 +129,17 @@ if [ "$MODE" = "morning" ] || [ "$MODE" = "weekly" ]; then
   [ "$MODE" = "weekly" ] && AUDIT=--weekly || AUDIT=--daily
   python3 "$KIT/.install/shared/bin/kit-audit" "$AUDIT" >/dev/null 2>&1
 fi
+# Connector health (morning only): kit-connect test, with no read call and so no model cost, gives
+# one PASS/FAIL line per server for the top of the brief. It's time-limited (CONNECTOR_CHECK_TIMEOUT,
+# default 120 s) and never fails the run; CONNECTOR_CHECK="off" skips it.
+CONNECT_LINE=""
+if [ "$MODE" = "morning" ] && [ "${CONNECTOR_CHECK:-on}" != "off" ] && [ -f "$SHAREDIR/connector_health.py" ]; then
+  rm -f briefs/connectors.txt
+  perl -e 'alarm shift; exec @ARGV' $(( ${CONNECTOR_CHECK_TIMEOUT:-120} + 30 )) \
+    python3 "$SHAREDIR/connector_health.py" --timeout "${CONNECTOR_CHECK_TIMEOUT:-120}" --out briefs/connectors.txt >/dev/null 2>> "$LOG"
+  CONNECT_LINE=$(head -1 briefs/connectors.txt 2>/dev/null)
+  [ -n "$CONNECT_LINE" ] && echo "== $(date) $CONNECT_LINE" >> "$LOG"
+fi
 PROMPT_TEXT=$(sed "s/{{OWNER}}/${OWNER_NAME:-the owner}/g" "$PROMPT")
 if [ "$MODE" = "morning" ] || [ "$MODE" = "weekly" ]; then
   case "$OUTLOOK_STATUS" in
@@ -138,6 +151,7 @@ if [ "$MODE" = "morning" ] || [ "$MODE" = "weekly" ]; then
     HOLDS=$(python3 "$KIT/.install/shared/bin/kit-retention" holds --brief 2>/dev/null)
     [ -n "$HOLDS" ] && PROMPT_TEXT+=$'\n\n'"Active legal holds (nothing in these projects may be deleted, moved, or rewritten; list them in a \"Legal holds\" section near the top of the brief, by project name only): $HOLDS"
   fi
+  [ -n "$CONNECT_LINE" ] && PROMPT_TEXT+=$'\n\n'"Connector check before this run (kit-connect test): put this line, as written, at the top of the brief (below the Audit issue section, if there is one), and if any server says FAIL, add \"Connectors: \" plus the failing server names to the health problems at the top of the text: $CONNECT_LINE"
 fi
 case "$COST_LEVEL" in
   warn|stop)
@@ -146,16 +160,53 @@ case "$COST_LEVEL" in
       PROMPT_TEXT+=" Keep this run lean: skip the horizon scan's researcher call (list the due items only) and the optional parts of the monthly retrospective (keep only the three most important points)."
     fi ;;
 esac
+# Time limit for this run, in seconds. The weekly review does the most (auditor, horizon scan,
+# sprint review, cost, retrospective), so it gets longer. Override with RUN_TIMEOUT_<MODE> or
+# RUN_TIMEOUT in the config.
+case "$MODE" in
+  weekly)   TIMEOUT=${RUN_TIMEOUT_WEEKLY:-3000} ;;
+  worklist) TIMEOUT=${RUN_TIMEOUT_WORKLIST:-900} ;;
+  *)        TIMEOUT=${RUN_TIMEOUT:-1200} ;;
+esac
+
+# Weekly demand refresh (DEMAND_REFRESH="on" in the config; off by default): the weekly review has
+# the demand tracker re-check the demands in its register through its connector, read-only and under
+# its connector-guard hooks. demand_refresh.py (no connector or model call) checks DEMAND_SERVER,
+# DEMAND_TOOLS (or the server's allow_tools in connector-guard.json, kept only if the guard would
+# allow them), and DEMAND_REGISTER_DIR, and gives the prompt text plus the extra allowed tools. It's
+# skipped, with a line in the review, at the budget's stop level or if the settings are incomplete.
+DEMAND_RULES=()
+if [ "$MODE" = "weekly" ] && [ "${DEMAND_REFRESH:-off}" = "on" ]; then
+  DEMAND_OUT="$LOGDIR/.demand-refresh-$$.txt"
+  DEMAND_LINES=("${(@f)$(python3 "$SHAREDIR/demand_refresh.py" --server "${DEMAND_SERVER:-}" \
+      --tools "${DEMAND_TOOLS:-}" --register-dir "${DEMAND_REGISTER_DIR:-}" --timeout "$TIMEOUT" \
+      --cost-level "$COST_LEVEL" --max "${DEMAND_REFRESH_MAX:-25}" --min-left "${DEMAND_REFRESH_MIN_LEFT:-10}" \
+      --owner "${OWNER_NAME:-the owner}" --home "$HOME" --prompt "$SHAREDIR/prompt-demand-refresh.md" \
+      --out "$DEMAND_OUT" 2>> "$LOG")}")
+  if [ "${DEMAND_LINES[1]:-}" = "on" ]; then
+    DEMAND_RULES=("${(@)DEMAND_LINES[2,-1]}")
+    echo "== $(date) weekly: demand refresh on (${DEMAND_SERVER}, ${#DEMAND_RULES} allowed-tool rules added)" >> "$LOG"
+  else
+    echo "== $(date) weekly: demand refresh ${DEMAND_LINES[1]:-skip (demand_refresh.py failed)}" >> "$LOG"
+  fi
+  if [ -s "$DEMAND_OUT" ]; then
+    PROMPT_TEXT+=$'\n\n'"$(cat "$DEMAND_OUT")"
+  else
+    PROMPT_TEXT+=$'\n\n'"Demand refresh: skipped this week (its setup check failed). Add a \"Demands: what changed\" section to the review with only the line \"Refresh skipped: setup check failed.\" Don't call the demand tracker or any connector for it."
+  fi
+  rm -f "$DEMAND_OUT"
+fi
 # Tools the unattended run may use: the basics, plus extras from config (permission rules separated
 # by semicolons, since rules can contain spaces), for example the mail and calendar commands the
 # setup files name. ALLOW_TOOLS_WEEKLY adds more for the weekly review, such as the Agent tool for
-# the auditor. One --allowedTools list.
+# the auditor, and so does the demand refresh when it's on. One --allowedTools list.
 ALLOWED=("Bash(date:*)" "Edit(~/Claude/Agents/kit/briefs/**)" "Edit(~/Claude/Agents/kit/journal/**)"
          "Bash(python3 ~/Claude/Agents/kit/.install/shared/bin/kit-queue hygiene:*)"
          "Bash(python3 $HOME/Claude/Agents/kit/.install/shared/bin/kit-queue hygiene:*)")
 for r in "${(@s:;:)ALLOW_TOOLS:-}"; do r="${r## }"; r="${r%% }"; [ -n "$r" ] && ALLOWED+=("$r"); done
 if [ "$MODE" = "weekly" ]; then
   for r in "${(@s:;:)ALLOW_TOOLS_WEEKLY:-}"; do r="${r## }"; r="${r%% }"; [ -n "$r" ] && ALLOWED+=("$r"); done
+  for r in "${DEMAND_RULES[@]}"; do [ -n "$r" ] && ! (( ${ALLOWED[(Ie)$r]} )) && ALLOWED+=("$r"); done
 fi
 # A rule written with ~/ doesn't match a command the run spells with the full home path, so each
 # Bash rule with ~/ also gets a twin with $HOME spelled out.
@@ -169,15 +220,6 @@ args=(-p "$PROMPT_TEXT" --output-format json --allowedTools "${ALLOWED[@]}")
 [ -f "$SHAREDIR/models.env" ] && source "$SHAREDIR/models.env"
 RUN_MODEL_VAR="MODEL_${(U)MODE}"
 [ -n "${(P)RUN_MODEL_VAR:-}" ] && args+=(--model "${(P)RUN_MODEL_VAR}")
-
-# Time limit for this run, in seconds. The weekly review does the most (auditor, horizon scan,
-# sprint review, cost, retrospective), so it gets longer. Override with RUN_TIMEOUT_<MODE> or
-# RUN_TIMEOUT in the config.
-case "$MODE" in
-  weekly)   TIMEOUT=${RUN_TIMEOUT_WEEKLY:-3000} ;;
-  worklist) TIMEOUT=${RUN_TIMEOUT_WORKLIST:-900} ;;
-  *)        TIMEOUT=${RUN_TIMEOUT:-1200} ;;
-esac
 
 # One scheduled run at a time: if another is still going (say, a long weekly review when the
 # morning brief starts), wait for it, up to RUN_LOCK_WAIT seconds, then go ahead anyway. A lock

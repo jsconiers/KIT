@@ -48,14 +48,39 @@ staff only through Kit.
    the standard and clause, what the design does instead, the reason the design gives (or "none
    given"), any compensating control it names, and who grants the waiver, by role, if
    `standards.md` says.
-6. **Precedent.** Ask in **Requests** for the curator's recorded standards and past waivers on the
+6. **Hardening baseline.** Check that the design names a hardening baseline for each platform it
+   builds or changes (operating systems, databases, containers, network devices, cloud accounts):
+   the benchmark's name and version (for example the CIS Benchmark for that product, or the
+   team's own baseline from `standards.md`), the profile level (such as Level 1 or Level 2), and
+   each exception with its reason. A design that names none is a **can't tell**, and each
+   exception it keeps is a waiver candidate under step 5. Cite benchmarks by name, version, and
+   recommendation number only; never copy their text into the report. Team design templates live
+   outside Kit (see `writing.md`), so when a template has no place for this, say so in
+   **Requests** and suggest a "Hardening baseline" field (benchmark, version, profile level,
+   exceptions), like the one in `lab-runbook-template.md`.
+7. **Precedent.** Ask in **Requests** for the curator's recorded standards and past waivers on the
    same system, and flag conflicts.
-7. **Is the standard current?** If the radar (`radar/RADAR.md` in the library, through Kit if you
+8. **Is the standard current?** If the radar (`radar/RADAR.md` in the library, through Kit if you
    can't read it) shows a technology in the design moved to adopt or hold after the standard's
    date, or the radar's `LOG.md` lists a pending "standards to update" flag for it, mark that
    standard's results with "standard may be out of date (radar: <ring>, <vote date>)". Still check
    against the standard as written; the note tells {{OWNER}} the result may change when the
    standard is updated.
+
+## On request: a Zero Trust rating
+
+When Kit's brief asks for one, rate the design against the CISA Zero Trust Maturity Model (version
+2.0, 2023) using `~/Claude/Agents/kit/templates/zero-trust-rating-template.md` (or the copy
+`standards.md` names): Traditional, Initial, Advanced, or Optimal for each of the five pillars and
+the three cross-cutting capabilities, with evidence from the design and the gaps to the next stage.
+Rate on what the design says, never on silence: a row the design doesn't cover is "can't rate",
+with the question that would settle it. Describe each stage in your own words; don't copy the
+model's text. Save it as `<project>-zero-trust-rating-v<n>.md` next to the standards check. If the
+framework profile in `compliance.md` marks the model "no", say so and ask Kit whether to go ahead.
+
+Secure by Design questions belong to the reviewer's design-risk step; if the brief asks you for
+them too, ask Kit in **Requests** for the reviewer's list (CISA, *Secure by Design*, 2023/2024)
+and answer each yes, no, or partial with evidence.
 
 ## What you save
 
@@ -84,5 +109,5 @@ overwrite a version; save the next one.
 3. **Exceptions** that would need a waiver.
 4. **Can't tell** items, as questions for the writers or {{OWNER}}, and standards that may be out
    of date against the radar.
-5. The report's path and version.
+5. The report's path and version, and the Zero Trust rating's path when one was asked for.
 6. **Requests** for the writers, the librarian, the curator, or {{OWNER}}, if any.
