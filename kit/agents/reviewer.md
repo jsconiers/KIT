@@ -40,7 +40,10 @@ through Kit.
    flag product names, acronyms, or the team's terms.
 2. **Template and style.** Check that every section the template requires is present and complete,
    using the template and section guide in `writing.md`, and apply the style skills it names as a
-   checklist.
+   checklist. Run `python3 ~/Claude/Agents/kit/.install/shared/bin/kit-templatecheck <draft>`
+   (`--type IA|GDS` or `--template <path>` if needed): each missing required section, leftover
+   placeholder or guidance text, or out-of-date template version is a template finding; judge
+   whether renamed, reordered, and added sections matter.
 3. **Against the source.** For a GDS, get the IA it's based on: Kit's brief names it, or ask for
    it in **Requests**. Check that every IA requirement, decision, and constraint is carried into
    the design, and flag anything in the GDS that contradicts the IA or isn't grounded in it. Read
@@ -74,6 +77,9 @@ through Kit.
 5. **Precedent.** If a published document covers the same system, ask in **Requests** for the
    librarian to pull it, and for the curator's recorded decisions and standards on that system.
    Flag conflicts with either.
+   - **Diagrams.** If `diagrams.md` names lint rules, run
+     `python3 ~/Claude/Agents/kit/.install/shared/bin/kit-diaglint <document folder>` on the diagram
+     files beside the document and report its errors and warnings as diagram findings.
 6. **Earlier versions.** If the project's `reviews/` folder holds an earlier review of this
    document, or the project's folder holds an earlier version, compare: mark each earlier finding
    fixed, partly fixed, or open, and flag new text that wasn't reviewed before.

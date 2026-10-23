@@ -1,0 +1,583 @@
+#!/usr/bin/env python3
+"""kit-controls: look up and cross-reference NIST SP 800-53 Rev 5 controls and MITRE ATT&CK.
+
+  kit-controls 800-53 AC-2           a control: family, title, a one-line summary, baselines,
+                                     enhancements, and the ATT&CK techniques mapped to it
+  kit-controls 800-53 'AC-2(1)'      an enhancement (AC-2.1 and AC-02(01) work too)
+  kit-controls attack T1078          a technique: tactics, platforms, sub-techniques, mitigations,
+                                     and the 800-53 controls mapped to it
+  kit-controls attack M1032          a mitigation and the techniques it mitigates
+  kit-controls search WORDS...       find controls, enhancements, techniques, and mitigations whose
+                                     title or summary has every word
+  kit-controls map THREAT-MODEL.md   for each row of a threat model's threats table, suggest ATT&CK
+                                     techniques by keyword and 800-53 controls through the mapping
+  ... --json                         the same as JSON
+
+The data is in shared/data (set KIT_CONTROLS_DATA to another folder to use other copies):
+nist-800-53r5.json (from NIST's OSCAL catalog and baseline profiles; public domain),
+mitre-attack-enterprise.json (from MITRE's ATT&CK STIX data; MITRE's terms, notice below), and
+attack-to-800-53.json (the Center for Threat-Informed Defense Mappings Explorer ATT&CK-to-800-53
+mapping; Apache 2.0). Each file records its source URL, version, and retrieval date.
+
+Every technique `map` finds is a suggestion, marked "(suggested)": it matches words, it doesn't
+understand the threat. The 800-53 controls are the ones the public mapping says mitigate those
+techniques, a starting point for the threat modeler and the architect to check, never evidence that
+a control is in place. An ATT&CK column already in the table is kept as given and its IDs are checked.
+
+Reads only: it writes nothing and never calls an outside service. Exits 1 when an ID isn't found or a
+threat model cites an unknown ID; 2 on a usage error, a missing file, or missing data.
+
+ATT&CK: © 2026 The MITRE Corporation. This work is reproduced and distributed with the permission of
+The MITRE Corporation.
+"""
+import argparse
+import json
+import os
+import pathlib
+import re
+import sys
+
+DATA = pathlib.Path(os.environ.get("KIT_CONTROLS_DATA") or
+                    pathlib.Path(__file__).resolve().parent.parent / "data")
+FILES = {"nist": "nist-800-53r5.json", "attack": "mitre-attack-enterprise.json", "map": "attack-to-800-53.json"}
+SHOW = 8
+
+# Kit's own keyword hints for `map`: a pattern in the threat text, and the techniques it suggests.
+# They're a reading aid, not MITRE's or anyone's mapping; IDs not in the ATT&CK data are skipped.
+HINTS = [
+    (r"\breplay|stolen (session )?token|token (theft|reuse)|pass[- ]the[- ](hash|ticket)|bearer token", ["T1550"]),
+    (r"session (hijack|cookie)|steal(s|ing)? (a |the )?(session|cookie)", ["T1539", "T1550.004"]),
+    (r"stolen (credential|password|account)|compromised (credential|account)|valid account|shared (admin )?(account|credential)|default (account|password|credential)", ["T1078"]),
+    (r"brute[- ]?forc|password (guess|spray)|credential stuff|dictionary attack", ["T1110"]),
+    (r"phish", ["T1566"]),
+    (r"mfa (fatigue|bomb|push)|push (fatigue|bomb)", ["T1621"]),
+    (r"(intercept|sniff|eavesdrop)|man[- ]in[- ]the[- ]middle|\bmitm\b|adversary[- ]in[- ]the[- ]middle|downgrade", ["T1557", "T1040"]),
+    (r"(sql|command|code|ldap|xml) injection|exploit(s|ing)? (a |the )?(public|internet|exposed|web)|unpatched (web|service|server)|\brce\b|remote code execution", ["T1190"]),
+    (r"exploit(s|ing)? (a )?(vulnerab|flaw)|privilege escalation|escalat(e|es|ing) (to )?(admin|root|privilege)", ["T1068"]),
+    (r"(spoof|impersonat|pretend)", ["T1684.001"]),
+    (r"(secret|password|api key|credential|key)s? (in|stored in) (code|config|plain ?text|the repo|files?|scripts?)|hard[- ]?coded (secret|password|credential|key)|unsecured credential|plaintext (password|credential)", ["T1552"]),
+    (r"(log|audit trail|audit log)s? (deleted|cleared|tampered|altered|wiped)|(delete|clear|tamper with|alter|wipe)s? (the )?(log|audit)|no (audit|log)|without (a |an )?(audit|log|record)|repudiat", ["T1070"]),
+    (r"disable(s|d)? (the )?(logging|monitoring|antivirus|edr|security tool|defen)|impair(s)? defen", ["T1685"]),
+    (r"(tamper|alter|modif|manipulat|corrupt)\w* (the )?(data|record|message|payload|file|transaction|price|order)", ["T1565"]),
+    (r"ransomware|encrypt(s|ed)? (the )?(data|files|disk) for (ransom|impact)|data encrypted for impact", ["T1486"]),
+    (r"(delete|destroy|wipe)s? (the )?(backup|snapshot|shadow cop)|inhibit (system )?recovery", ["T1490"]),
+    (r"(destroy|delete|wipe)s? (the )?(data|records|database)|data destruction", ["T1485"]),
+    (r"exfiltrat|data (theft|leak|loss)|steal(s|ing)? (the )?data|copy (the )?data out", ["T1041", "T1567"]),
+    (r"(public|open|misconfigured|exposed) (s3 |storage |blob |cloud )?(bucket|storage|container|share)|cloud storage", ["T1530"]),
+    (r"(dos|ddos|denial of service|flood|volumetric|exhaust(s|ion)?|overwhelm)", ["T1498", "T1499"]),
+    (r"supply chain|(malicious|compromised|tampered) (package|dependency|library|update|vendor|build)", ["T1195"]),
+    (r"third[- ]party|vendor (access|account|connection)|trusted relationship|partner (access|connection)", ["T1199"]),
+    (r"lateral movement|pivot|move(s)? (laterally|between hosts)|flat network|remote (desktop|service)|\brdp\b|\bssh\b", ["T1021"]),
+    (r"(exposed|internet[- ]facing|external) (remote|vpn|admin|management) (service|interface|access|port)|vpn", ["T1133"]),
+    (r"(create|add)s? (a |an )?(new |rogue |backdoor )?(account|user)|rogue account", ["T1136"]),
+    (r"(change|modif|manipulat)\w* (the )?(account|permission|role|group membership|privilege)|account manipulation|over-?broad (role|permission|privilege)|excessive (permission|privilege)", ["T1098"]),
+    (r"(config|configuration) (change|tamper|drift)|modif\w* (the )?(config|configuration)|unauthori[sz]ed change", ["T1601", "T1685"]),
+    (r"malware|malicious (file|attachment|script|code)|user (opens|runs|executes)", ["T1204"]),
+    (r"(script|command)[- ](execution|interpreter)|powershell|shell command", ["T1059"]),
+    (r"(keylog|input captur|credential dump|dump(s|ing)? (the )?(credential|password|hash|lsass))", ["T1003", "T1056"]),
+    (r"(dns|domain) (hijack|spoof|poison)|cache poison", ["T1584.002", "T1557"]),
+    (r"(data|information) (from|in) (a |the )?(repositor|sharepoint|confluence|wiki|share|database)|scrap(e|es|ing) (the )?(api|data)|bulk (download|export|read)", ["T1213", "T1530"]),
+    (r"(api|interface|endpoint) (abuse|misuse)|unauthori[sz]ed (api|access|call|read|query)|broken (object|access|authori[sz]ation)|idor", ["T1078", "T1190"]),
+    (r"insider|malicious (admin|administrator|employee|operator)|rogue (admin|administrator|employee)", ["T1078"]),
+    (r"(scan|recon|enumerat|discover)\w*", ["T1595", "T1046"]),
+    (r"(clock|time|ntp) (spoof|tamper|drift)|time (source|sync)", ["T1070.006"]),
+    (r"(certificate|cert|tls key|signing key|private key) (theft|stolen|compromis|forg)|forge(s|d)? (a )?(certificate|token|ticket)|forged (token|ticket|cert)", ["T1552.004", "T1606", "T1649"]),
+    (r"(resource|compute|cpu|gpu) hijack|cryptomin|crypto[- ]?jack", ["T1496"]),
+]
+
+
+def load(kind, need=True):
+    p = DATA / FILES[kind]
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        if need:
+            print(f"kit-controls: missing data file {p}", file=sys.stderr)
+            sys.exit(2)
+        return None
+    except (OSError, ValueError) as e:
+        print(f"kit-controls: can't read {p}: {e}", file=sys.stderr)
+        sys.exit(2)
+
+
+class Data:
+    def __init__(self, nist=True, attack=True, mapping=True):
+        self.nist = load("nist") if nist else None
+        self.attack = load("attack") if attack else None
+        self.mapping = load("map", need=False) if mapping else None
+        self.ctl, self.parent_of = {}, {}
+        if self.nist:
+            self.families = {f["id"]: f["title"] for f in self.nist.get("families", [])}
+            for c in self.nist["controls"]:
+                self.ctl[c["id"]] = c
+                for e in c.get("enhancements", []):
+                    self.ctl[e["id"]] = dict(e, family=c["family"])
+                    self.parent_of[e["id"]] = c["id"]
+        self.tech, self.mit, self.tac, self.subs, self.mitigates, self.revoked = {}, {}, {}, {}, {}, {}
+        if self.attack:
+            self.tac = {t["shortname"]: t for t in self.attack.get("tactics", [])}
+            self.mit = {m["id"]: m for m in self.attack.get("mitigations", [])}
+            self.revoked = self.attack.get("revoked", {})
+            for t in self.attack["techniques"]:
+                self.tech[t["id"]] = t
+                if t.get("parent"):
+                    self.subs.setdefault(t["parent"], []).append(t["id"])
+                for m in t.get("mitigations", []):
+                    self.mitigates.setdefault(m, []).append(t["id"])
+        self.t2c, self.c2t = {}, {}
+        if self.mapping:
+            self.t2c = self.mapping.get("map", {})
+            for t, cs in self.t2c.items():
+                for c in cs:
+                    self.c2t.setdefault(c, []).append(t)
+
+    def controls_for(self, tid):
+        """(controls, via): the mapped controls; else those of the IDs ATT&CK revoked in its favour
+        (the mapping may predate the current ATT&CK version); else the parent technique's."""
+        if tid in self.t2c:
+            return self.t2c[tid], tid
+        old = sorted(o for o, new in self.revoked.items() if new == tid and o in self.t2c)
+        if old:
+            return sorted({c for o in old for c in self.t2c[o]}, key=key), ", ".join(old)
+        parent = tid.split(".")[0]
+        if parent != tid:
+            cs, via = self.controls_for(parent)
+            if cs:
+                return cs, via
+        return [], None
+
+    def attribution(self):
+        return (self.attack or {}).get("attribution", "")
+
+    def sources(self):
+        out = []
+        for d in (self.nist, self.attack, self.mapping):
+            if d:
+                out.append(f"{d.get('source', '')} (retrieved {d.get('retrieved', 'unknown')})")
+        return out
+
+
+def norm_control(s):
+    """AC-2, ac-2, AC-02, AC-2(1), ac-2.1, AC-02(01), 'AC-2 (1)' -> canonical."""
+    m = re.fullmatch(r"\s*([A-Za-z]{2})[\s-]?0*(\d+)\s*(?:[.(]\s*0*(\d+)\s*\)?)?\s*", s)
+    if not m:
+        return s.strip().upper()
+    return f"{m.group(1).upper()}-{m.group(2)}" + (f"({m.group(3)})" if m.group(3) else "")
+
+
+def norm_attack(s):
+    s = s.strip().upper()
+    m = re.fullmatch(r"(T|M|TA)0*?(\d{4})(?:[./]0*(\d{1,3}))?", s)
+    if not m:
+        return s
+    out = f"{m.group(1)}{m.group(2)}"
+    if m.group(3) and m.group(1) == "T":
+        out += f".{int(m.group(3)):03d}"
+    return out
+
+
+def key(s):
+    return [int(x) if x.isdigit() else x for x in re.split(r"(\d+)", s)]
+
+
+def rank_controls(d, cs):
+    """Most specific first: controls mapped to fewer techniques overall come first."""
+    return sorted(cs, key=lambda c: (len(d.c2t.get(c, [])), key(c)))
+
+
+def shortlist(items, n=SHOW):
+    items = list(items)
+    if len(items) <= n:
+        return ", ".join(items) if items else "none"
+    return ", ".join(items[:n]) + f" (+{len(items) - n} more)"
+
+
+# ---------------------------------------------------------------- lookups
+
+def look_control(d, raw):
+    cid = norm_control(raw)
+    c = d.ctl.get(cid)
+    if not c:
+        return None
+    parent = d.parent_of.get(cid)
+    rec = {"id": cid, "kind": "enhancement" if parent else "control", "family": c["family"],
+           "family_title": d.families.get(c["family"], ""), "title": c["title"],
+           "withdrawn": bool(c.get("withdrawn")), "baselines": c.get("baselines", [])}
+    if parent:
+        rec["parent"] = {"id": parent, "title": d.ctl[parent]["title"]}
+    else:
+        rec["summary"] = c.get("summary", "")
+        rec["enhancements"] = c.get("enhancements", [])
+    techs = sorted(d.c2t.get(cid, []), key=key)
+    rec["attack_techniques"] = [{"id": t, "name": d.tech[t]["name"]} if t in d.tech else
+                                {"id": t, "name": "(revoked)", "replaced_by": d.revoked.get(t)} for t in techs]
+    return rec
+
+
+def show_control(d, r):
+    out = [f"{r['id']}  {r['title']}" + ("  (withdrawn)" if r["withdrawn"] else ""),
+           f"Family: {r['family']} {r['family_title']}"]
+    if r.get("parent"):
+        out.append(f"Enhancement of {r['parent']['id']} {r['parent']['title']}")
+    if r.get("summary"):
+        out.append(f"Summary: {r['summary']}")
+    out.append("Baselines: " + (", ".join(r["baselines"]) if r["baselines"] else "none"))
+    enh = [e for e in r.get("enhancements", []) if not e.get("withdrawn")]
+    if r["kind"] == "control":
+        out.append(f"Enhancements ({len(enh)}, {len(r.get('enhancements', [])) - len(enh)} withdrawn left out):")
+        for e in enh:
+            out.append(f"  {e['id']}  {e['title']}" + (f"  [{', '.join(e['baselines'])}]" if e.get("baselines") else ""))
+    t = r["attack_techniques"]
+    if d.mapping:
+        out.append(f"ATT&CK techniques the mapping says it mitigates ({len(t)}): "
+                   + shortlist([x["id"] for x in t], 15))
+    return out
+
+
+def look_technique(d, raw):
+    tid = norm_attack(raw)
+    t = d.tech.get(tid)
+    if not t:
+        return None
+    cs, via = d.controls_for(tid)
+    return {"id": tid, "kind": "sub-technique" if t.get("parent") else "technique", "name": t["name"],
+            "parent": ({"id": t["parent"], "name": d.tech.get(t["parent"], {}).get("name", "")}
+                       if t.get("parent") else None),
+            "tactics": [{"shortname": s, "name": d.tac.get(s, {}).get("name", s),
+                         "id": d.tac.get(s, {}).get("id")} for s in t.get("tactics", [])],
+            "platforms": t.get("platforms", []),
+            "sub_techniques": [{"id": s, "name": d.tech[s]["name"]} for s in sorted(d.subs.get(tid, []), key=key)],
+            "mitigations": [{"id": m, "name": d.mit.get(m, {}).get("name", "")} for m in t.get("mitigations", [])],
+            "nist_800_53": rank_controls(d, cs), "nist_800_53_via": via,
+            "url": f"https://attack.mitre.org/techniques/{tid.replace('.', '/')}/"}
+
+
+def show_technique(d, r):
+    out = [f"{r['id']}  {r['name']}"]
+    if r["parent"]:
+        out.append(f"Sub-technique of {r['parent']['id']} {r['parent']['name']}")
+    out.append("Tactics: " + ", ".join(f"{x['name']} ({x['id']})" for x in r["tactics"]))
+    out.append("Platforms: " + ", ".join(r["platforms"]))
+    if r["sub_techniques"]:
+        out.append(f"Sub-techniques ({len(r['sub_techniques'])}):")
+        out += [f"  {s['id']}  {s['name']}" for s in r["sub_techniques"]]
+    out.append(f"Mitigations ({len(r['mitigations'])}):")
+    out += [f"  {m['id']}  {m['name']}" for m in r["mitigations"]] or ["  none in ATT&CK"]
+    if d.mapping:
+        via = "" if r["nist_800_53_via"] in (None, r["id"]) else f" (mapped as {r['nist_800_53_via']})"
+        out.append(f"800-53 controls the mapping says mitigate it{via}, most specific first ({len(r['nist_800_53'])}): "
+                   + (shortlist(r["nist_800_53"], 20) if r["nist_800_53"] else "none mapped"))
+    out.append(r["url"])
+    return out
+
+
+def look_mitigation(d, raw):
+    mid = norm_attack(raw)
+    m = d.mit.get(mid)
+    if not m:
+        return None
+    ts = sorted(d.mitigates.get(mid, []), key=key)
+    return {"id": mid, "kind": "mitigation", "name": m["name"],
+            "techniques": [{"id": t, "name": d.tech[t]["name"]} for t in ts],
+            "url": f"https://attack.mitre.org/mitigations/{mid}/"}
+
+
+def show_mitigation(d, r):
+    out = [f"{r['id']}  {r['name']}  (mitigation)", f"Mitigates ({len(r['techniques'])}):"]
+    out += [f"  {t['id']}  {t['name']}" for t in r["techniques"]] or ["  none listed"]
+    out.append(r["url"])
+    return out
+
+
+def search(d, words, scope, limit):
+    ws = [w.lower() for w in words if w.strip()]
+    hits = {"800-53": [], "attack": [], "mitigations": []}
+
+    pats = [re.compile(r"(?<![\w])" + re.escape(w)) for w in ws]
+
+    def score(title, body=""):
+        t, b = title.lower(), body.lower()
+        if not all(p.search(t) or p.search(b) for p in pats):
+            return None
+        return sum(2 if p.search(t) else 1 for p in pats)
+
+    if scope in ("all", "800-53") and d.nist:
+        for c in d.nist["controls"]:
+            s = score(c["title"], c.get("summary", ""))
+            if s is not None and not c.get("withdrawn"):
+                hits["800-53"].append((s, {"id": c["id"], "title": c["title"], "summary": c.get("summary", "")}))
+            for e in c.get("enhancements", []):
+                s = score(e["title"])
+                if s is not None and not e.get("withdrawn"):
+                    hits["800-53"].append((s - 0.5, {"id": e["id"], "title": e["title"],
+                                                     "parent": c["id"], "parent_title": c["title"]}))
+    if scope in ("all", "attack") and d.attack:
+        for t in d.attack["techniques"]:
+            par = d.tech.get(t.get("parent", ""), {}).get("name", "")
+            s = score(t["name"], par)
+            if s is not None:
+                hits["attack"].append((s, {"id": t["id"], "name": (par + ": " if par else "") + t["name"]}))
+        for m in d.attack.get("mitigations", []):
+            s = score(m["name"])
+            if s is not None:
+                hits["mitigations"].append((s, {"id": m["id"], "name": m["name"]}))
+    out = {}
+    for k, v in hits.items():
+        v.sort(key=lambda x: (-x[0], key(x[1]["id"])))
+        out[k] = {"total": len(v), "results": [x[1] for x in v[:limit]]}
+    return out
+
+
+def show_search(words, r):
+    out = [f"Search: {' '.join(words)}"]
+    labels = {"800-53": "NIST SP 800-53 Rev 5", "attack": "ATT&CK techniques", "mitigations": "ATT&CK mitigations"}
+    for k, lab in labels.items():
+        g = r[k]
+        out.append(f"{lab} ({g['total']}" + (f", first {len(g['results'])}" if g["total"] > len(g["results"]) else "") + "):")
+        for x in g["results"]:
+            if k == "800-53":
+                extra = f"  (in {x['parent']} {x['parent_title']})" if x.get("parent") else ""
+                out.append(f"  {x['id']}  {x['title']}{extra}")
+            else:
+                out.append(f"  {x['id']}  {x['name']}")
+        if not g["results"]:
+            out.append("  none")
+    return out
+
+
+# ---------------------------------------------------------------- map
+
+def cells(line):
+    s = line.strip()
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|"):
+        s = s[:-1]
+    return [c.strip() for c in s.split("|")]
+
+
+def blank(v):
+    v = (v or "").strip()
+    return not v or bool(re.fullmatch(r"<[^>]*>", v)) or v in ("-", "—")
+
+
+def threat_rows(path):
+    """Rows of every table with an ID column and a Threat column (the threat model's threats table)."""
+    lines = pathlib.Path(path).read_text(errors="replace").splitlines()
+    rows, i = [], 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if line.startswith("|") and i + 1 < len(lines) and re.fullmatch(r"\|?[\s:|-]+\|?", lines[i + 1].strip()) \
+                and "-" in lines[i + 1]:
+            h = [c.lower().strip("*_ ") for c in cells(line)]
+            col = lambda *pats: next((j for j, x in enumerate(h) if any(re.search(p, x) for p in pats)), None)
+            cid, cth = col(r"^id$"), col(r"^threat$", r"^threat\b(?!.*model)")
+            if cid is None or cth is None:
+                i += 1
+                continue
+            cst, cgap, cflow = col(r"^stride"), col(r"^gap"), col(r"flow|element")
+            catt, cnist = col(r"att&ck|attack|technique"), col(r"800-53|nist")
+            i += 2
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                c = cells(lines[i])
+                get = lambda k: c[k] if k is not None and k < len(c) else ""
+                if not blank(get(cid)) and not blank(get(cth)):
+                    rows.append({"line": i + 1, "id": get(cid).strip("*` "), "stride": get(cst),
+                                 "flow": get(cflow), "threat": get(cth), "gap": "" if blank(get(cgap)) else get(cgap),
+                                 "attack_given": "" if blank(get(catt)) else get(catt),
+                                 "nist_given": "" if blank(get(cnist)) else get(cnist)})
+                i += 1
+            continue
+        i += 1
+    return rows
+
+
+def suggest(d, text):
+    low = text.lower()
+    found = {}
+    for pat, ids in HINTS:
+        m = re.search(pat, low)
+        if not m:
+            continue
+        a, b = m.start(), m.end()
+        while a > 0 and low[a - 1].isalnum():
+            a -= 1
+        while b < len(low) and low[b].isalnum():
+            b += 1
+        for t in ids:
+            if t in d.tech:
+                found.setdefault(t, set()).add(low[a:b].strip())
+    for t in d.attack["techniques"]:
+        n = t["name"].lower()
+        if len(n) >= 6 and re.search(r"(?<![\w-])" + re.escape(n) + r"(?![\w-])", low):
+            found.setdefault(t["id"], set()).add(n)
+    # A sub-technique found by name makes its parent's keyword hit redundant.
+    for t in list(found):
+        p = d.tech[t].get("parent")
+        if p in found and found[p] <= found[t]:
+            del found[p]
+    return [{"id": t, "name": d.tech[t]["name"], "matched": sorted(found[t]), "suggested": True}
+            for t in sorted(found, key=key)]
+
+
+def do_map(d, path):
+    rows = threat_rows(path)
+    out, unknown = [], []
+    for r in rows:
+        given = []
+        for tok in re.findall(r"\b(?:T\d{4}(?:\.\d{3})?|M\d{4})\b", r["attack_given"].upper()):
+            if tok in d.tech:
+                given.append({"id": tok, "name": d.tech[tok]["name"], "suggested": False})
+            else:
+                unknown.append({"row": r["id"], "line": r["line"], "id": tok, "kind": "ATT&CK"})
+        for tok in re.findall(r"\b[A-Z]{2}-\d+(?:\s*\(\d+\))?", r["nist_given"].upper()):
+            if norm_control(tok) not in d.ctl:
+                unknown.append({"row": r["id"], "line": r["line"], "id": tok, "kind": "800-53"})
+        sugg = [] if given else suggest(d, " ".join([r["threat"], r["gap"]]))
+        techs = given + sugg
+        counts, via = {}, {}
+        for t in techs:
+            cs, v = d.controls_for(t["id"])
+            if v and v != t["id"]:
+                via[t["id"]] = v
+            for c in cs:
+                counts[c] = counts.get(c, 0) + 1
+        ctls = sorted(counts, key=lambda c: (-counts[c], len(d.c2t.get(c, [])), key(c)))
+        out.append({"id": r["id"], "line": r["line"], "stride": r["stride"], "flow": r["flow"],
+                    "threat": r["threat"], "gap": r["gap"], "attack": techs, "nist_800_53": ctls,
+                    "nist_800_53_via_parent": via, "nist_given": r["nist_given"]})
+    return {"file": str(path), "threats": len(out), "rows": out, "unknown_ids": unknown,
+            "mapping_available": bool(d.mapping),
+            "rule": ("ATT&CK techniques are keyword suggestions unless the table already gives them; 800-53 controls "
+                     "are those the public mapping says mitigate the techniques, most techniques covered first, "
+                     "then most specific. Check each before citing it.")}
+
+
+def show_map(d, r):
+    out = [f"ATT&CK and 800-53 suggestions for {r['threats']} threat(s) in {r['file']}", ""]
+    for x in r["rows"]:
+        head = f"{x['id']}" + (f" ({x['stride']})" if x["stride"] else "") + (f" {x['flow']}:" if x["flow"] else ":")
+        out.append(f"{head} {x['threat']}")
+        given = [t for t in x["attack"] if not t["suggested"]]
+        sugg = [t for t in x["attack"] if t["suggested"]]
+        if given:
+            out.append("  ATT&CK (given): " + "; ".join(f"{t['id']} {t['name']}" for t in given))
+        if sugg:
+            out.append("  ATT&CK (suggested): " + "; ".join(
+                f"{t['id']} {t['name']} [{', '.join(t['matched'])}]" for t in sugg))
+        if not x["attack"]:
+            out.append("  ATT&CK: no keyword match; tag by hand if a technique fits, or leave it blank")
+        if d.mapping:
+            if x["attack"]:
+                lab = "800-53 (suggested, via mapping)" if sugg else "800-53 (via mapping)"
+                out.append(f"  {lab}: " + (shortlist(x["nist_800_53"]) if x["nist_800_53"] else "none mapped"))
+            if x["nist_given"]:
+                out.append(f"  800-53 already in the table: {x['nist_given']}")
+    if not r["rows"]:
+        out.append("No threats table found (a table with ID and Threat columns).")
+    for u in r["unknown_ids"]:
+        out.append(f"Unknown {u['kind']} ID: {u['id']} in {u['row']} (line {u['line']})")
+    if not d.mapping:
+        out.append("No ATT&CK-to-800-53 mapping file, so no 800-53 suggestions.")
+    out += ["", r["rule"]]
+    return out
+
+
+# ---------------------------------------------------------------- main
+
+def footer(d, attack_shown):
+    out = ["", "Sources: " + "; ".join(d.sources())]
+    if attack_shown and d.attribution():
+        out.append(d.attribution())
+    return out
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-controls", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("command", help="800-53, attack, search, or map")
+    ap.add_argument("args", nargs="*")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--in", dest="scope", choices=("all", "800-53", "attack"), default="all",
+                    help="search: where to look (default all)")
+    ap.add_argument("--limit", type=int, default=20, help="search: results per group (default 20)")
+    a = ap.parse_args(argv)
+    cmd = a.command.lower()
+
+    def emit(obj, lines, d, attack_shown=True):
+        if a.json:
+            src = {"sources": d.sources()}
+            if attack_shown and d.attribution():
+                src["attribution"] = d.attribution()
+            print(json.dumps(dict(obj, **src), indent=2, ensure_ascii=False))
+        else:
+            print("\n".join(lines + footer(d, attack_shown)))
+
+    if cmd in ("800-53", "80053", "nist", "sp800-53"):
+        if len(a.args) != 1:
+            print("kit-controls: give one control ID, for example: kit-controls 800-53 AC-2", file=sys.stderr)
+            return 2
+        d = Data()
+        r = look_control(d, a.args[0])
+        if not r:
+            print(f"kit-controls: no NIST SP 800-53 Rev 5 control {norm_control(a.args[0])}", file=sys.stderr)
+            return 1
+        emit(r, show_control(d, r), d, attack_shown=bool(r["attack_techniques"]))
+        return 0
+
+    if cmd in ("attack", "att&ck", "mitre"):
+        if len(a.args) != 1:
+            print("kit-controls: give one technique or mitigation ID, for example: kit-controls attack T1078",
+                  file=sys.stderr)
+            return 2
+        d = Data()
+        aid = norm_attack(a.args[0])
+        redirected = None
+        if aid in d.revoked and aid not in d.tech:
+            redirected, aid = aid, d.revoked[aid]
+        if aid.startswith("M"):
+            r = look_mitigation(d, aid)
+            lines = show_mitigation(d, r) if r else None
+        else:
+            r = look_technique(d, aid)
+            lines = show_technique(d, r) if r else None
+        if not r:
+            print(f"kit-controls: no ATT&CK Enterprise technique or mitigation {aid} in this version", file=sys.stderr)
+            return 1
+        if redirected:
+            r["revoked_id"] = redirected
+            lines = [f"{redirected} was revoked in ATT&CK v{d.attack.get('version')}; it's now {aid}.", ""] + lines
+        emit(r, lines, d)
+        return 0
+
+    if cmd == "search":
+        if not a.args:
+            print("kit-controls: give words to search for", file=sys.stderr)
+            return 2
+        d = Data()
+        r = search(d, a.args, a.scope, a.limit)
+        emit({"query": a.args, "results": r}, show_search(a.args, r), d,
+             attack_shown=bool(r["attack"]["total"] or r["mitigations"]["total"]))
+        return 0 if any(g["total"] for g in r.values()) else 1
+
+    if cmd == "map":
+        if len(a.args) != 1:
+            print("kit-controls: give one threat model file", file=sys.stderr)
+            return 2
+        if not pathlib.Path(a.args[0]).is_file():
+            print(f"kit-controls: no such file: {a.args[0]}", file=sys.stderr)
+            return 2
+        d = Data()
+        r = do_map(d, a.args[0])
+        if not r["rows"]:
+            print(f"kit-controls: no threats table (with ID and Threat columns) in {a.args[0]}", file=sys.stderr)
+            return 2
+        emit(r, show_map(d, r), d)
+        return 1 if r["unknown_ids"] else 0
+
+    print(f"kit-controls: unknown command '{a.command}'; use 800-53, attack, search, or map", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

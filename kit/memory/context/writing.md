@@ -29,3 +29,9 @@ it current.
   brand and slide skills, and slide counts by audience, for the deck builder.
 - **Research briefs:** optional. `~/Claude/Agents/kit/templates/research-brief-template.md` is the
   layout for research briefs filed in the library, in the order the researcher reports.
+- **TOGAF deliverables:** optional, on request only. `togaf-architecture-vision-template.md`,
+  `togaf-statement-of-architecture-work-template.md`, `togaf-architecture-definition-document-template.md`,
+  `togaf-architecture-requirements-specification-template.md`, `togaf-transition-architecture-template.md`,
+  and `togaf-implementation-migration-plan-template.md` follow the structure of TOGAF deliverables
+  (headings paraphrased; TOGAF is a trademark of The Open Group). Each says which IA and GDS parts
+  already supply it; the IA and GDS stay the documents of record.

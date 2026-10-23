@@ -1,0 +1,18 @@
+{
+  "_about": "Example control map for kit-audit-export --controls. Copy it, replace the controls with your own control set's IDs and names, and point **Control map** in memory/context/compliance.md at the copy. Evidence sources: connector-audit, kit-audit, approvals, config, agent-permissions, doctor, version, exceptions, adrs, or {\"library\": \"<glob under the library root>\", \"label\": \"...\", \"copy\": false}. Library files are listed with their SHA-256 and date; set copy to true to copy them into the pack.",
+  "controls": [
+    {"id": "CHG-01", "name": "Change approval",
+     "evidence": [{"library": "artifacts/*/change/*.md", "label": "change board packs and change links"},
+                  {"library": "artifacts/*/reviews/*.md", "label": "design reviews"}, "adrs"]},
+    {"id": "ACC-02", "name": "Access review",
+     "evidence": ["agent-permissions", "config", "approvals"]},
+    {"id": "LOG-01", "name": "Audit logging",
+     "evidence": ["connector-audit", "kit-audit"]},
+    {"id": "DES-01", "name": "Design approval",
+     "evidence": [{"library": "artifacts/*/approvals/*.md", "label": "IA and GDS approvals"}]},
+    {"id": "EXC-01", "name": "Policy exceptions are approved and reviewed",
+     "evidence": ["exceptions"]},
+    {"id": "OPS-01", "name": "Platform health is checked",
+     "evidence": ["doctor", "version"]}
+  ]
+}

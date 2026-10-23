@@ -120,12 +120,12 @@ missing. Fill in what applies to you, in roughly this order:
 | `intake.md` | intake triager | Intake checklist, when an impact assessment is needed, project naming |
 | `knowledge.md` | curator, handoff, `kit-sysprofile` | Knowledge base location and first topics, where system profiles go |
 | `standards.md` | standards checker, `kit-refarch` | Engineering standards, reference architectures (the index `kit-refarch` reads, for example `published/<library>-index.md`), security baselines, DR tiers, waivers |
-| `compliance.md` | risk and compliance mapper | Control frameworks, policies, data classes, sign-off roles, risk rating, and a framework profile: which frameworks apply (NIST CSF 2.0, PCI DSS, CIS, CISA Zero Trust and Secure by Design, SOX ITGC, others), to what, and the owner role; the mapper maps only against those, and fills the NIST CSF 2.0 mapping (`csf-mapping-template.md`, `kit-csf`) when CSF 2.0 applies |
+| `compliance.md` | risk and compliance mapper | Control frameworks, policies, data classes, sign-off roles, risk rating, and a framework profile: which frameworks apply (NIST CSF 2.0, PCI DSS, CIS, CISA Zero Trust and Secure by Design, SOX ITGC, others), to what, and the owner role; the mapper maps only against those, and fills the NIST CSF 2.0 mapping (`csf-mapping-template.md`, `kit-csf`) when CSF 2.0 applies; optional Regulatory watch regimes and folder |
 | `costs.md` | cost estimator | Rate cards, labor rates, currency, contingency, sizing basis (`kit-sizing`) |
 | `estimating.md` | PMO estimator | Past project data, phase model, roles |
 | `changeboard.md` | change board prep | Template, risk scoring, checklist, lead times, cadence |
 | `decisions.md` | decision recorder | ADR template and folder, who can accept a decision |
-| `diagrams.md` | diagrammer | Diagramming standard, stencils, formats |
+| `diagrams.md` | diagrammer, reviewer, `kit-diaglint` | Diagramming standard, stencils, formats, and the optional Lint rules file (start from `templates/diagram-lint-rules.example.json`) |
 | `status.md` | status reporter | Report format, window, audiences, stakeholder maps, exploration section |
 | `onboarding.md` | onboarding guide | Core reading by role, conventions, Kit training path |
 | `poc.md` | POC lead | Charter approvers and verdict deciders, NDA owner, data rule |
@@ -209,7 +209,18 @@ rule written with `~/` doesn't match a command spelled with the full home path.
 
 `kit-settings` changes delivery and to-do sync; everything else is a key in
 `~/Claude/Agents/kit/.install/shared/morning/config` (every key is documented in
-`shared/morning/config.example`).
+`shared/morning/config.example`). Every key is described there; the ones most often changed are:
+
+| Key | What it does |
+|---|---|
+| `RUN_TIMEOUT`, `RUN_TIMEOUT_WEEKLY`, `RUN_TIMEOUT_WORKLIST`, `RUN_LOCK_WAIT` | Time limits per run and how long a run waits for another to finish |
+| `SKIP_DAYS`, `EOD` | Days with no scheduled runs; the optional end-of-day wrap-up |
+| `ALLOW_TOOLS`, `ALLOW_TOOLS_WEEKLY`, `BLOCK_TOOLS` | Extra tools a run may or may not use |
+| `COST_BUDGET_MONTHLY`, `COST_WARN_PCT`, `COST_STOP_PCT`, `COST_ESSENTIAL_MODES` | The monthly budget, its warn and stop levels, and the runs that continue at the stop level |
+| `OUTLOOK_CHECK`, `OUTLOOK_RETRY_WAITS`, `CALENDAR_JSON_CMD` | Outlook health check, retry waits, and an alternative calendar command |
+| `PHONE_APPROVALS`, `PUBLISH_PERSONAL`, `ONEDRIVE_PUBLISH_DIR`, `ONEDRIVE_ALLOWED_PREFIX`, `IMESSAGE_TO`, `IMESSAGE_TO_ALT` | Phone approvals and publishing routes |
+| `RUN_WINDOW_WORKLIST`, `RUN_WINDOW_EOD`, `RUN_ALERTS_TIMEOUT` | Optional run-alert windows for the work list and wrap-up; the alert check's time limit |
+| `OWNER_NAME` | Your name as Kit uses it in briefs and agents |
 
 The morning brief opens with a connector health line (each connector PASS or FAIL, from
 `kit-connect test`, no model cost). It gives up after `CONNECTOR_CHECK_TIMEOUT` seconds (default
@@ -222,6 +233,48 @@ the Monday run may call (`mcp__<server>__<tool>`, separated by semicolons); empt
 server's `allow_tools`. Only tools the guard would allow, and whose names don't read as writes, are
 used. `DEMAND_REFRESH_MAX` (25) caps the demands checked; `DEMAND_REFRESH_MIN_LEFT` (10) skips it
 when the run is nearly out of time.
+
+**Connector outages.** `CONNECTOR_FAIL_STREAK` (default 2) sets how many failed morning checks in a
+row raise an outage: one work item in your queue and a dashboard banner, both cleared (the item gets a
+"Recovered" line) when the connector passes again.
+
+**Run and cost alerts** (on by default, `RUN_ALERTS`). `RUN_FAIL_STREAK` (2) failed runs in a row, or
+no success within `RUN_WINDOW_MORNING` (2 weekdays), `RUN_WINDOW_WEEKLY` (8 days), `RUN_WINDOW_SYNC` (2
+hours), or `RUN_WINDOW_BACKUP` (2 days), raise a run alert ("off" disables a window). Cost alerts fire
+when the month's projection reaches `COST_ALERT_PROJECTION` of the budget (or `COST_WARN_PCT`), when
+spend reaches the stop level, or, with no budget, when a day costs `COST_SPIKE_FACTOR` (3) times the
+recent median. Check with `kit-alerts check --dry-run`; undo with `RUN_ALERTS="off"`.
+
+**Monitors** (on by default): `MONITOR_DRIFT` (agents that differ from the shipped version or are out
+of date in `~/.claude/agents`), `MONITOR_LIBRARY` (published documents missing from the library
+indexes: `LIBRARY_UNINDEXED_MAX` 0, `LIBRARY_INDEX_MAX_DAYS` 30; an inferred cloud-sync stall:
+`LIBRARY_SYNC_MAX_DAYS` 14, 0 turns it off), and `MONITOR_WAITING` (queue items waiting more than
+`WAITING_MAX_DAYS`, 7, with follow-up drafts in `briefs/followups/`). `MONITOR_TIMEOUT` (20 s) limits
+each. The library monitor needs `library.md`'s library root and published libraries. Set a key to
+"off" to undo.
+
+**Compliance setup** (optional, in `memory/context/compliance.md`): **Exception register** (default
+`compliance/exception-register.md` in the library root), **Control map** (JSON or Markdown; start from
+`templates/control-map.example.json`) for `kit-audit-export --controls`, and **PBC tracker** (default
+`compliance/audit-requests/pbc-tracker.md`). `MONITOR_EXCEPTIONS` and `EXCEPTIONS_WARN_DAYS` (30) drive the
+exception alert. `MONITOR_GUARD` checks that guarded agents keep their hooks, the guard's settings are
+readable, its audit folder is writable, and calls have result records (`GUARD_NORESULT_HOURS`,
+`GUARD_WINDOW_DAYS`). For the quarterly least-privilege review to run unattended, allow
+`kit-audit privileges` in `ALLOW_TOOLS_WEEKLY`.
+
+The installer copies Kit's skills (`kit/skills/`) into `~/.claude/skills`, never over a skill you
+already have. `kit-templatecheck` finds templates through writing.md's **Templates** line in the form
+`IA: <path>; GDS: <path>` (relative paths from the library root); until it's set, pass `--template`.
+
+`kit-drawio` (and so `kit-viewpoints`) uses the team style file `memory/context/drawio-styles.json`
+when no `--styles` or `KIT_DRAWIO_STYLES` is given, so diagrams follow your standard by default.
+
+**Monthly regulatory watch** (off by default). Set the "Regulatory watch" field in
+`memory/context/compliance.md` to public regime names (for example "SEC Reg SCI, CFTC, DORA, NIST"),
+optionally a "Regulatory watch folder", then `REG_WATCH="on"`. It runs on the first Monday's weekly
+review (`REG_WATCH_WHEN="every-run"` to test it on any weekly review) and is skipped at the budget's
+warn level or when fewer than `REG_WATCH_MIN_LEFT` (15) minutes remain. It's separate from the weekly
+review's horizon watch, which follows the future tech planner's watch list.
 
 The red team and threat modeler need no setup beyond `standards.md` and `compliance.md`; name a
 team copy of their templates under "Design review templates" in `standards.md`.
@@ -337,8 +390,8 @@ kit-team status
 
 Messages: `kit-team send --to <kit id> --subject "..." --body-file note.txt` writes a draft and sends
 only after your yes at the keyboard; `kit-team inbox` and `kit-team ack <id>` read and acknowledge.
-The SQL transport (`Transport: sql`, `sharing-db.json`) is tested on MySQL; PostgreSQL and SQL Server
-are untested. Store the database password in a Keychain entry (`security add-generic-password -s
+The SQL transport (`Transport: sql`, `sharing-db.json`) is tested on MySQL and PostgreSQL; SQL Server
+is untested. Store the database password in a Keychain entry (`security add-generic-password -s
 kit-sharing-db -a <db user> -w`), name it in `sharing-db.json` with the host, port, database, and
 user, install the driver (`PyMySQL`), add `sql` to the policy's allowed transports, and run
 `kit-team db-init`. See `shared/sql/README.md`.

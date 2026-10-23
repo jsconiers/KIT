@@ -1,0 +1,403 @@
+#!/usr/bin/env python3
+"""kit-templatecheck: check a draft against the team template it should follow.
+
+  kit-templatecheck DRAFT                    find the template from writing.md and report drift
+  kit-templatecheck DRAFT --type IA|GDS      say which template (else guessed from the draft)
+  kit-templatecheck DRAFT --template PATH    compare with this template instead of writing.md's
+  kit-templatecheck DRAFT --json             the report as JSON
+
+DRAFT and the template are Markdown or text, or Word (.docx or .dotx, read straight from the file,
+so Word isn't needed). It compares the draft's heading outline with the template's and reports:
+
+  missing      template sections the draft doesn't have (required unless the template heading
+               says "optional")
+  renamed      a template section the draft has under another name (same section number, or
+               close wording)
+  reordered    sections present in both, but in a different order
+  added        draft sections the template doesn't have
+  version      the template version the draft claims ("Template version: 3.1", or
+               "Template: IA template v3") against the template's current version (its own
+               "Template version" or "Version" field, else a v<number> in its file name)
+  placeholders template text left in the draft: bracketed prompts such as [Insert scope] or
+               <project name>, {{fields}}, lorem ipsum, and the template's guidance sentences
+               copied word for word
+
+Section numbers ("4.2", "Section 3:") are ignored when matching names, so renumbering alone isn't
+drift. The document's title (a lone top-level heading, or Word's Title style) isn't a section.
+
+Where the template comes from: --template, else the "Templates" line in
+~/Claude/Agents/kit/memory/context/writing.md, which names each template with its type, for example
+  - **Templates:** IA: `~/library/templates/ia-template.docx`; GDS: `~/library/templates/gds-template.docx`
+Relative paths are read from the library root in library.md.
+
+Exit status: 0 when every required section is there, 1 when one or more is missing, 2 when the
+draft or template can't be read. Read-only, and never calls an outside service.
+"""
+import argparse
+import bisect
+import difflib
+import json
+import os
+import pathlib
+import re
+import sys
+import xml.etree.ElementTree as ET
+import zipfile
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import kit_arch as ka  # noqa: E402
+
+W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+MAX_XML = 50 * 1024 * 1024
+MAX_TEXT = 10 * 1024 * 1024
+TYPES = {"IA": [r"\bIA\b", r"impact assessment"],
+         "GDS": [r"\bGDS\b", r"design spec"]}
+NUMBER = re.compile(r"^(?:section\s+|appendix\s+)?((?:\d+|[A-Z])(?:\.\d+)*)\.?(?:\s*[:.)\-]\s*|\s+)", re.I)
+OPTIONAL = re.compile(r"[\(\[]\s*optional\s*[\)\]]|\boptional\s*:", re.I)
+PLACEHOLDERS = [
+    ("prompt", re.compile(r"\[(?:insert|enter|describe|add|provide|list|state|replace|name of|type|"
+                          r"fill|placeholder|tbd|e\.g\.|for example)[^\]\n]{0,120}\]", re.I)),
+    ("field", re.compile(r"\{\{[^}\n]{1,60}\}\}")),
+    ("angle", re.compile(r"<(?!/?(?:br|b|i|u|p|em|strong|sup|sub|span|div|a|img|table|tr|td|th|ul|ol|li|hr|code|pre)\b)"
+                         r"[A-Za-z][A-Za-z0-9 ,.'/&()\-]{2,100}>")),
+    ("lorem", re.compile(r"\blorem ipsum\b", re.I)),
+    ("date", re.compile(r"\b(?:DD-Mmm-YYYY|DD/MM/YYYY|MM/DD/YYYY|YYYY-MM-DD|XX/XX/XXXX)\b")),
+]
+VERSION_RE = r"v?(\d+(?:\.\d+)*)"
+
+
+# ---------- reading ----------
+
+def docx_lines(path):
+    """Paragraphs of a .docx or .dotx: headings as '#' lines, Word's Title style as '%TITLE '."""
+    with zipfile.ZipFile(path) as z:
+        info = z.getinfo("word/document.xml")
+        if info.file_size > MAX_XML:
+            raise ValueError("document.xml is too large to read")
+        root = ET.fromstring(z.read(info))
+    body = root.find(f"{W}body")
+    out = []
+
+    def ptext(p):
+        parts = []
+        for el in p.iter():
+            if el.tag == f"{W}t" and el.text:
+                parts.append(el.text)
+            elif el.tag in (f"{W}tab", f"{W}br"):
+                parts.append(" ")
+        return re.sub(r"\s+", " ", "".join(parts)).strip()
+
+    for el in (body if body is not None else []):
+        if el.tag == f"{W}p":
+            text = ptext(el)
+            if not text:
+                continue
+            style = el.find(f"{W}pPr/{W}pStyle")
+            val = style.get(f"{W}val", "") if style is not None else ""
+            lvl = el.find(f"{W}pPr/{W}outlineLvl")
+            m = re.search(r"heading\s*(\d)", val, re.I)
+            if m:
+                text = "#" * min(int(m.group(1)), 6) + " " + text
+            elif lvl is not None and lvl.get(f"{W}val", "").isdigit() and int(lvl.get(f"{W}val")) < 6:
+                text = "#" * (int(lvl.get(f"{W}val")) + 1) + " " + text
+            elif val.lower() == "title":
+                text = "%TITLE " + text
+            out.append(text)
+        elif el.tag == f"{W}tbl":
+            for tr in el.iter(f"{W}tr"):
+                cells = [" ".join(t for t in (ptext(p) for p in tc.iter(f"{W}p")) if t).replace("|", "/")
+                         for tc in tr.findall(f"{W}tc")]
+                out.append("| " + " | ".join(cells) + " |")
+    return out
+
+
+def read_lines(path):
+    path = pathlib.Path(path)
+    if path.suffix.lower() in (".docx", ".dotx", ".docm", ".dotm"):
+        return docx_lines(path)
+    if path.stat().st_size > MAX_TEXT:
+        raise ValueError("file is too large to read")
+    out, fence = [], False
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if line.lstrip().startswith(("```", "~~~")):
+            fence = not fence
+            continue
+        out.append("" if fence else line.rstrip())
+    return out
+
+
+# ---------- outline ----------
+
+def norm(heading):
+    """Heading text for matching: no number, no 'optional' marker, lower case, plain words."""
+    h = re.sub(r"[*_`]", "", heading).strip()
+    h = NUMBER.sub("", h, count=1)
+    h = OPTIONAL.sub(" ", h)
+    h = h.replace("&", " and ").lower()
+    h = re.sub(r"[^a-z0-9 ]+", " ", h)
+    return re.sub(r"\s+", " ", h).strip()
+
+
+def outline(lines):
+    """[(level, heading text, number or '', normalized, optional)], title removed."""
+    heads, title_idx = [], None
+    for line in lines:
+        if line.startswith("%TITLE "):
+            title_idx = title_idx if title_idx is not None else -1
+            continue
+        m = re.match(r"^(#{1,6})\s+(.+?)\s*#*\s*$", line)
+        if m:
+            text = re.sub(r"[*_`]", "", m.group(2)).strip()
+            n = NUMBER.match(text)
+            heads.append({"level": len(m.group(1)), "heading": text,
+                          "number": n.group(1) if n and re.search(r"\d", n.group(1)) else "",
+                          "key": norm(text), "optional": bool(OPTIONAL.search(text))})
+    # a lone top-level heading at the start is the document's title, not a section
+    if title_idx is None and heads and heads[0]["level"] == 1 and \
+            not any(h["level"] == 1 for h in heads[1:]) and len(heads) > 1:
+        heads = heads[1:]
+    return [h for h in heads if h["key"]]
+
+
+def similar(a, b):
+    if a["number"] and a["number"] == b["number"]:
+        return 1.0
+    ta, tb = set(a["key"].split()), set(b["key"].split())
+    if ta and tb and (ta <= tb or tb <= ta):      # "Scope" and "Scope of change"
+        return 0.8
+    jac = len(ta & tb) / len(ta | tb) if ta | tb else 0
+    return max(jac, difflib.SequenceMatcher(None, a["key"], b["key"]).ratio())
+
+
+def lis_keep(seq):
+    """Indexes of seq that form a longest increasing subsequence (the ones not reordered)."""
+    if not seq:
+        return set()
+    tails, prev = [], [-1] * len(seq)
+    for i, v in enumerate(seq):
+        j = bisect.bisect_left([seq[t] for t in tails], v)
+        if j == len(tails):
+            tails.append(i)
+        else:
+            tails[j] = i
+        prev[i] = tails[j - 1] if j else -1
+    k, keep = tails[-1], set()
+    while k != -1:
+        keep.add(k)
+        k = prev[k]
+    return keep
+
+
+def compare(tpl, dft):
+    pairs = {}                     # template index -> draft index
+    used = set()
+    by_key = {}
+    for j, d in enumerate(dft):
+        by_key.setdefault(d["key"], []).append(j)
+    for i, t in enumerate(tpl):    # exact names first, in order
+        for j in by_key.get(t["key"], []):
+            if j not in used:
+                pairs[i] = j
+                used.add(j)
+                break
+    renamed = []
+    cands = sorted(((similar(t, dft[j]), i, j) for i, t in enumerate(tpl) if i not in pairs
+                    for j in range(len(dft)) if j not in used), reverse=True)
+    for score, i, j in cands:
+        if score < 0.6 or i in pairs or j in used:
+            continue
+        pairs[i] = j
+        used.add(j)
+        renamed.append({"template": tpl[i]["heading"], "draft": dft[j]["heading"]})
+    order = sorted(pairs)
+    seq = [pairs[i] for i in order]
+    keep = lis_keep(seq)
+    reordered = [{"heading": dft[seq[k]]["heading"], "template_position": order[k] + 1,
+                  "draft_position": seq[k] + 1} for k in range(len(seq)) if k not in keep]
+    missing = [{"heading": t["heading"], "required": not t["optional"]}
+               for i, t in enumerate(tpl) if i not in pairs]
+    added = [{"heading": d["heading"]} for j, d in enumerate(dft) if j not in used]
+    return missing, renamed, reordered, added
+
+
+# ---------- version and placeholders ----------
+
+def labelled(lines, labels):
+    """The value of the first 'Label: value' line or '| Label | value |' row for any label."""
+    for line in lines:
+        s = re.sub(r"[*_`]", "", line).strip()
+        for lab in labels:
+            m = re.match(rf"^\|?\s*{lab}\s*(?:\||:)\s*([^|]+?)\s*\|?\s*$", s, re.I) or \
+                re.match(rf"^-?\s*{lab}\s*[:=]\s*(.+)$", s, re.I)
+            if m and m.group(1).strip():
+                return m.group(1).strip()
+    return ""
+
+
+def template_version(lines, path):
+    v = labelled(lines, ["template version", "version"])
+    m = re.search(VERSION_RE, v) if v else None
+    if m:
+        return m.group(1)
+    m = re.search(r"[-_ ]v(\d+(?:[._]\d+)*)", pathlib.Path(path).stem, re.I)
+    return m.group(1).replace("_", ".") if m else ""
+
+
+def claimed_version(lines):
+    v = labelled(lines, ["template version", "template"])
+    m = re.search(r"\bv(?:ersion)?\s*(\d+(?:\.\d+)*)", v, re.I) or re.fullmatch(r"\s*(\d+(?:\.\d+)*)\s*", v)
+    return m.group(1) if m else ""
+
+
+def vtuple(v):
+    return tuple(int(x) for x in v.split(".")) if v else ()
+
+
+def guidance_lines(lines):
+    """Sentences in the template that a writer should replace: body lines of 30+ characters."""
+    out = set()
+    for line in lines:
+        s = line.strip()
+        if len(s) < 30 or s.startswith(("#", "|", "%TITLE")) or re.match(r"^-*\s*[A-Za-z ]+\s*:\s*\S{0,20}$", s):
+            continue
+        out.add(re.sub(r"\s+", " ", s.lstrip("-*> ").strip()).lower())
+    return out
+
+
+def placeholders(draft_lines, tpl_lines):
+    found, guide = [], guidance_lines(tpl_lines)
+    for n, line in enumerate(draft_lines, 1):
+        if line.startswith("%TITLE "):
+            line = line[7:]
+        for kind, rx in PLACEHOLDERS:
+            for m in rx.finditer(line):
+                found.append({"line": n, "kind": kind, "text": m.group(0)[:120]})
+        s = re.sub(r"\s+", " ", line.strip().lstrip("-*> ").strip()).lower()
+        if s and s in guide:
+            found.append({"line": n, "kind": "guidance", "text": line.strip()[:120]})
+    return found
+
+
+# ---------- finding the template ----------
+
+def guess_type(path, lines):
+    head = " ".join([pathlib.Path(path).stem.replace("-", " ").replace("_", " ")] + lines[:30])
+    for t, pats in TYPES.items():
+        if any(re.search(p, head, re.I) for p in pats):
+            return t
+    return ""
+
+
+def from_writing(doc_type):
+    f = ka.CONTEXT / "writing.md"
+    if not f.exists():
+        return None, f"no {f}"
+    text = ka.field(f.read_text(errors="ignore"), "Templates")
+    if not text.strip() or re.match(r"\s*not set", text, re.I):
+        return None, "the Templates line in writing.md is not set"
+    last = 0
+    for m in re.finditer(r"`([^`]+)`", text):
+        label = text[last:m.start()]
+        last = m.end()
+        if any(re.search(p, label, re.I) for p in TYPES.get(doc_type, [])) or \
+                re.search(rf"\b{doc_type.lower()}\b", pathlib.Path(m.group(1)).stem.replace("-", " ").lower()):
+            p = ka.expand(m.group(1))
+            if not p.is_absolute():
+                root = ka.library_root()
+                p = (root / p) if root else p
+            return p, ""
+    return None, f"writing.md names no {doc_type} template"
+
+
+# ---------- report ----------
+
+def run(draft, template, doc_type):
+    dl, tl = read_lines(draft), read_lines(template)
+    tpl, dft = outline(tl), outline(dl)
+    missing, renamed, reordered, added = compare(tpl, dft)
+    cur, claim = template_version(tl, template), claimed_version(dl)
+    if not claim:
+        vstatus = "not stated"
+    elif not cur:
+        vstatus = "template version unknown"
+    elif vtuple(claim) == vtuple(cur):
+        vstatus = "current"
+    elif vtuple(claim) < vtuple(cur):
+        vstatus = "behind"
+    else:
+        vstatus = "ahead of the template"
+    req = [m for m in missing if m["required"]]
+    return {
+        "draft": str(draft), "template": str(template), "type": doc_type or "",
+        "template_sections": len(tpl), "draft_sections": len(dft),
+        "missing": missing, "renamed": renamed, "reordered": reordered, "added": added,
+        "version": {"claimed": claim, "current": cur, "status": vstatus},
+        "placeholders": placeholders(dl, tl),
+        "missing_required": len(req), "ok": not req,
+    }
+
+
+def text_report(r):
+    out = [f"Template check: {r['draft']}",
+           f"  against {r['template']}" + (f" ({r['type']})" if r["type"] else ""),
+           f"  {r['draft_sections']} draft sections, {r['template_sections']} in the template", ""]
+    v = r["version"]
+    out.append(f"Template version: draft claims {v['claimed'] or 'nothing'}, current is "
+               f"{v['current'] or 'unknown'} ({v['status']})")
+    sections = [("Missing", r["missing"], lambda m: m["heading"] + ("" if m["required"] or OPTIONAL.search(m["heading"]) else " (optional)")),
+                ("Renamed", r["renamed"], lambda m: f"{m['template']}  ->  {m['draft']}"),
+                ("Reordered", r["reordered"], lambda m: f"{m['heading']} (template position "
+                                                        f"{m['template_position']}, draft {m['draft_position']})"),
+                ("Added", r["added"], lambda m: m["heading"]),
+                ("Placeholder text left in", r["placeholders"], lambda m: f"line {m['line']} [{m['kind']}]: {m['text']}")]
+    for title, items, fmt in sections:
+        out.append(f"{title}: {len(items) if items else 'none'}")
+        out += [f"  - {fmt(m)}" for m in items]
+    out.append("")
+    out.append("Result: " + ("every required section is there." if r["ok"] else
+                             f"{r['missing_required']} required section(s) missing."))
+    return "\n".join(out)
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="kit-templatecheck", description="Check a draft against its template.")
+    ap.add_argument("draft")
+    ap.add_argument("--template", help="the template file (else the one writing.md names)")
+    ap.add_argument("--type", help="the document type, such as IA or GDS (else guessed from the draft)")
+    ap.add_argument("--json", action="store_true")
+    a = ap.parse_args(argv)
+    draft = pathlib.Path(os.path.expanduser(a.draft))
+    if not draft.is_file():
+        print(f"kit-templatecheck: no such file: {draft}", file=sys.stderr)
+        return 2
+    try:
+        dlines = read_lines(draft)
+    except (OSError, ValueError, KeyError, zipfile.BadZipFile, ET.ParseError) as exc:
+        print(f"kit-templatecheck: can't read {draft}: {exc}", file=sys.stderr)
+        return 2
+    doc_type = (a.type or "").upper() or guess_type(draft, dlines)
+    if a.template:
+        template = pathlib.Path(os.path.expanduser(a.template))
+    else:
+        if not doc_type:
+            print("kit-templatecheck: can't tell the document type; give --type IA|GDS or --template PATH",
+                  file=sys.stderr)
+            return 2
+        template, why = from_writing(doc_type)
+        if template is None:
+            print(f"kit-templatecheck: no template to compare with ({why}); give --template PATH", file=sys.stderr)
+            return 2
+    if not template.is_file():
+        print(f"kit-templatecheck: template not found: {template}", file=sys.stderr)
+        return 2
+    try:
+        r = run(draft, template, doc_type)
+    except (OSError, ValueError, KeyError, zipfile.BadZipFile, ET.ParseError) as exc:
+        print(f"kit-templatecheck: can't read {template}: {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(r, indent=2) if a.json else text_report(r))
+    return 0 if r["ok"] else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

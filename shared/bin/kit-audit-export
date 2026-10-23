@@ -2,6 +2,7 @@
 """kit-audit-export: build a dated evidence pack of Kit's controls for a compliance or security review.
 
   kit-audit-export [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--out DIR] [--zip]
+  kit-audit-export --controls [MAP] --request "<audit request id>" [--only ID,ID] [--from] [--to] [--out] [--zip]
 
 The pack (default: ~/Claude/Agents/kit-audit-export-<from>-to-<to>/, or DIR) holds:
   README.md                what's in the pack and how it was made
@@ -21,6 +22,20 @@ Never included: memory/personal/, the briefs themselves, mail, library documents
 variables, or any value that looks like a credential. Before finishing, the whole pack is scanned for
 credential-like text; if anything turns up, the pack is removed and nothing is left behind.
 --zip also writes <pack>.zip next to the folder. The pack is readable only by you.
+
+--controls organises the pack by control, for an auditor's request. The control map (JSON, see
+templates/control-map.example.json, or a Markdown table with Control, Name, and Evidence columns; by
+default the **Control map** in memory/context/compliance.md) maps each control ID to evidence sources:
+connector-audit, kit-audit, approvals, config, agent-permissions, doctor, version, exceptions (rows of
+the exception register in force in the period), adrs (the decisions folder), or a library glob such
+as {"library": "artifacts/*/reviews/*.md"}. The pack then also holds controls/<ID>/ with that
+control's evidence and an EVIDENCE.md, CONTROLS.md (control, evidence, period, gaps), and
+controls.json. Library files are listed by path, date (from the file name, else its modified date),
+and SHA-256, and copied only with "copy": true; never from memory/personal/. Snapshots (config,
+agent permissions, doctor, version) count as evidence only when the export date is in the period.
+A control with no evidence in the period is listed plainly as a gap. --only limits the controls.
+Without --controls the pack is exactly as before. Default folder with --request:
+kit-audit-export-<request>-<from>-to-<to>.
 """
 import argparse
 import datetime as dt
@@ -201,6 +216,231 @@ def build(pack, start, end):
     return notes
 
 
+# ---------------------------------------------------------------- a pack organised by control
+
+SNAPSHOTS = ("config", "agent-permissions", "doctor", "version")
+KNOWN = ("connector-audit", "kit-audit", "approvals", "exceptions", "adrs") + SNAPSHOTS
+
+
+def _compliance():
+    try:
+        import kit_compliance
+        return kit_compliance
+    except ImportError:
+        sys.exit("kit-audit-export: kit_compliance.py is missing; reinstall Kit")
+
+
+def load_control_map(path):
+    """[{"id", "name", "evidence": [source, ...]}] from a JSON map or a Markdown table (Control, Name,
+    Evidence; library sources written library:<glob>)."""
+    text = pathlib.Path(path).read_text(encoding="utf-8", errors="replace")
+    if pathlib.Path(path).suffix.lower() == ".json" or text.lstrip().startswith("{"):
+        try:
+            data = json.loads(text)
+        except ValueError as ex:
+            sys.exit(f"kit-audit-export: {path} isn't valid JSON: {ex}")
+        ctrls = data.get("controls") if isinstance(data, dict) else data
+    else:
+        kc = _compliance()
+        _, recs = kc.rows(text, [r"control", r"evidence"],
+                          [("id", r"control|^id$"), ("name", r"name|title"), ("evidence", r"evidence")])
+        ctrls = []
+        for r in recs:
+            ev = []
+            for part in re.split(r"[,;]", r["evidence"]):
+                part = part.strip().strip("`")
+                if part.startswith("library:"):
+                    ev.append({"library": part[8:].strip()})
+                elif part:
+                    ev.append(part)
+            ctrls.append({"id": r["id"].strip("`* "), "name": r["name"], "evidence": ev})
+    out = []
+    for c in ctrls or []:
+        if not isinstance(c, dict) or not str(c.get("id", "")).strip():
+            continue
+        ev = c.get("evidence") or []
+        out.append({"id": str(c["id"]).strip(), "name": str(c.get("name", "")).strip(),
+                    "evidence": ev if isinstance(ev, list) else [ev]})
+    if not out:
+        sys.exit(f"kit-audit-export: no controls found in {path}")
+    return out
+
+
+def _date_of(p):
+    kc = _compliance()
+    return kc.parse_date(p.name) or dt.datetime.fromtimestamp(p.stat().st_mtime).date()
+
+
+def _sha(p):
+    return hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+def _safe_under(root, p):
+    try:
+        rp = p.resolve()
+        if root.resolve() not in rp.parents:
+            return False
+        personal = (KIT / "memory/personal").resolve()
+        return personal != rp and personal not in rp.parents
+    except OSError:
+        return False
+
+
+def _refs(dest, title, files, root, copy):
+    lines = [f"# {title}\n", "| File | Date | SHA-256 |", "|---|---|---|"]
+    for p, d in files:
+        rel = p.relative_to(root).as_posix() if root in p.parents else p.name
+        lines.append(f"| {rel} | {d} | {_sha(p)} |")
+        if copy:
+            target = dest / "files" / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(p, target)
+    if not files:
+        lines.append("| (none in the period) | | |")
+    return "\n".join(lines) + "\n"
+
+
+def _copy(src, dst):
+    if src.is_dir():
+        shutil.copytree(src, dst, dirs_exist_ok=True)
+    elif src.exists():
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+
+
+def collect(source, pack, dest, start, end, snapshot_ok):
+    """Write one evidence source into the control's folder: (label, items in the period, note)."""
+    kc = _compliance()
+    if isinstance(source, dict) and source.get("library"):
+        glob = str(source["library"]).strip().lstrip("/")
+        label = source.get("label") or f"library {glob}"
+        root = kc.library_root(KIT)
+        if ".." in pathlib.PurePosixPath(glob).parts:
+            return label, 0, "refused: the glob leaves the library root"
+        if not root or not root.is_dir():
+            return label, 0, "no library root set"
+        files = []
+        for p in sorted(root.glob(glob)):
+            if p.is_file() and _safe_under(root, p):
+                d = _date_of(p)
+                if start <= d <= end:
+                    files.append((p, d.isoformat()))
+        name = "library-" + kc.slug(label, 40) + ".md"
+        (dest / name).write_text(_refs(dest, label, files, root, bool(source.get("copy"))), encoding="utf-8")
+        return label, len(files), f"{len(files)} file(s)" + (" (copied)" if source.get("copy") and files else " (listed with SHA-256)")
+    src = str(source).strip()
+    if src == "connector-audit":
+        _copy(pack / "audit/connector-calls.jsonl", dest / "connector-calls.jsonl")
+        n = len([x for x in (pack / "audit/connector-calls.jsonl").read_text().splitlines() if x.strip()])
+        return src, n, f"{n} connector call line(s)"
+    if src == "kit-audit":
+        _copy(pack / "kit-audit", dest / "kit-audit")
+        n = len(list((pack / "kit-audit/reports").glob("*.md"))) if (pack / "kit-audit/reports").is_dir() else 0
+        for name in ("audit-status.json", "audit.txt", "audit-weekly.md"):
+            f = KIT / "briefs" / name
+            if f.exists() and in_range(dt.datetime.fromtimestamp(f.stat().st_mtime).date().isoformat(), start, end):
+                n += 1
+        return src, n, f"{n} audit report(s) or status file(s) dated in the period"
+    if src == "approvals":
+        _copy(pack / "approvals", dest / "approvals")
+        n = len([x for x in (pack / "approvals/kit-run-audit.jsonl").read_text().splitlines() if x.strip()])
+        n += len(json.loads((pack / "approvals/kit-team-sent.json").read_text() or "[]"))
+        pa = pack / "approvals/phone-approvals.md"
+        if pa.exists():
+            n += sum(1 for ln in pa.read_text().splitlines() if (d := kc.parse_date(ln)) and start <= d <= end)
+        return src, n, f"{n} approval or audit line(s) in the period"
+    if src == "exceptions":
+        path = kc.exception_register(KIT)
+        text, found, recs = kc.load_exceptions(path) if path else ("", None, [])
+        keep = [r for r in recs if r["granted_d"] and r["granted_d"] <= end
+                and (not r["expiry_d"] or r["expiry_d"] >= start)]
+        lines = text.splitlines()
+        out = [f"# Exception register rows in force during {start} to {end}\n", f"From {path}.\n"]
+        if found:
+            out += [lines[found[1]], lines[found[1] + 1]] + [lines[r["_line"]] for r in keep]
+        if not keep:
+            out.append("(none in force in the period)")
+        (dest / "exceptions.md").write_text("\n".join(out) + "\n", encoding="utf-8")
+        return src, len(keep), f"{len(keep)} exception(s) in force"
+    if src == "adrs":
+        val = kc.setting(kc.read(CTX / "decisions.md"), "Folder")
+        m = re.search(r"`([^`]+)`", val)
+        ddir = pathlib.Path(os.path.expanduser(m.group(1) if m else "decisions/"))
+        root = kc.library_root(KIT)
+        if not ddir.is_absolute():
+            ddir = (root / ddir) if root else None
+        files = []
+        if ddir and ddir.is_dir():
+            for p in sorted(ddir.glob("ADR-*.md")):
+                mm = re.search(r"(?mi)^\s*[|*-]*\s*\**date\**\s*[:|]\s*(.+)$", kc.read(p))
+                d = (kc.parse_date(mm.group(1)) if mm else None) or _date_of(p)
+                if start <= d <= end:
+                    files.append((p, d.isoformat()))
+        (dest / "adrs.md").write_text(_refs(dest, "Architecture decision records dated in the period", files,
+                                            ddir or KIT, False), encoding="utf-8")
+        return src, len(files), f"{len(files)} ADR(s)"
+    if src in SNAPSHOTS:
+        names = {"config": ["config"], "agent-permissions": ["agents.json", "config/claude-permissions.json"],
+                 "doctor": ["doctor.txt"], "version": ["version.txt"]}[src]
+        for nm in names:
+            _copy(pack / nm, dest / nm)
+        real = not (src == "doctor" and "isn't installed" in (pack / "doctor.txt").read_text())
+        if not real:
+            return src, 0, "the health check isn't installed here"
+        if snapshot_ok:
+            return src, 1, "snapshot taken at export, inside the period"
+        return src, 0, "snapshot taken at export, outside the period, so it doesn't count as evidence for it"
+    return src, 0, f"unknown evidence source (known: {', '.join(KNOWN)}, or a library glob)"
+
+
+def build_controls(pack, start, end, controls, request, only):
+    kc = _compliance()
+    if only:
+        wanted = [x.strip() for x in only.split(",") if x.strip()]
+        missing = [w for w in wanted if w not in {c["id"] for c in controls}]
+        controls = [c for c in controls if c["id"] in wanted]
+    else:
+        missing = []
+    snapshot_ok = start <= dt.date.today() <= end
+    index = []
+    for c in controls:
+        dest = pack / "controls" / kc.slug(c["id"], 40).upper()
+        dest.mkdir(parents=True, exist_ok=True)
+        found = [collect(s, pack, dest, start, end, snapshot_ok) for s in c["evidence"]]
+        total = sum(n for _, n, _ in found)
+        (dest / "EVIDENCE.md").write_text(
+            f"# {c['id']} {c['name']}\n\nRequest: {request}\nPeriod: {start} to {end}\n\n| Evidence source | In the period | Note |\n"
+            "|---|---|---|\n" + "".join(f"| {lab} | {n} | {note} |\n" for lab, n, note in found)
+            + ("\nNo evidence in the period: this control is a gap.\n" if total == 0 else ""), encoding="utf-8")
+        index.append({"id": c["id"], "name": c["name"], "folder": f"controls/{dest.name}",
+                      "evidence": [{"source": lab, "count": n, "note": note} for lab, n, note in found],
+                      "gap": total == 0, "empty_sources": [lab for lab, n, _ in found if n == 0]})
+    rows = []
+    for r in index:
+        ev = "; ".join(f"{e['source']}: {e['count']}" for e in r["evidence"]) or "none mapped"
+        gaps = "GAP: no evidence in the period" if r["gap"] else (
+            "none" if not r["empty_sources"] else "nothing from " + ", ".join(r["empty_sources"]))
+        rows.append(f"| {r['id']} | {r['name']} | {ev} | {start} to {end} | {gaps} |")
+    gaps = [r for r in index if r["gap"]]
+    text = (f"# Control evidence index\n\nAudit request: {request}\nPeriod: {start} to {end}\n"
+            f"Made: {dt.date.today()} by kit-audit-export --controls\n\n"
+            "| Control | Name | Evidence (items in the period) | Period | Gaps |\n|---|---|---|---|---|\n"
+            + "\n".join(rows) + "\n\n## Gaps\n\n"
+            + ("".join(f"- {r['id']} {r['name']}: no evidence in the period (looked in: "
+                       f"{', '.join(e['source'] for e in r['evidence']) or 'nothing mapped'}).\n" for r in gaps)
+               or "None: every control has at least one item of evidence in the period.\n")
+            + ("".join(f"- {m}: not in the control map, so nothing was gathered.\n" for m in missing)))
+    (pack / "CONTROLS.md").write_text(text, encoding="utf-8")
+    (pack / "controls.json").write_text(json.dumps({"request": request, "from": str(start), "to": str(end),
+                                                    "controls": index, "not_in_map": missing}, indent=2) + "\n",
+                                        encoding="utf-8")
+    notes = [f"Controls: {len(index)} organised under controls/, {len(gaps)} with no evidence in the period"
+             + (f" ({', '.join(r['id'] for r in gaps)})" if gaps else "")]
+    if missing:
+        notes.append(f"Not in the control map: {', '.join(missing)}")
+    return notes
+
+
 def finish(pack, start, end, notes):
     readme = f"""# Kit evidence pack, {start} to {end}
 
@@ -217,6 +457,11 @@ security review. Every file is listed with its SHA-256 in MANIFEST.json.
   permission lists (allow, ask, deny).
 - agents.json: each installed agent's tools, disallowed tools, and model.
 - version.txt and doctor.txt: the installed version, recent changes, and the health check.
+""" + ("""- CONTROLS.md and controls.json: the pack organised by control for an audit request: each
+  control's evidence, the period, and the gaps (controls with no evidence in the period). Each
+  control's folder under controls/ holds its evidence and an EVIDENCE.md. Library documents are
+  listed by path, date, and SHA-256, and copied only where the control map asks.
+""" if (pack / "CONTROLS.md").exists() else "") + """
 
 Not included, by design: personal notes, briefs, mail, library documents, environment variables, and
 anything that looks like a credential. The pack was scanned for credential-like text before it was
@@ -251,6 +496,10 @@ def main(argv):
     ap.add_argument("--to", dest="end", default=str(today))
     ap.add_argument("--out", help="folder for the pack (must not exist yet)")
     ap.add_argument("--zip", action="store_true", help="also write <pack>.zip")
+    ap.add_argument("--controls", nargs="?", const="", metavar="MAP",
+                    help="organise the pack by control, from this control map (default: Control map in compliance.md)")
+    ap.add_argument("--request", help="the audit request this pack answers (with --controls)")
+    ap.add_argument("--only", help="with --controls: only these control IDs, separated by commas")
     a = ap.parse_args(argv)
     try:
         start, end = dt.date.fromisoformat(a.start), dt.date.fromisoformat(a.end)
@@ -258,7 +507,25 @@ def main(argv):
         sys.exit("kit-audit-export: dates are YYYY-MM-DD")
     if start > end:
         sys.exit("kit-audit-export: --from is after --to")
-    pack = pathlib.Path(os.path.expanduser(a.out)) if a.out else KIT.parent / f"kit-audit-export-{start}-to-{end}"
+    cmap = None
+    if a.controls is not None:
+        kc = _compliance()
+        mp = pathlib.Path(os.path.expanduser(a.controls)) if a.controls else None
+        if not mp:
+            val = kc.setting(kc.read(CTX / "compliance.md"), "Control map")
+            m = re.search(r"`([^`]+)`", val)
+            if m:
+                mp = pathlib.Path(os.path.expanduser(m.group(1)))
+                if not mp.is_absolute() and kc.library_root(KIT):
+                    mp = kc.library_root(KIT) / mp
+        if not mp or not mp.is_file():
+            sys.exit("kit-audit-export: no control map: give --controls MAP or set Control map in compliance.md")
+        cmap = load_control_map(mp)
+    elif a.request or a.only:
+        sys.exit("kit-audit-export: --request and --only go with --controls")
+    request = (a.request or "not given").strip()
+    tag = f"{_compliance().slug(a.request, 40)}-" if cmap is not None and a.request else ""
+    pack = pathlib.Path(os.path.expanduser(a.out)) if a.out else KIT.parent / f"kit-audit-export-{tag}{start}-to-{end}"
     if pack.exists():
         sys.exit(f"kit-audit-export: {pack} already exists; choose another --out")
     if pack.resolve() == KIT.resolve() or KIT.resolve() in pack.resolve().parents:
@@ -267,6 +534,8 @@ def main(argv):
     try:
         pack.mkdir(parents=True)
         notes = build(pack, start, end)
+        if cmap is not None:
+            notes += build_controls(pack, start, end, cmap, request, a.only)
         finish(pack, start, end, notes)
         hits = scan(pack)
         if hits:

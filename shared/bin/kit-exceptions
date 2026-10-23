@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""kit-exceptions: the policy exception and waiver register.
+
+  kit-exceptions [list] [--status S] [--json]      every exception in the register
+  kit-exceptions due [--days N] [--json]           expiring within N days (default EXCEPTIONS_WARN_DAYS,
+                                                   else 30), expired, and reviews overdue
+  kit-exceptions add --policy P --system S --reason R [--controls C] [--owner ROLE] [--approver ROLE]
+                     [--granted DATE] [--expiry DATE] [--review FREQ] [--last-reviewed DATE]
+                     [--status S] [--ticket T] [--evidence E] [--write] [--json]
+  ... --register FILE                              use this register, not the one compliance.md names
+
+The register is a Markdown table in the library: **Exception register** in memory/context/compliance.md
+(default compliance/exception-register.md in the library root), started from
+templates/exception-register-template.md. Columns are found by name, so the team may reorder them.
+
+add is read-only by default: it prints the row and the ID it would take (EXC-0001 and up, never
+reused). --write adds the row, creating the register from the template if there isn't one. The status
+defaults to candidate, which is what the standards checker and the risk and compliance mapper record;
+a granted row needs an approver role, a granted date, and an expiry date. Text that looks like a
+credential is refused. Dates are DD-Mmm-YYYY or YYYY-MM-DD. Statuses: candidate, requested, granted,
+renewal requested, expired, revoked, closed.
+
+due counts granted and renewal-requested exceptions: expired (expiry before today), expiring (within N
+days), and review overdue (last reviewed, else granted, plus the review frequency, before today). It
+exits 0 either way. Local files only; nothing is sent or requested from anyone.
+"""
+import argparse
+import json
+import os
+import pathlib
+import re
+import sys
+
+BIN = pathlib.Path(__file__).resolve().parent
+for cand in (BIN.parent, pathlib.Path(os.path.expanduser(os.environ.get("KIT_DIR", "~/Claude/Agents/kit"))) / ".install/shared"):
+    if (cand / "kit_compliance.py").exists():
+        sys.path.insert(0, str(cand))
+        break
+import kit_compliance as kc  # noqa: E402
+
+PROG = "kit-exceptions"
+
+
+def die(msg):
+    sys.exit(f"{PROG}: {msg}")
+
+
+def warn_days(kit):
+    m = re.search(r'^EXCEPTIONS_WARN_DAYS="?(\d+)"?', kc.read(kc.kit_dir(kit) / ".install/shared/morning/config"), re.M)
+    return int(m.group(1)) if m else 30
+
+
+def public(r):
+    return {k: v for k, v in r.items() if not k.startswith("_") and not k.endswith("_d") and k != "status_n"}
+
+
+def register(args):
+    path = kc.exception_register(None, args.register)
+    if not path:
+        die("no register: set the library root in library.md or an absolute Exception register in compliance.md")
+    return path
+
+
+def cmd_list(args):
+    path = register(args)
+    text, found, recs = kc.load_exceptions(path)
+    if args.status:
+        recs = [r for r in recs if r["status_n"] == args.status.lower()]
+    if args.json:
+        print(json.dumps({"register": str(path), "exists": path.exists(), "exceptions": [public(r) for r in recs]},
+                         indent=2))
+        return 0
+    if not path.exists():
+        print(f"{PROG}: no register yet at {path}; `{PROG} add ... --write` starts one from the template")
+        return 0
+    if found is None:
+        die(f"{path} has no table with ID and Expiry columns")
+    print(f"{PROG}: {len(recs)} exception(s) in {path}")
+    for r in recs:
+        print(f"  {r['id']:<9} {r['status'] or '(no status)':<17} expires {r['expiry'] or '-':<12} "
+              f"{r['policy'][:40]} / {r['system'][:40]}")
+    return 0
+
+
+def cmd_due(args):
+    path = register(args)
+    _, _, recs = kc.load_exceptions(path)
+    days = args.days if args.days is not None else warn_days(None)
+    on = kc.today()
+    due = kc.exception_due(recs, on, days)
+    if args.json:
+        print(json.dumps({"register": str(path), "today": on.isoformat(), "days": days,
+                          "due": [{"kind": k, "id": r["id"], "policy": r["policy"], "system": r["system"],
+                                   "owner": r["owner"], "status": r["status"], "days": n, "date": d.isoformat()}
+                                  for k, r, n, d in due]}, indent=2))
+        return 0
+    if not due:
+        print(f"{PROG}: nothing due: no active exception expires within {days} days, none expired, no review overdue")
+        return 0
+    words = {"expired": "expired {n} day(s) ago ({d})", "expiring": "expires in {n} day(s) ({d})",
+             "review": "review overdue by {n} day(s) (was due {d})"}
+    print(f"{PROG}: {len(due)} item(s) due in {path}")
+    for k, r, n, d in due:
+        print(f"  {r['id']:<9} {words[k].format(n=n, d=kc.fmt(d))}: {r['policy'][:50]} / {r['system'][:40]}"
+              + (f" (owner {r['owner']})" if r["owner"] else ""))
+    return 0
+
+
+def date_arg(v, name):
+    if not v:
+        return ""
+    d = kc.parse_date(v)
+    if not d:
+        die(f"{name} must be DD-Mmm-YYYY or YYYY-MM-DD")
+    return kc.fmt(d)
+
+
+def cmd_add(args):
+    path = register(args)
+    text, found, recs = kc.load_exceptions(path)
+    if path.exists() and found is None:
+        die(f"{path} has no table with ID and Expiry columns")
+    status = (args.status or "candidate").lower()
+    if status not in kc.EXC_STATUSES:
+        die(f"status must be one of: {', '.join(kc.EXC_STATUSES)}")
+    rec = {"id": kc.next_id(recs, "EXC"), "policy": args.policy, "system": args.system, "reason": args.reason,
+           "controls": args.controls or "none named", "owner": args.owner or "", "approver": args.approver or "",
+           "granted": date_arg(args.granted, "--granted"), "expiry": date_arg(args.expiry, "--expiry"),
+           "review": args.review or "", "last_review": date_arg(args.last_reviewed, "--last-reviewed"),
+           "status": status, "ticket": args.ticket or "", "evidence": args.evidence or ""}
+    if args.review and not kc.frequency_days(args.review):
+        die("--review is monthly, quarterly, semi-annual, annual, or 'every N months' (days, weeks, years)")
+    if status in kc.EXC_ACTIVE and not (rec["approver"] and rec["granted"] and rec["expiry"]):
+        die("a granted exception needs --approver (a role), --granted, and --expiry")
+    hits = kc.cred_hits(" ".join(str(v) for v in rec.values()))
+    if hits:
+        die(f"refused: the row has text that looks like a credential ({', '.join(hits)})")
+    if not text:
+        text = kc.template(None, "exception-register-template.md")
+        if not text:
+            die("no register and no exception-register-template.md to start one from")
+        found = kc.find_table(text, kc.EXC_MUST)
+    new = kc.append_row(text, found, kc.EXC_COLUMNS, rec)
+    row = new.splitlines()[kc.find_table(new, kc.EXC_MUST)[2] - 1]
+    if args.write:
+        kc.write(path, new)
+    if args.json:
+        print(json.dumps({"register": str(path), "written": bool(args.write), "exception": rec, "row": row}, indent=2))
+        return 0
+    print(row)
+    if args.write:
+        print(f"{PROG}: added {rec['id']} ({status}) to {path}")
+    else:
+        print(f"{PROG}: read-only; --write adds {rec['id']} ({status}) to {path}")
+    return 0
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog=PROG, description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("command", nargs="?", default="list", choices=("list", "due", "add"))
+    ap.add_argument("--register")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--status")
+    ap.add_argument("--days", type=int)
+    for f in ("policy", "system", "reason", "controls", "owner", "approver", "granted", "expiry", "review",
+              "last-reviewed", "ticket", "evidence"):
+        ap.add_argument(f"--{f}")
+    ap.add_argument("--write", action="store_true")
+    a = ap.parse_args(argv)
+    if a.command == "add":
+        missing = [f"--{f}" for f in ("policy", "system", "reason") if not getattr(a, f)]
+        if missing:
+            die(f"add needs {', '.join(missing)}")
+        return cmd_add(a)
+    return cmd_due(a) if a.command == "due" else cmd_list(a)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

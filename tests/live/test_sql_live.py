@@ -83,4 +83,4 @@ finally:
         A._exec(f"DELETE FROM {t} WHERE {col} IN (?, ?)", ("sqltest-a", "sqltest-b"))
     A.finish(); A.close(); B.close()
     print("test rows removed")
-print(f"live MySQL test: {ok} passed, {fail} failed")
+print(f"live SQL test ({s.get('dialect', '?')}): {ok} passed, {fail} failed")

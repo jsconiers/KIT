@@ -54,6 +54,17 @@ def log(path, msg):
         f.write(f"{dt.datetime.now():%Y-%m-%d %H:%M} {msg}\n")
 
 
+def mark_ok(log_path):
+    """Write the time of this clean sync to sync.ok next to the sync log, so run_alerts.py can tell
+    a quiet, working sync (which logs nothing) from a stopped one. Best-effort."""
+    try:
+        p = pathlib.Path(log_path).with_name("sync.ok")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(dt.datetime.now().isoformat(timespec="seconds") + "\n")
+    except OSError:
+        pass
+
+
 def reconcile(todo, backend, me, inbox_name, mirror_name, side=None, inbox=_DEFAULT):
     """Inbox list -> QUEUE.md, then QUEUE.md -> mirror list, with completions on the device checked
     off. Returns a list of what changed. side=None syncs every item; "work" syncs only [work] items

@@ -58,9 +58,15 @@ STRIDE: Spoofing, Tampering, Repudiation, Information disclosure, Denial of serv
 privilege. Work through every category for each boundary-crossing flow and each element; skip one
 only with a reason.
 
-| ID | Flow or element | STRIDE | Threat | Existing control (evidence) | Gap | L | I | Risk | Mitigation | Test case |
-|---|---|---|---|---|---|---|---|---|---|---|
-| T-01 | <F-01> | <category> | <the threat, concretely for this design> | <control and section, or "none stated"> | <what's missing, or "none"> | | | <low, medium, or high> | <design-level mitigation> | <the test that proves it> |
+- **ATT&CK:** MITRE ATT&CK Enterprise technique IDs where one fits (for example T1078), from
+  `kit-controls map <this file>`; mark a suggestion you haven't confirmed "(suggested)", and leave it
+  blank when nothing fits.
+- **800-53:** NIST SP 800-53 Rev 5 control IDs (for example AC-2, IA-2(1)) that would close the gap,
+  by ID only; blank when there's no gap.
+
+| ID | Flow or element | STRIDE | Threat | ATT&CK | Existing control (evidence) | Gap | 800-53 | L | I | Risk | Mitigation (owner if another team) | Test case ID |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| T-01 | <F-01> | <category> | <the threat, concretely for this design> | <technique IDs, or blank> | <control and section, or "none stated"> | <what's missing, or "none"> | <control IDs for the gap> | | | <low, medium, or high> | <design-level mitigation> | <TC-01; the test itself is in the test-case table> |
 
 ## Categories skipped
 
@@ -70,9 +76,15 @@ only with a reason.
 
 ## Controls, for the risk and compliance mapper
 
-| Control | Existing or missing | Threats it answers | Evidence |
+| Control | Existing or missing | Threats it answers | 800-53 | Evidence |
+|---|---|---|---|---|
+| <for example "Mutual TLS between services"> | <existing, missing, or inherited, unverified> | <T-01, T-04> | <for example SC-8, IA-9; required for a missing control> | <section, or "proposed"> |
+
+## Conflicts and defects
+
+| Where | What the design says | What conflicts with it (IA, another section, a figure) | Why it matters |
 |---|---|---|---|
-| <for example "Mutual TLS between services"> | <existing or missing> | <T-01, T-04> | <section, or "proposed"> |
+| <section or figure> | <statement> | <the conflicting statement> | <threat or gap it affects> |
 
 ## Test cases, for the implementation planner
 
@@ -87,4 +99,8 @@ by role.>
 
 ## Sources
 
-<The design and its version, the IA, the diagram specs, and the setup files used.>
+<The design and its version, the IA, the diagram specs, and the setup files used. When the model
+cites ATT&CK or 800-53, name the versions `kit-controls` reports and keep MITRE's notice:>
+
+MITRE ATT&CK®: © 2026 The MITRE Corporation. This work is reproduced and distributed with the
+permission of The MITRE Corporation. NIST SP 800-53 Rev 5: a US government work.

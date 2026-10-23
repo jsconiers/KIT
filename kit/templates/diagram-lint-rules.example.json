@@ -1,0 +1,93 @@
+{
+  "_about": "Example rules for kit-diaglint. Copy it next to your diagrams.md, rename it, replace the neutral colors, fonts, and names below with your team's standard, and point the \"Lint rules\" field in diagrams.md at the copy. Every section is optional; leave one out to skip that check. Keys starting with _ are comments. Severity is error (fails the run) or warning (reported only).",
+  "name": "Example diagramming standard",
+  "description": "Neutral example: replace with your team's standard.",
+  "ignore_pages": "^(Notes|Scratch)$",
+
+  "palette": {
+    "_about": "Allowed colors (#RRGGBB) and what each means. check: which colors to test (fill, stroke, text).",
+    "severity": "error",
+    "check": ["fill", "stroke", "text"],
+    "colors": {
+      "#1F2937": "Charcoal: text and existing connections",
+      "#6B7280": "Slate: secondary text, legacy items",
+      "#FFFFFF": "White: shape fill",
+      "#F3F4F6": "Mist: page and zone fill",
+      "#1D4ED8": "Blue: system boxes and boundaries",
+      "#DBEAFE": "Pale blue: zone fill",
+      "#D97706": "Amber: new components and connections",
+      "#7C3AED": "Violet: external parties",
+      "#B91C1C": "Red: removed or decommissioned"
+    }
+  },
+
+  "fonts": {
+    "severity": "error",
+    "allowed": ["Arial", "Helvetica"]
+  },
+
+  "text": {
+    "severity": "warning",
+    "min_size_pt": 7
+  },
+
+  "title_block": {
+    "_about": "Each field must appear on every page as 'Field: value' ('Field value' with no separator counts only when the value matches the field's pattern), or a field cell with its value to the right, or a draw.io object / Visio shape data field of that name. aliases: other names for the field. pattern: a regular expression the value must match. require_values: false accepts a field with no value.",
+    "severity": "error",
+    "require_values": true,
+    "fields": {
+      "Title": {"aliases": ["Diagram title"]},
+      "Author": {},
+      "Date": {"pattern": "^\\d{2}-[A-Z][a-z]{2}-\\d{4}$"},
+      "Version": {"pattern": "^v?\\d+\\.\\d+"},
+      "Classification": {"pattern": "(?i)^(public|internal|confidential|restricted)"}
+    }
+  },
+
+  "legend": {
+    "severity": "error",
+    "required": true,
+    "match": ["\\blegend\\b", "^key$"]
+  },
+
+  "connectors": {
+    "_about": "require_label: every connector carries a label. require_attached: both ends glued to shapes. orthogonal: right-angle routing (draw.io only), except on pages whose name matches orthogonal_except_pages. label_severity, attached_severity, and orthogonal_severity override severity for one check.",
+    "severity": "warning",
+    "attached_severity": "error",
+    "require_label": true,
+    "require_attached": true,
+    "orthogonal": true,
+    "orthogonal_except_pages": "(?i)context|sequence"
+  },
+
+  "line_types": {
+    "_about": "A connector's type comes from a lineType style key or data field (draw.io lineType=..., Visio shape data LineType) or else from the first type whose match pattern finds its label. Its pattern (solid, dashed, dotted), stroke color, and width (pt, within tolerance_pt) are then checked. require_match: also flag connectors whose style fits none of the types.",
+    "severity": "error",
+    "tolerance_pt": 0.3,
+    "require_match": false,
+    "types": [
+      {"name": "Physical", "match": ["(?i)\\bphysical\\b", "(?i)\\bcable\\b"], "pattern": "solid", "stroke": "#1F2937", "width_pt": 1.5},
+      {"name": "Logical", "match": ["(?i)\\blogical\\b"], "pattern": "dashed", "stroke": "#1F2937", "width_pt": 1},
+      {"name": "New", "match": ["(?i)\\bnew\\b"], "pattern": "solid", "stroke": "#D97706", "width_pt": 2},
+      {"name": "Replication", "match": ["(?i)replicat", "(?i)\\bsync\\b"], "pattern": "dotted", "stroke": "#1D4ED8", "width_pt": 1.5, "severity": "warning"}
+    ]
+  },
+
+  "shapes": {
+    "_about": "Allowed draw.io shape names (the style's shape=, or rectangle, ellipse, text, swimlane) and Visio master names. Wildcards: * and ?. Visio shapes with no master show as (no master).",
+    "severity": "warning",
+    "allowed": ["rectangle", "ellipse", "text", "swimlane", "table*", "partialRectangle", "cylinder*", "mxgraph.networks.*", "mxgraph.aws4.*", "mxgraph.azure.*", "Rectangle", "Dynamic connector", "Example.*"]
+  },
+
+  "page_names": {
+    "severity": "warning",
+    "pattern": "^[A-Z][A-Za-z0-9 ()-]+$",
+    "hint": "Sentence-case page names, such as 'Physical view'"
+  },
+
+  "view_label": {
+    "_about": "Each page must say which view it is, in its name, a layer name, or its text.",
+    "severity": "warning",
+    "values": ["Physical", "Logical", "Context", "Data flow"]
+  }
+}

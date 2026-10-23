@@ -1,0 +1,741 @@
+#!/usr/bin/env python3
+"""kit-diaglint: check diagrams against the team's diagramming standard, written as a rules file.
+
+  kit-diaglint FILE_OR_FOLDER...                  check draw.io (.drawio, .xml) and Visio (.vsdx) files
+  kit-diaglint FILE --rules RULES.json            use this rules file
+  kit-diaglint FOLDER --json                      the findings as JSON
+
+Without --rules it reads the "Lint rules" field in ~/Claude/Agents/kit/memory/context/diagrams.md
+(KIT_DIR moves the Kit folder). A folder is searched (not recursively) for .drawio, .vsdx, and draw.io
+.xml files. Compressed draw.io pages are read too. Read-only: it never changes a diagram.
+
+Findings are listed per page with the element's id and label. Rules (all optional; each section takes
+"severity": "error" or "warning"):
+  palette       fill, stroke, and text colors outside the allowed colors (with the nearest allowed one)
+  fonts         fonts not on the allowed list
+  text          text smaller than min_size_pt
+  title_block   required fields (title, author, date, version, classification, ...) missing, empty, or
+                not matching their pattern
+  legend        a page with no legend
+  connectors    unlabeled connectors, connectors not attached at both ends, non-orthogonal routing
+  line_types    connectors whose pattern (solid, dashed, dotted), color, or width doesn't match their
+                connection type, matched by label (for example "dashed for logical"), or that match no
+                standard line type at all
+  shapes        shapes outside the allowed shape, stencil, or master names (wildcards allowed)
+  page_names    page names not matching a pattern
+  view_label    a page with no view or layer label (for example Physical or Logical) in its name, its
+                layers, or the text of its shapes
+See kit/templates/diagram-lint-rules.example.json for every option.
+
+Only colors, fonts, and sizes set on the element itself are checked: draw.io and Visio defaults, Visio
+masters, and Visio style sheets are not. Sizes are in points (draw.io px x 0.75; Visio inches x 72).
+
+Exit status: 0 no errors (warnings don't fail), 1 errors found, 2 usage error or rules file problem.
+"""
+import argparse
+import fnmatch
+import json
+import os
+import pathlib
+import re
+import sys
+import xml.etree.ElementTree as ET
+import zipfile
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+from kit_diagram import (VNS, clean, drawio_pages, parse_style, shape_kind,  # noqa: E402
+                         vsdx_masters, vsdx_page_root, vsdx_pages)          # (shared/kit_diagram.py)
+
+KIT = pathlib.Path(os.path.expanduser(os.environ.get("KIT_DIR", "~/Claude/Agents/kit")))
+SETUP = KIT / "memory/context/diagrams.md"
+EXAMPLE = "kit/templates/diagram-lint-rules.example.json"
+PX_TO_PT = 0.75
+SECTIONS = {"name", "description", "ignore_pages", "palette", "fonts", "text", "title_block", "legend",
+            "connectors", "line_types", "shapes", "page_names", "view_label"}
+DEFAULT_SEVERITY = {"palette": "error", "fonts": "error", "text": "warning", "title_block": "error",
+                    "legend": "error", "line_types": "error", "shapes": "warning", "page_names": "warning",
+                    "view_label": "warning", "connectors": "warning"}
+NAMED = {"white": "#FFFFFF", "black": "#000000", "red": "#FF0000", "green": "#008000", "blue": "#0000FF",
+         "yellow": "#FFFF00", "gray": "#808080", "grey": "#808080", "orange": "#FFA500", "purple": "#800080"}
+VISIO_INDEX = {"0": "#000000", "1": "#FFFFFF", "2": "#FF0000", "3": "#00FF00", "4": "#0000FF",
+               "5": "#FFFF00", "6": "#FF00FF", "7": "#00FFFF"}
+SKIP_COLORS = {"", "none", "default", "inherit", "transparent", "swimlane", "indicated"}
+
+
+class RulesError(Exception):
+    pass
+
+
+# ---------------------------------------------------------------- helpers
+def norm_color(value):
+    v = (value or "").strip()
+    if v.lower() in SKIP_COLORS:
+        return None
+    if v.lower() in NAMED:
+        return NAMED[v.lower()]
+    m = re.fullmatch(r"#?([0-9A-Fa-f]{6})", v)
+    if m:
+        return "#" + m.group(1).upper()
+    m = re.fullmatch(r"#([0-9A-Fa-f]{3})", v)
+    if m:
+        return "#" + "".join(c * 2 for c in m.group(1)).upper()
+    m = re.fullmatch(r"rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)[^)]*\)", v)
+    if m:
+        return "#" + "".join(f"{min(int(x), 255):02X}" for x in m.groups())
+    return None
+
+
+def rgb(hexcolor):
+    return tuple(int(hexcolor[i:i + 2], 16) for i in (1, 3, 5))
+
+
+def num(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def label_lines(raw):
+    """Split an HTML (or plain) label into its visible lines."""
+    text = re.sub(r"<br\s*/?>|</(div|p|li|tr|h\d)>|\n", "\n", raw or "", flags=re.I)
+    return [ln for ln in (clean(x) for x in text.split("\n")) if ln]
+
+
+def html_text_props(raw):
+    """Colors, fonts, and sizes (pt) set inside an HTML label."""
+    colors, fonts, sizes = [], [], []
+    s = raw or ""
+    for m in re.finditer(r"""\bcolor\s*=\s*["']?([^"'\s>]+)""", s, re.I):
+        colors.append(m.group(1))
+    for m in re.finditer(r"(?<![-\w])color\s*:\s*(#[0-9A-Fa-f]{3,6}|rgba?\([^)]*\)|[a-zA-Z]+)", s):
+        colors.append(m.group(1))
+    for m in re.finditer(r"""\bface\s*=\s*["']([^"']+)["']""", s, re.I):
+        fonts.extend(f.strip() for f in m.group(1).split(","))
+    for m in re.finditer(r"font-family\s*:\s*([^;\"'>]+)", s, re.I):
+        fonts.extend(f.strip().strip("'\"") for f in m.group(1).split(","))
+    for m in re.finditer(r"font-size\s*:\s*([\d.]+)\s*(px|pt)?", s, re.I):
+        v = float(m.group(1))
+        sizes.append(v if (m.group(2) or "px").lower() == "pt" else v * PX_TO_PT)
+    for m in re.finditer(r"""<font[^>]*\bsize\s*=\s*["']?(\d)""", s, re.I):
+        sizes.append({1: 10, 2: 13, 3: 16, 4: 18, 5: 24, 6: 32, 7: 48}.get(int(m.group(1)), 16) * PX_TO_PT)
+    return colors, [f for f in fonts if f], sizes
+
+
+def first_font(value):
+    return (value or "").split(",")[0].strip().strip("'\"")
+
+
+# ---------------------------------------------------------------- draw.io model
+def drawio_elements(model):
+    """Elements of one draw.io page, and its layer names."""
+    cells, objects = [], {}
+    for o in model.iter("object"):
+        c = o.find("mxCell")
+        if c is not None:
+            objects[id(c)] = o
+    for c in model.iter("mxCell"):
+        cells.append(c)
+    by_id = {}
+    for c in cells:
+        o = objects.get(id(c))
+        cid = (o.get("id") if o is not None else None) or c.get("id")
+        by_id[cid] = (c, o)
+    layers = {}
+    root_ids = {cid for cid, (c, o) in by_id.items() if not c.get("parent")}
+    for cid, (c, o) in by_id.items():
+        if c.get("parent") in root_ids and c.get("vertex") != "1" and c.get("edge") != "1":
+            name = clean((o.get("label") if o is not None else None) or c.get("value"))
+            layers[cid] = name
+    geo = {}
+    for cid, (c, o) in by_id.items():
+        g = c.find("mxGeometry")
+        if g is not None and g.get("relative") != "1":
+            geo[cid] = (num(g.get("x")) or 0, num(g.get("y")) or 0, num(g.get("width")) or 0, num(g.get("height")) or 0)
+
+    def absolute(cid, depth=0):
+        if cid not in geo or depth > 50:
+            return None
+        x, y, w, h = geo[cid]
+        parent = by_id.get(cid, (None, None))[0].get("parent")
+        if parent in geo and by_id[parent][0].get("vertex") == "1":
+            p = absolute(parent, depth + 1)
+            if p:
+                x, y = x + p[0], y + p[1]
+        return (x, y, w, h)
+
+    elems = []
+    edge_ids = {cid for cid, (c, o) in by_id.items() if c.get("edge") == "1"}
+    for cid, (c, o) in by_id.items():
+        is_v, is_e = c.get("vertex") == "1", c.get("edge") == "1"
+        if not (is_v or is_e):
+            continue
+        style_s = c.get("style") or ""
+        st = parse_style(style_s)
+        raw = (o.get("label") if o is not None else None)
+        if raw is None:
+            raw = c.get("value") or ""
+        html_on = st.get("html") == "1" or "<" in raw
+        hcolors, hfonts, hsizes = html_text_props(raw) if html_on else ([], [], [])
+        colors = []
+        if is_v:
+            colors.append(("fill", st.get("fillColor")))
+            colors.append(("fill", st.get("gradientColor")))
+            colors.append(("fill", st.get("swimlaneFillColor")))
+        colors.append(("stroke", st.get("strokeColor")))
+        colors.append(("text", st.get("fontColor")))
+        colors += [("text", hc) for hc in hcolors]
+        fonts = ([first_font(st["fontFamily"])] if st.get("fontFamily") else []) + hfonts
+        sizes = ([num(st["fontSize"]) * PX_TO_PT] if num(st.get("fontSize")) else []) + hsizes
+        parent = c.get("parent")
+        layer = parent
+        seen = 0
+        while layer and layer not in layers and seen < 50:
+            layer = by_id.get(layer, (c, None))[0].get("parent")
+            seen += 1
+        dash = None
+        if is_e:
+            if st.get("dashed") == "1":
+                pat = st.get("dashPattern", "")
+                first = num(pat.split()[0]) if pat.split() else None
+                dash = "dotted" if first is not None and first <= 2 else "dashed"
+            else:
+                dash = "solid"
+        kind = shape_kind(style_s)
+        if st.get("") == "text" or kind == "text":
+            kind = "text"
+        attrs = {k: v for k, v in (o.attrib.items() if o is not None else []) if k not in ("id", "label", "placeholders")}
+        elems.append({
+            "id": cid, "edge": is_e, "label": clean(raw), "lines": label_lines(raw) if raw else [],
+            "shape": "edgeLabel" if (is_v and (parent in edge_ids or kind == "edgeLabel")) else kind,
+            "group": is_v and (kind == "group" or st.get("") == "group"),
+            "colors": [(w, v) for w, v in colors if v], "fonts": fonts, "sizes": [s for s in sizes if s],
+            "pattern": dash, "width_pt": (num(st.get("strokeWidth")) or 1.0) * PX_TO_PT if is_e else None,
+            "source": c.get("source"), "target": c.get("target"), "parent": parent,
+            "orthogonal": st.get("edgeStyle") in ("orthogonalEdgeStyle", "elbowEdgeStyle", "entityRelationEdgeStyle",
+                                                   "isometricEdgeStyle") and st.get("curved") != "1",
+            "line_type": st.get("lineType") or attrs.get("lineType") or attrs.get("linetype") or "",
+            "attrs": attrs, "geo": absolute(cid) if is_v else None, "names": [],
+        })
+    labels_of_edges = {}
+    for e in elems:
+        if e["shape"] == "edgeLabel" and e["label"]:
+            labels_of_edges.setdefault(e["parent"], []).append(e["label"])
+    for e in elems:
+        if e["edge"] and not e["label"] and labels_of_edges.get(e["id"]):
+            e["label"] = " ".join(labels_of_edges[e["id"]])
+    return elems, [n for n in layers.values() if n]
+
+
+# ---------------------------------------------------------------- Visio model
+def vcells(el):
+    """Cells set directly on a shape or a section row: {name: value}."""
+    return {c.get("N"): c.get("V") for c in el.findall(VNS + "Cell")}
+
+
+def vsdx_elements(root, masters, faces):
+    elems = []
+    connects = {}
+    for c in root.iter(VNS + "Connect"):
+        connects.setdefault(c.get("FromSheet"), set()).add((c.get("FromCell") or "").split(".")[0])
+    for s in root.iter(VNS + "Shape"):
+        sid = s.get("ID")
+        cells = vcells(s)
+        t = s.find(VNS + "Text")
+        text_lines = []
+        if t is not None:
+            parts = [t.text or ""] + [(child.tail or "") for child in t]
+            text_lines = [ln.strip() for ln in "".join(parts).replace("\r", "\n").split("\n") if ln.strip()]
+        label = re.sub(r"\s+", " ", " ".join(text_lines)).strip()
+        is_e = "BeginX" in cells or sid in connects
+        colors = [("fill", cells.get("FillForegnd")), ("stroke", cells.get("LineColor"))]
+        fonts, sizes = [], []
+        attrs = {}
+        for sec in s.findall(VNS + "Section"):
+            if sec.get("N") == "Character":
+                for row in sec.findall(VNS + "Row"):
+                    rc = vcells(row)
+                    colors.append(("text", rc.get("Color")))
+                    f = rc.get("Font")
+                    if f:
+                        fonts.append(faces.get(f, f) if f.isdigit() else f)
+                    if num(rc.get("Size")):
+                        sizes.append(num(rc["Size"]) * 72)
+            elif sec.get("N") == "Property":
+                for row in sec.findall(VNS + "Row"):
+                    rc = vcells(row)
+                    key = rc.get("Label") or row.get("N") or ""
+                    if key:
+                        attrs[key] = rc.get("Value") or ""
+        colors = [(w, VISIO_INDEX.get(v, v)) for w, v in colors if v and not v.startswith("Theme")]
+        pat = cells.get("LinePattern")
+        dash = None
+        if is_e:
+            p = (pat or "1").split(".")[0]
+            dash = "solid" if p in ("1", "0", "") else ("dotted" if p in ("3", "10", "16") else "dashed")
+        master = re.sub(r"\.\d+$", "", masters.get(s.get("Master") or "", ""))
+        name = s.get("NameU") or s.get("Name") or ""
+        geo = None
+        if all(num(cells.get(k)) is not None for k in ("PinX", "PinY", "Width", "Height")):
+            w, h = num(cells["Width"]), num(cells["Height"])
+            # Visio y grows upward; flip so "to the right / same row" logic works like draw.io
+            geo = (num(cells["PinX"]) - w / 2, -(num(cells["PinY"]) + h / 2), w, h)
+        elems.append({
+            "id": sid, "edge": is_e, "label": label, "lines": text_lines,
+            "shape": master or (re.sub(r"\.\d+$", "", name) if name else "") or "(no master)",
+            "group": s.get("Type") == "Group" and not label,
+            "colors": colors, "fonts": fonts, "sizes": sizes, "pattern": dash,
+            "width_pt": num(cells.get("LineWeight")) * 72 if is_e and num(cells.get("LineWeight")) else None,
+            "source": "x" if "BeginX" in connects.get(sid, set()) else None,
+            "target": "x" if "EndX" in connects.get(sid, set()) else None,
+            "parent": None, "orthogonal": None,
+            "line_type": attrs.get("LineType") or attrs.get("Line type") or "",
+            "attrs": attrs, "geo": geo, "names": [n for n in (name, master) if n],
+        })
+    # connector labels shown as "Dynamic connector" are not labels
+    for e in elems:
+        if e["edge"] and re.match(r"^(Dynamic connector|Connector)(\.\d+)?$", e["label"]):
+            e["label"] = ""
+    return elems
+
+
+def vsdx_layers(sheet):
+    out = []
+    if sheet is None:
+        return out
+    for sec in sheet.findall(VNS + "Section"):
+        if sec.get("N") == "Layer":
+            for row in sec.findall(VNS + "Row"):
+                n = vcells(row).get("Name")
+                if n:
+                    out.append(n)
+    return out
+
+
+def vsdx_faces(z):
+    faces = {}
+    if "visio/document.xml" in z.namelist():
+        for f in ET.fromstring(z.read("visio/document.xml")).iter(VNS + "FaceName"):
+            faces[f.get("ID")] = f.get("NameU") or f.get("Name") or ""
+    return faces
+
+
+def load(path):
+    """[(page name, elements, layer names)] for a diagram file."""
+    p = pathlib.Path(path)
+    if p.suffix.lower() == ".vsdx":
+        z = zipfile.ZipFile(p)
+        masters, faces = vsdx_masters(z), vsdx_faces(z)
+        return [(name, vsdx_elements(vsdx_page_root(z, member), masters, faces), vsdx_layers(sheet))
+                for name, member, sheet in vsdx_pages(z)]
+    out = []
+    for name, model in drawio_pages(p):
+        if model is None:
+            out.append((name, [], []))
+        else:
+            elems, layers = drawio_elements(model)
+            out.append((name, elems, layers))
+    return out
+
+
+# ---------------------------------------------------------------- rules
+def setup_rules_path():
+    if not SETUP.exists():
+        return None, f"no --rules given and {SETUP} doesn't exist"
+    m = re.search(r"\*\*Lint rules:\*\*\s*(.+)", SETUP.read_text(encoding="utf-8", errors="replace"))
+    if not m:
+        return None, f"no --rules given and {SETUP} has no \"Lint rules\" field"
+    val = m.group(1).strip()
+    bt = re.search(r"`([^`]+)`", val)
+    val = bt.group(1) if bt else val.split()[0] if val.split() else ""
+    if not val or val.lower().startswith(("not", "none", "optional")):
+        return None, f"no --rules given and the \"Lint rules\" field in {SETUP} is not set"
+    p = pathlib.Path(os.path.expanduser(val))
+    return (p if p.is_absolute() else SETUP.parent / p), None
+
+
+def load_rules(path):
+    p = pathlib.Path(path)
+    if not p.exists():
+        raise RulesError(f"rules file {p} not found")
+    try:
+        rules = json.loads(p.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise RulesError(f"rules file {p} isn't valid JSON: {e}")
+    if not isinstance(rules, dict):
+        raise RulesError(f"rules file {p} must hold a JSON object")
+    for k in rules:
+        if k not in SECTIONS and not k.startswith("_"):
+            print(f"kit-diaglint: note: unknown rules section \"{k}\" ignored", file=sys.stderr)
+    for k in ("ignore_pages",):
+        if rules.get(k):
+            try:
+                re.compile(rules[k])
+            except re.error as e:
+                raise RulesError(f"{k}: bad pattern: {e}")
+    pal = rules.get("palette")
+    if pal is not None:
+        cols = pal.get("colors", {})
+        items = cols.items() if isinstance(cols, dict) else ((c, "") for c in cols)
+        allowed = {}
+        for c, meaning in items:
+            n = norm_color(c)
+            if not n:
+                raise RulesError(f"palette: \"{c}\" isn't a color (use #RRGGBB)")
+            allowed[n] = meaning if isinstance(meaning, str) else ""
+        pal["_allowed"] = allowed
+    lts = rules.get("line_types")
+    if isinstance(lts, dict):
+        rules["_lt_opts"], lts = lts, lts.get("types", [])
+    else:
+        rules["_lt_opts"] = {}
+    if lts is not None and not isinstance(lts, list):
+        raise RulesError("line_types must be a list, or an object with a \"types\" list")
+    rules["_line_types"] = lts or []
+    for lt in rules["_line_types"]:
+        if "name" not in lt:
+            raise RulesError("line_types: every entry needs a \"name\"")
+        for rx in lt.get("match", []):
+            try:
+                re.compile(rx)
+            except re.error as e:
+                raise RulesError(f"line_types {lt['name']}: bad match pattern {rx!r}: {e}")
+        if lt.get("pattern") not in (None, "solid", "dashed", "dotted"):
+            raise RulesError(f"line_types {lt['name']}: pattern must be solid, dashed, or dotted")
+    return rules
+
+
+def sev(rules, section):
+    s = rules.get("_lt_opts", {}) if section == "line_types" else rules.get(section)
+    s = s if isinstance(s, dict) else {}
+    v = s.get("severity", DEFAULT_SEVERITY.get(section, "error"))
+    return "warning" if v == "warning" else "error"
+
+
+def field_specs(tb):
+    fields = tb.get("fields", [])
+    out = []
+    if isinstance(fields, dict):
+        for name, spec in fields.items():
+            spec = spec if isinstance(spec, dict) else {}
+            out.append((name, [name] + list(spec.get("aliases", [])), spec.get("pattern")))
+    else:
+        for f in fields:
+            if isinstance(f, dict):
+                out.append((f["name"], [f["name"]] + list(f.get("aliases", [])), f.get("pattern")))
+            else:
+                out.append((f, [f], None))
+    return out
+
+
+# ---------------------------------------------------------------- checks
+def describe(e):
+    return {"id": e["id"], "label": e["label"][:60]}
+
+
+def find_field(elems, aliases, pattern=None):
+    """(found, value) for a title block field on a page."""
+    alt = "|".join(re.escape(a) for a in sorted(aliases, key=len, reverse=True))
+    rx = re.compile(rf"^\s*(?:{alt})\s*(?:[:=|–—-]\s*(.*?)\s*|\s+(\S.*?))?\s*$", re.I)
+    # data fields on an object (draw.io) or shape data (Visio)
+    low = {a.lower() for a in aliases}
+    for e in elems:
+        for k, v in e["attrs"].items():
+            if k.lower() in low:
+                return True, (v or "").strip()
+    exact = None
+    for e in elems:
+        for i, line in enumerate(e["lines"]):
+            m = rx.match(line)
+            if not m:
+                continue
+            if m.group(2) is not None and not (pattern and re.search(pattern, m.group(2).strip())):
+                continue  # "Field value" with no separator counts only when the value fits the field's pattern
+            val = (m.group(1) or m.group(2) or "").strip()
+            if val:
+                return True, val
+            if i + 1 < len(e["lines"]):
+                return True, e["lines"][i + 1]
+            exact = exact or e
+    if exact is None:
+        return False, None
+    # a label cell on its own: take the nearest labelled shape to its right on the same row
+    if exact["geo"]:
+        x, y, w, h = exact["geo"]
+        best = None
+        for o in elems:
+            if o is exact or not o["label"] or not o["geo"] or o["edge"]:
+                continue
+            ox, oy, ow, oh = o["geo"]
+            cy = oy + oh / 2
+            if y <= cy <= y + h and ox >= x + w / 2:
+                if best is None or ox < best["geo"][0]:
+                    best = o
+        if best is not None:
+            return True, best["label"]
+    return True, ""
+
+
+def nearest(color, allowed):
+    r, g, b = rgb(color)
+    best = min(allowed, key=lambda c: sum((p - q) ** 2 for p, q in zip(rgb(c), (r, g, b))))
+    return best, allowed[best]
+
+
+def width_ok(actual, want, tol):
+    if want is None:
+        return True
+    wants = want if isinstance(want, list) else [want]
+    return any(abs((actual or 0) - float(w)) <= tol for w in wants)
+
+
+def lint_page(name, elems, layers, rules):
+    out = []
+
+    def add(section, msg, e=None, severity=None):
+        f = {"severity": severity if severity in ("error", "warning") else sev(rules, section),
+             "rule": section, "message": msg}
+        if e is not None:
+            f.update(describe(e))
+        out.append(f)
+
+    shapes = [e for e in elems if not e["edge"]]
+    edges = [e for e in elems if e["edge"]]
+    page_text = [ln for e in elems for ln in e["lines"]]
+
+    # palette
+    pal = rules.get("palette")
+    if pal and pal.get("_allowed"):
+        check = set(pal.get("check", ["fill", "stroke", "text"]))
+        allowed = pal["_allowed"]
+        for e in elems:
+            seen = set()
+            for where, value in e["colors"]:
+                c = norm_color(value)
+                if not c or where not in check or (where, c) in seen or c in allowed:
+                    continue
+                seen.add((where, c))
+                near, meaning = nearest(c, allowed)
+                add("palette", f"{where} color {c} is not in the palette (nearest: {near}"
+                    + (f" {meaning}" if meaning else "") + ")", e)
+
+    # fonts
+    fr = rules.get("fonts")
+    if fr and fr.get("allowed"):
+        ok_fonts = {f.lower() for f in fr["allowed"]}
+        for e in elems:
+            for f in dict.fromkeys(e["fonts"]):
+                if f.lower() not in ok_fonts:
+                    add("fonts", f"font \"{f}\" is not allowed (allowed: {', '.join(fr['allowed'])})", e)
+
+    # text size
+    tr = rules.get("text")
+    if tr and tr.get("min_size_pt"):
+        mn = float(tr["min_size_pt"])
+        for e in elems:
+            small = [s for s in e["sizes"] if s + 0.05 < mn]
+            if small and e["label"]:
+                add("text", f"text is {min(small):.1f} pt, below the {mn:g} pt minimum", e)
+
+    # title block
+    tb = rules.get("title_block")
+    if tb and tb.get("fields"):
+        missing = []
+        for fname, aliases, pattern in field_specs(tb):
+            found, value = find_field(elems, aliases, pattern)
+            if not found:
+                missing.append(fname)
+            elif value == "" and tb.get("require_values", True):
+                add("title_block", f"title block field \"{fname}\" has no value")
+            elif pattern and value and not re.search(pattern, value):
+                add("title_block", f"title block field \"{fname}\" value \"{value[:40]}\" doesn't match {pattern}")
+        if missing:
+            add("title_block", "title block is missing: " + ", ".join(missing))
+
+    # legend
+    lg = rules.get("legend")
+    if lg and lg.get("required", True):
+        pats = [re.compile(p, re.I) for p in lg.get("match", [r"\blegend\b", r"^key$"])]
+        hit = any(p.search(t) for p in pats for t in page_text) or \
+            any(p.search(n) for p in pats for e in elems for n in e["names"])
+        if not hit:
+            add("legend", "no legend on this page")
+
+    # connectors
+    cr = rules.get("connectors") or {}
+    orth_skip = cr.get("orthogonal_except_pages")
+    for e in edges:
+        ends = f"{e['source'] or '?'} -> {e['target'] or '?'}"
+        if cr.get("require_label") and not e["label"]:
+            add("connectors", "connector has no label" + ("" if e["source"] == "x" else f" ({ends})"), e,
+                cr.get("label_severity"))
+        if cr.get("require_attached") and not (e["source"] and e["target"]):
+            which = "either end" if not (e["source"] or e["target"]) else ("its start" if not e["source"] else "its end")
+            add("connectors", f"connector isn't attached at {which}", e, cr.get("attached_severity"))
+        if cr.get("orthogonal") and e["orthogonal"] is False and not (orth_skip and re.search(orth_skip, name)):
+            add("connectors", "connector isn't routed orthogonally (right angles)", e, cr.get("orthogonal_severity"))
+
+    # line types
+    lts = rules.get("_line_types") or []
+    opts = rules.get("_lt_opts") or {}
+    if lts:
+        tol = float(opts.get("tolerance_pt", 0.3))
+        for e in edges:
+            chosen = None
+            for lt in lts:
+                if e["line_type"] and e["line_type"].lower() == lt["name"].lower():
+                    chosen = lt
+                    break
+            if chosen is None:
+                for lt in lts:
+                    if any(re.search(rx, e["label"], re.I) for rx in lt.get("match", [])):
+                        chosen = lt
+                        break
+
+            def fits(lt):
+                probs = []
+                t = lt.get("width_tolerance_pt", tol)
+                if lt.get("pattern") and e["pattern"] != lt["pattern"]:
+                    probs.append(f"is {e['pattern']}, should be {lt['pattern']}")
+                stroke = next((norm_color(v) for w, v in e["colors"] if w == "stroke" and norm_color(v)), None)
+                want = [norm_color(c) for c in (lt["stroke"] if isinstance(lt.get("stroke"), list) else [lt["stroke"]])] if lt.get("stroke") else []
+                if want and stroke not in want:
+                    probs.append(f"color is {stroke or 'not set'}, should be {' or '.join(want)}")
+                if lt.get("width_pt") is not None and e["width_pt"] is not None and not width_ok(e["width_pt"], lt["width_pt"], t):
+                    probs.append(f"width is {e['width_pt']:.2g} pt, should be {lt['width_pt']} pt")
+                return probs
+            if chosen is not None:
+                probs = fits(chosen)
+                if probs:
+                    add("line_types", f"{chosen['name']} connection: " + "; ".join(probs), e,
+                        chosen.get("severity"))
+            elif opts.get("require_match"):
+                if not any(not fits(lt) for lt in lts):
+                    add("line_types", "connector style matches none of the standard line types ("
+                        + ", ".join(lt["name"] for lt in lts) + ")", e)
+
+    # shapes
+    sr = rules.get("shapes")
+    if sr and sr.get("allowed"):
+        pats = list(sr["allowed"]) + ["edgeLabel", "group"]
+        for e in shapes:
+            if e["shape"] == "edgeLabel" or e["group"]:
+                continue
+            if not any(fnmatch.fnmatchcase(e["shape"].lower(), p.lower()) for p in pats):
+                add("shapes", f"shape \"{e['shape']}\" is not an allowed stencil or style", e)
+
+    # view or layer label
+    vl = rules.get("view_label")
+    if vl and vl.get("values"):
+        words = vl["values"]
+        hay = [name] + layers + [ln for e in shapes for ln in e["lines"]] + [v for e in elems for v in e["attrs"].values()]
+        if not any(re.search(rf"\b{re.escape(w)}\b", h or "", re.I) for w in words for h in hay):
+            add("view_label", "no view or layer label (" + ", ".join(words) + ") in the page name, layers, or text")
+    return out
+
+
+def lint_file(path, rules):
+    pages = []
+    try:
+        loaded = load(path)
+    except (ET.ParseError, zipfile.BadZipFile, ValueError, KeyError, OSError) as e:
+        return {"file": str(path), "pages": [{"name": "(file)", "findings": [
+            {"severity": "error", "rule": "read", "message": f"couldn't read the diagram: {e}"}]}]}
+    ign = rules.get("ignore_pages")
+    pn = rules.get("page_names") or {}
+    for name, elems, layers in loaded:
+        if ign and re.search(ign, name):
+            continue
+        findings = lint_page(name, elems, layers, rules)
+        if pn.get("pattern") and not re.search(pn["pattern"], name):
+            findings.insert(0, {"severity": sev(rules, "page_names"), "rule": "page_names",
+                                "message": f"page name \"{name}\" doesn't match {pn['pattern']}"
+                                + (f" ({pn['hint']})" if pn.get("hint") else "")})
+        pages.append({"name": name, "findings": findings})
+    return {"file": str(path), "pages": pages}
+
+
+def gather(paths):
+    out = []
+    for p in map(pathlib.Path, paths):
+        if p.is_dir():
+            for f in sorted(p.iterdir()):
+                suf = f.suffix.lower()
+                if suf in (".drawio", ".vsdx"):
+                    out.append(f)
+                elif suf == ".xml":
+                    try:
+                        with open(f, "rb") as fh:
+                            head = fh.read(512)
+                        if b"<mxfile" in head or b"<mxGraphModel" in head:
+                            out.append(f)
+                    except OSError:
+                        pass
+        else:
+            out.append(p)
+    return out
+
+
+# ---------------------------------------------------------------- output
+def render(result):
+    lines = [f"# Diagram lint (rules: {result['rules']})"]
+    for f in result["files"]:
+        lines += ["", f"## {pathlib.Path(f['file']).name}"]
+        any_f = False
+        for pg in f["pages"]:
+            if not pg["findings"]:
+                continue
+            any_f = True
+            lines += ["", f"### Page: {pg['name']}"]
+            groups = {}
+            for x in pg["findings"]:
+                groups.setdefault((x["severity"], x["rule"], x["message"]), []).append(x)
+            for (s, rule, msg), xs in sorted(groups.items(), key=lambda kv: (kv[0][0] != "error", kv[0][1], kv[0][2])):
+                where = [f"{x['id']}" + (f" \"{x['label']}\"" if x.get("label") else "") for x in xs if "id" in x]
+                shown = ", ".join(where[:5]) + (f" (+{len(where) - 5} more)" if len(where) > 5 else "")
+                lines.append(f"- {s.upper()} {rule}: {msg}" + (f" [{shown}]" if shown else ""))
+        if not any_f:
+            lines.append("No findings.")
+    lines += ["", f"{result['errors']} error(s), {result['warnings']} warning(s) in {len(result['files'])} file(s)."]
+    return "\n".join(lines) + "\n"
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-diaglint", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("paths", nargs="+", metavar="FILE_OR_FOLDER")
+    ap.add_argument("--rules", metavar="FILE")
+    ap.add_argument("--json", action="store_true")
+    a = ap.parse_args(argv)
+    rules_path = pathlib.Path(os.path.expanduser(a.rules)) if a.rules else None
+    if rules_path is None:
+        rules_path, why = setup_rules_path()
+        if rules_path is None:
+            print(f"kit-diaglint: {why}. Pass --rules FILE, or set \"Lint rules\" in diagrams.md "
+                  f"(start from {EXAMPLE}).", file=sys.stderr)
+            return 2
+    try:
+        rules = load_rules(rules_path)
+    except RulesError as e:
+        print(f"kit-diaglint: {e}. Pass --rules FILE, or fix \"Lint rules\" in diagrams.md "
+              f"(start from {EXAMPLE}).", file=sys.stderr)
+        return 2
+    files = gather(a.paths)
+    for f in files:
+        if not f.exists():
+            print(f"kit-diaglint: {f} not found", file=sys.stderr)
+            return 2
+    if not files:
+        print("kit-diaglint: no draw.io or Visio files found", file=sys.stderr)
+        return 2
+    results = [lint_file(f, rules) for f in files]
+    allf = [x for r in results for p in r["pages"] for x in p["findings"]]
+    out = {"rules": str(rules_path), "standard": rules.get("name", ""), "files": results,
+           "errors": sum(1 for x in allf if x["severity"] == "error"),
+           "warnings": sum(1 for x in allf if x["severity"] == "warning")}
+    print(json.dumps(out, indent=2) if a.json else render(out), end="\n" if a.json else "")
+    return 1 if out["errors"] else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

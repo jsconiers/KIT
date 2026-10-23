@@ -216,8 +216,106 @@ def staff():
     return "".join(rows) or '<li class="empty">No staff yet.</li>'
 
 
+def connector_banner():
+    """The connector-outage banner, from briefs/connectors-alerts.json (written by the morning run's
+    connector_health.py when a connector fails CONNECTOR_FAIL_STREAK mornings running; cleared when it
+    passes again)."""
+    path = KIT / "briefs" / "connectors-alerts.json"
+    try:
+        alerts = json.loads(path.read_text()) if path.exists() else {}
+    except Exception:  # noqa: BLE001
+        return ""
+    if not isinstance(alerts, dict) or not alerts:
+        return ""
+    parts = []
+    for name, a in sorted(alerts.items()):
+        a = a if isinstance(a, dict) else {}
+        since = a.get("since", "?")
+        try:
+            since = dt.date.fromisoformat(since).strftime("%d-%b")
+        except (TypeError, ValueError):
+            pass
+        parts.append(f"{name} (failing since {since}, {a.get('streak', '?')} mornings running"
+                     + (f": {a['reason']}" if a.get("reason") else "") + ")")
+    return (f'<div class="banner" role="alert"><strong>Connector outage</strong> {e("; ".join(parts))}. '
+            'It\'s on your list; run kit-connect test to check. The alert clears when the morning check '
+            'passes again.</div>')
+
+
+def alerts_banner():
+    """The run and cost banners, from briefs/alerts.json (written by run_alerts.py at the end of each
+    scheduled run, and by kit-alerts check): one red banner for failing or overdue scheduled runs, one
+    for cost, one each for the monitors (agent drift, library freshness, items waiting too long,
+    connector-guard integrity), and a generic one for any other monitor kind. Each alert clears itself (next success, projection back under, a new month, or back in sync)."""
+    path = KIT / "briefs" / "alerts.json"
+    try:
+        alerts = (json.loads(path.read_text()) if path.exists() else {}).get("alerts") or {}
+    except Exception:  # noqa: BLE001
+        return ""
+    if not isinstance(alerts, dict):
+        return ""
+    runs, costs, drift, library, waiting, guard, other = [], [], [], [], [], [], []
+    for _key, a in sorted(alerts.items()):
+        if not isinstance(a, dict):
+            continue
+        if a.get("kind") == "run":
+            runs.append(f"{a.get('mode', '?')}: {a.get('reason', '')}")
+        elif a.get("kind") == "cost":
+            costs.append(f"{a.get('level', '?')}: {a.get('reason', '')}")
+        elif a.get("kind") == "drift":
+            drift.append(a.get("reason", ""))
+        elif a.get("kind") == "library":
+            library.append(a.get("reason", ""))
+        elif a.get("kind") == "waiting":
+            what = "decision" if a.get("type") == "decision" else "waiting on others"
+            waiting.append(f"{a.get('item', '?')} ({what}, {a.get('days', '?')} days"
+                           + (f"; draft {a['draft']}" if a.get("draft") else "")
+                           + (f"; {a['file']}" if a.get("file") else "") + ")")
+        elif a.get("kind") == "guard":
+            guard.append(a.get("reason", ""))
+        elif a.get("kind") and a.get("reason"):
+            other.append((str(a.get("kind")), a.get("reason", "")))
+    out = ""
+    if runs:
+        out += (f'<div class="banner" role="alert"><strong>Scheduled run</strong> {e("; ".join(runs))}. '
+                "It's on your list; see kit-reliability. The alert clears after the next successful run.</div>")
+    if costs:
+        out += (f'<div class="banner" role="alert"><strong>Cost</strong> {e("; ".join(costs))}. '
+                "It's on your list; see kit-cost. The alert clears when the spend is back under, or when the "
+                "month ends.</div>")
+    if drift:
+        out += (f'<div class="banner" role="alert"><strong>Agent drift</strong> {e("; ".join(drift))}. '
+                "Compare with kit-alerts drift --diff &lt;agent&gt;; nothing is overwritten automatically. The "
+                "alert clears when the copies match.</div>")
+    if library:
+        out += (f'<div class="banner" role="alert"><strong>Library</strong> {e("; ".join(library))}. '
+                "The indexes are never edited automatically; the alert clears when they match the folders.</div>")
+    if waiting:
+        out += (f'<div class="banner" role="alert"><strong>Waiting too long</strong> {e("; ".join(waiting))}. '
+                "Follow-up drafts are never sent. The alert clears when the item is checked off or updated.</div>")
+    if guard:
+        out += (f'<div class="banner" role="alert"><strong>Connector guard</strong> {e("; ".join(guard))}. '
+                "Connector calls may be unguarded or unlogged until it's fixed. It's on your list; see kit-alerts "
+                "check --only guard. The alert clears when every guard check passes.</div>")
+    for kind, reason in other:     # a monitor kind this page doesn't know yet
+        out += (f'<div class="banner" role="alert"><strong>{e(kind.capitalize())}</strong> {e(reason)}. '
+                "See kit-alerts.</div>")
+    return out
+
+
+def cost_stop_alert_open():
+    try:
+        alerts = json.loads((KIT / "briefs" / "alerts.json").read_text()).get("alerts") or {}
+        return any(isinstance(a, dict) and a.get("kind") == "cost" and a.get("level") == "stop"
+                   for a in alerts.values())
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def state_banners():
-    """Banners for a paused Kit (kit-pause) and active legal holds (kit-retention)."""
+    """Banners for a paused Kit (kit-pause), active legal holds (kit-retention), connector outages
+    (connector_health.py), failing scheduled runs and cost alerts (run_alerts.py), and the budget's
+    stop level (kit-cost; left out when a cost alert already says so)."""
     out = ""
     marker = KIT / ".install/PAUSED"
     if marker.exists():
@@ -234,7 +332,11 @@ def state_banners():
                           for p, h in sorted(holds.items()))
         out += (f'<div class="banner" role="alert"><strong>Legal hold</strong> {e(names)}. Nothing in these '
                 'projects may be deleted, moved, or rewritten.</div>')
+    out += connector_banner()
+    out += alerts_banner()
     try:
+        if cost_stop_alert_open():
+            return out
         r = subprocess.run([sys.executable, str(KIT / ".install/shared/bin/kit-cost"), "check", "--json"],
                            capture_output=True, text=True, timeout=30)
         st = json.loads(r.stdout)

@@ -181,6 +181,8 @@ def main():
     for f in failed:
         log(f"sync failed: {f}")
     print("\n".join(changed) or "in sync")
+    if not failed:
+        core.mark_ok(LOG)
     if failed:
         print("\n".join("sync failed: " + f for f in failed), file=sys.stderr)
         sys.exit(1)

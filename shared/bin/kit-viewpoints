@@ -1,0 +1,1037 @@
+#!/usr/bin/env python3
+"""kit-viewpoints: DoDAF-style viewpoint drafts (OV-1, SV-1, SV-4, DIV-2) from a design spec (GDS).
+
+  kit-viewpoints DOC                       print the four viewpoint specs as Markdown (nothing written)
+  kit-viewpoints DOC --view SV-1           only the views named (repeat, or comma-separate)
+  kit-viewpoints DOC --json                the elements found, as JSON
+  kit-viewpoints DOC --write [--force]     save a Markdown spec, a JSON diagram spec, and a draw.io file
+                                           per view in the project folder's viewpoints/ subfolder
+  kit-viewpoints DOC --write --project P   P is a folder, or a project name under <library root>/artifacts/
+  kit-viewpoints DOC --styles S.json       draw.io colors and font (default: KIT_DRAWIO_STYLES, if set)
+  kit-viewpoints DOC --root DIR            use a library root other than the one in library.md
+
+The views, named by their DoDAF 2.02 IDs:
+  OV-1   high-level operational concept: who uses the system, the external systems around it, and the
+         main flows between them, as a context graphic spec
+  SV-1   systems interface description: the components and the interfaces between them, with the
+         protocol and port where the document states them
+  SV-4   systems functionality: the functions, the component that performs each, and the data flows
+         between functions
+  DIV-2  logical data model: the main data entities, their attributes where stated, the relationships
+         between them, and their classification
+
+DOC is Markdown or text, a .docx (read straight from the file, so Word isn't needed), or a PDF (through
+pdftotext, when it's installed). Elements are found by section heading, by table columns (for example
+"| Source | Target | Protocol | Port |" or "| Entity | Attributes | Classification |"), and by labelled
+fields ("Actors: ..."). Every element is cited to the section it came from, as [§3.1 Interfaces]. When
+headings, tables, and fields give nothing for a part of a view, a keyword search fills in, and those
+elements are marked "(inferred)". Where the document says nothing, the spec says "not stated"; it
+never invents an element.
+
+--write saves <doc>-<view>.md, <doc>-<view>-spec.json, and <doc>-<view>.drawio for each view. The
+draw.io file is built by kit-drawio from the JSON spec, so --styles and KIT_DRAWIO_STYLES apply the
+team's font and palette. The folder is <project>/viewpoints/: the --project folder, else the project
+folder under <library root>/artifacts/ that holds DOC, else viewpoints/ next to DOC. It never
+overwrites without --force. When kit-diaglint is installed and diagrams.md names lint rules, the
+draw.io files are linted and the summary goes into each spec. Read-only unless --write; never calls an
+outside service. The layout follows templates/viewpoints-template.md.
+
+Exit status: 0 done, 1 a draw.io file couldn't be built, 2 usage error or unreadable document.
+"""
+import argparse
+import datetime as dt
+import importlib.machinery
+import importlib.util
+import json
+import os
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+
+HERE = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent))
+import kit_arch as ka  # noqa: E402
+
+
+def _load(name, path):
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+# Reading and section structure are shared with kit-onepager, so both tools see a document the same way.
+op = _load("kit_onepager", HERE / "kit-onepager")
+
+NOT_STATED = "not stated"
+VIEWS = ["OV-1", "SV-1", "SV-4", "DIV-2"]
+VIEW_TITLES = {"OV-1": "High-level operational concept", "SV-1": "Systems interface description",
+               "SV-4": "Systems functionality", "DIV-2": "Logical data model"}
+VIEW_ABOUT = {
+    "OV-1": "Who uses the system, the external systems around it, and the main flows between them.",
+    "SV-1": "The system's components and the interfaces between them, with protocol and port where stated.",
+    "SV-4": "What the system does: its functions, which component performs each, and the data passed "
+            "between functions.",
+    "DIV-2": "The main data entities, their attributes where stated, how they relate, and their "
+             "classification.",
+}
+
+PROTO = re.compile(r"\b(HTTPS|HTTP/2|HTTP|TLS|mTLS|SFTP|FTPS|FTP|SSH|JDBC|ODBC|AMQP|MQTT|Kafka|gRPC|REST|SOAP|"
+                   r"LDAPS|LDAP|SMTP|TCP|UDP|IBM MQ|MQ|FIX|SAML|OIDC|OAuth ?2?|WebSocket|NFS|SMB|Syslog|SNMP)\b")
+PORT = re.compile(r"\bport\s*:?\s*(\d{2,5})\b|:(\d{2,5})\b", re.I)
+NAME = r"([A-Z][\w.&/-]*(?:\s+[A-Z][\w.&/-]*){0,3})"
+ROLE_WORDS = re.compile(r"\b(traders?|operators?|administrators?|admins?|analysts?|customers?|clients?|end users?|"
+                        r"auditors?|support (?:team|engineers?|staff)|developers?|approvers?|brokers?|"
+                        r"members?|regulators?|investors?|risk managers?|compliance officers?)\b", re.I)
+VERBS = ("validates|calculates|routes|stores|publishes|sends|receives|reconciles|authenticates|authorizes|"
+         "transforms|generates|monitors|processes|enriches|matches|archives|notifies|aggregates|schedules|"
+         "settles|records|exports|imports|indexes|encrypts|forwards|parses|loads|ingests")
+FUNC_RX = re.compile(r"\b(?:the\s+)?" + NAME + r"\s+(" + VERBS + r")\s+([a-z][\w -]{2,40}?)(?=[,.;:]|\s+(?:and|to|from|"
+                     r"into|for|with|every|each|on)\b|$)")
+ARROW_RX = re.compile(NAME + r"\s*(?:->|→|=>|sends (?:[\w ]+ )?to|calls|connects to|pushes to|pulls from|"
+                      r"publishes to|writes to|reads from)\s*(?:the\s+|an?\s+)?" + NAME)
+COMP_RX = re.compile(r"\b([A-Z][\w-]*(?:\s+[A-Z][\w-]*){0,2}\s+(?:[Ss]ervice|[Ss]erver|[Dd]atabase|[Gg]ateway|API|"
+                     r"[Ee]ngine|[Cc]luster|[Qq]ueue|[Bb]roker|[Cc]ache|[Pp]ortal|[Ww]arehouse|[Ss]tore))\b")
+ENTITY_RX = re.compile(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+(?:records?|entit(?:y|ies)|tables?|objects?)\b")
+REL_RX = re.compile(r"\b[Ee]ach\s+([A-Z]\w+)\s+(has|belongs to|references|contains|owns|is linked to)\s+"
+                    r"(one or more|zero or more|many|one|a|an|several)?\s*([A-Z]\w+)")
+EXT_RX = re.compile(r"\b(?:external|third[- ]party|upstream|downstream|vendor)\s+(?:systems?|services?|providers?|"
+                    r"feeds?|platforms?)?\s*(?:called|named|such as|like|:|,)?\s*" + NAME)
+ARTICLES = {"The", "A", "An", "This", "That", "Each", "Every", "It", "We", "Our", "All", "No", "When", "If"}
+
+
+def strip_art(name):
+    words = (name or "").split()
+    while words and words[0] in ARTICLES:
+        words = words[1:]
+    return " ".join(words)
+
+
+# ---------------------------------------------------------------- reading
+
+def read_doc(path):
+    suf = path.suffix.lower()
+    if suf == ".docx":
+        try:
+            return op.docx_lines(path)
+        except Exception as e:  # noqa: BLE001  (bad zip, missing part, bad XML)
+            raise SystemExit(f"kit-viewpoints: can't read {path} as a Word file ({e})")
+    if suf == ".pdf":
+        exe = shutil.which("pdftotext")
+        if not exe:
+            raise SystemExit("kit-viewpoints: pdftotext isn't installed, so PDFs can't be read; use the .docx "
+                             "or Markdown version of the document")
+        r = subprocess.run([exe, "-enc", "UTF-8", str(path), "-"], capture_output=True, text=True, timeout=120)
+        if r.returncode != 0:
+            raise SystemExit(f"kit-viewpoints: pdftotext couldn't read {path}")
+        return [l.replace("\f", "") for l in r.stdout.splitlines()]
+    return ka.read_lines(path, limit=20 * 1024 * 1024)
+
+
+def clean(s, n=160):
+    return op.clean(s, n)
+
+
+def norm(s):
+    return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
+
+
+def usable(v):
+    v = (v or "").strip()
+    return bool(v) and not v.startswith("<") and v.lower() not in ("-", "—", "n/a", "tbd", "none", "not stated")
+
+
+class Doc:
+    def __init__(self, path):
+        self.path = path
+        lines = read_doc(path)
+        plain = path.suffix.lower() not in (".md", ".markdown", ".docx")
+        self.secs = op.sections(lines, plain)
+        self.title_idx = op.title_index(self.secs)
+        self.pairs = kv_pairs(self.secs)
+
+    def meta(self, names):
+        hit = op.kv_get(self.pairs, names)
+        return {"value": hit[0], "section": hit[1]} if hit else None
+
+    def matching(self, words):
+        """Indexes of sections whose heading has one of the words, plus their subsections."""
+        out = []
+        for i, s in enumerate(self.secs):
+            if i == 0 or i == self.title_idx:
+                continue
+            if any(re.search(r"(?<![a-z])" + re.escape(w) + r"(?:s|es)?(?![a-z])", s.key) for w in words):
+                if i in out:
+                    continue
+                out.append(i)
+                for j in range(i + 1, len(self.secs)):
+                    if self.secs[j].level <= s.level:
+                        break
+                    if j not in out:
+                        out.append(j)
+        return out
+
+    def tables_in(self, idx):
+        return op.tables(self.secs[idx].lines)
+
+    def all_tables(self):
+        for i, s in enumerate(self.secs):
+            for t in op.tables(s.lines):
+                yield i, t
+
+
+def kv_pairs(secs):
+    """Labelled fields, as kit-onepager reads them, but never a two-column table's header row."""
+    out = []
+    for s in secs:
+        for t in op.tables(s.lines):
+            if len(t[0]) != 2:
+                continue
+            for r in t[1:]:
+                if len(r) == 2 and usable(r[1]):
+                    out.append((r[0].lower().strip(" :"), r[1], s.label))
+        for line in s.lines:
+            if line.strip().startswith("|"):
+                continue
+            m = op.KV.match(line)
+            if m and len(m.group(2).strip()) > 1:
+                out.append((m.group(1).lower().strip(), clean(m.group(2)), s.label))
+    return out
+
+
+def col(head, *patterns):
+    for p in patterns:
+        for i, h in enumerate(head):
+            if re.search(p, h.lower()):
+                return i
+    return None
+
+
+def bullets(lines):
+    out = []
+    for line in lines:
+        s = line.strip()
+        if op.BULLET.match(s) and not s.startswith("|"):
+            out.append(clean(op.BULLET.sub("", s), 300))
+    return [b for b in out if usable(b)]
+
+
+def split_name(text):
+    """'Order API: takes orders' -> ('Order API', 'takes orders')."""
+    m = re.match(r"^\s*([^:–—]{1,60}?)\s*(?::|\s[-–—]\s)\s*(.+)$", text)
+    if m:
+        return clean(m.group(1), 60), clean(m.group(2))
+    m = re.match(r"^\s*([^()]{1,60}?)\s*\((.+)\)\s*$", text)
+    if m:
+        return clean(m.group(1), 60), clean(m.group(2))
+    return clean(text, 60), ""
+
+
+def el(name, section, inferred=False, **detail):
+    d = {"name": clean(name, 80), "section": section, "inferred": inferred}
+    d.update({k: (clean(v) if isinstance(v, str) else v) for k, v in detail.items()})
+    return d
+
+
+def add(lst, item):
+    key = norm(item["name"])
+    if not key:
+        return
+    for x in lst:
+        if norm(x["name"]) == key:
+            for k, v in item.items():
+                if k not in ("name", "section", "inferred") and v and not x.get(k):
+                    x[k] = v
+            return
+    lst.append(item)
+
+
+def scan(doc, rx, skip_tables=True):
+    """(match, section label) for every line outside tables that matches rx."""
+    for s in doc.secs[1:]:
+        for line in s.lines:
+            t = line.strip()
+            if not t or (skip_tables and t.startswith("|")):
+                continue
+            for m in rx.finditer(op.BULLET.sub("", re.sub(r"[*`]", "", t))):
+                yield m, s.label
+
+
+def list_from_sections(doc, words, name_cols, extra_cols, sink, require=None):
+    """Elements from the tables and bullets of sections whose heading matches the words."""
+    for i in doc.matching(words):
+        label = doc.secs[i].label
+        tabs = doc.tables_in(i)
+        for t in tabs:
+            if len(t) < 2:
+                continue
+            head = t[0]
+            if require and not all(col(head, *r) is not None for r in require):
+                continue
+            nc = col(head, *name_cols)
+            if nc is None:
+                if len(head) == 2 and re.search(r"field|item", head[0].lower()):
+                    continue
+                nc = 0
+            cols = {k: col(head, *pats) for k, pats in extra_cols.items()}
+            for r in t[1:]:
+                r = r + [""] * (len(head) - len(r))
+                if not usable(r[nc]):
+                    continue
+                det = {k: r[c] for k, c in cols.items() if c is not None and c != nc and usable(r[c])}
+                add(sink, el(r[nc], label, **det))
+        if not tabs or not any(len(t) > 1 for t in tabs):
+            for b in bullets(doc.secs[i].lines):
+                name, detail = split_name(b)
+                if len(name.split()) <= 8:
+                    add(sink, el(name, label, detail=detail) if detail else el(name, label))
+
+
+def labelled(doc, names, sink):
+    for k, v, where in doc.pairs:
+        if k in names:
+            for part in re.split(r"[;,]\s*|\s+and\s+", v):
+                if usable(part):
+                    add(sink, el(part, where))
+
+
+# ---------------------------------------------------------------- the views
+
+def find_interfaces(doc):
+    out = []
+    words = ["interface", "integration", "connectivity", "network flow", "firewall", "port", "connection",
+             "message flow"]
+    seen_tables = set()
+
+    def from_table(i, t):
+        head = t[0]
+        s = col(head, r"^(source|from|client|caller|consumer|initiator)", r"source|from")
+        d = col(head, r"^(target|to|destination|server|provider|callee)", r"target|destination|^to\b")
+        if s is None or d is None:
+            return
+        p = col(head, r"protocol|transport|technology|method")
+        pt = col(head, r"port")
+        dat = col(head, r"data|payload|message|content|description|purpose")
+        enc = col(head, r"encrypt|security|tls|auth")
+        for r in t[1:]:
+            r = r + [""] * (len(head) - len(r))
+            if not (usable(r[s]) and usable(r[d])):
+                continue
+            proto = r[p] if p is not None and usable(r[p]) else ""
+            port = r[pt] if pt is not None and usable(r[pt]) else ""
+            out.append({"source": clean(r[s], 60), "target": clean(r[d], 60),
+                        "protocol": proto or NOT_STATED, "port": port or NOT_STATED,
+                        "data": r[dat] if dat is not None and usable(r[dat]) else "",
+                        "security": r[enc] if enc is not None and usable(r[enc]) else "",
+                        "section": doc.secs[i].label, "inferred": False})
+
+    for i in doc.matching(words):
+        for t in doc.tables_in(i):
+            if len(t) > 1:
+                seen_tables.add((i, id(t)))
+                from_table(i, t)
+    if not out:                                           # an interface table under any heading
+        for i, t in doc.all_tables():
+            if len(t) > 1 and col(t[0], r"protocol|port") is not None:
+                from_table(i, t)
+    if not out:
+        for m, where in scan(doc, ARROW_RX):
+            a, b = strip_art(m.group(1)), strip_art(m.group(2))
+            if not a or not b:
+                continue
+            rest = m.string[m.end():]
+            pm, po = PROTO.search(rest), PORT.search(rest)
+            out.append({"source": clean(a, 60), "target": clean(b, 60),
+                        "protocol": pm.group(1) if pm else NOT_STATED,
+                        "port": (po.group(1) or po.group(2)) if po else NOT_STATED, "data": "", "security": "",
+                        "section": where, "inferred": True})
+    return out
+
+
+def find_components(doc, interfaces):
+    comps = []
+    list_from_sections(doc, ["component", "system component", "solution component", "building block",
+                             "logical architecture", "physical architecture", "application architecture",
+                             "solution architecture", "architecture overview", "services", "modules"],
+                       [r"^(component|service|module|system|application|server|name)"],
+                       {"description": [r"description|purpose|role|responsib|function"],
+                        "technology": [r"technology|platform|product|software|stack"],
+                        "hosting": [r"host|location|environment|zone|tier"]}, comps)
+    for c in comps:
+        if c.get("detail") and not c.get("description"):
+            c["description"] = c.pop("detail")
+    if not comps:
+        for x in interfaces:
+            if not x["inferred"]:
+                for end in (x["source"], x["target"]):
+                    add(comps, el(end, x["section"], inferred=True,
+                                  description="named as an interface end, not in a component list"))
+    if not comps:
+        for m, where in scan(doc, COMP_RX):
+            if strip_art(m.group(1)):
+                add(comps, el(strip_art(m.group(1)), where, inferred=True))
+    return comps[:40]
+
+
+def find_externals(doc, comps, interfaces):
+    ext = []
+    list_from_sections(doc, ["external system", "external interface", "external dependenc", "dependenc",
+                             "upstream", "downstream", "third part", "context", "integrations"],
+                       [r"^(system|external|name|application|service|party|dependency)"],
+                       {"description": [r"description|purpose|role|data|interface"],
+                        "direction": [r"direction|upstream|downstream|in/out"]}, ext)
+    labelled(doc, ["external systems", "external system", "integrations", "dependencies"], ext)
+    if not ext:
+        names = {norm(c["name"]) for c in comps if not c["inferred"]}
+        if names:
+            for x in interfaces:
+                for end in (x["source"], x["target"]):
+                    if norm(end) not in names:
+                        add(ext, el(end, x["section"], inferred=True,
+                                    description="an interface end that isn't a listed component"))
+    if not ext:
+        for m, where in scan(doc, EXT_RX):
+            if strip_art(m.group(1)):
+                add(ext, el(strip_art(m.group(1)), where, inferred=True))
+    for e in ext:
+        if e.get("detail") and not e.get("description"):
+            e["description"] = e.pop("detail")
+    return ext[:20]
+
+
+def find_actors(doc):
+    actors = []
+    list_from_sections(doc, ["actor", "user", "user role", "persona", "stakeholder", "user communit",
+                             "roles"],
+                       [r"^(actor|user|role|persona|stakeholder|name|group)"],
+                       {"description": [r"description|need|responsib|uses|interaction|purpose|goal"]}, actors)
+    labelled(doc, ["actors", "users", "user groups", "user roles", "personas"], actors)
+    if not actors:
+        for m, where in scan(doc, ROLE_WORDS):
+            word = m.group(1).lower()
+            word = re.sub(r"s$", "", word) if not word.endswith(("ss", "us")) else word
+            add(actors, el(word[:1].upper() + word[1:], where, inferred=True))
+            if len(actors) >= 6:
+                break
+    for a in actors:
+        if a.get("detail") and not a.get("description"):
+            a["description"] = a.pop("detail")
+    return actors[:15]
+
+
+def find_flows(doc):
+    flows = []
+    for i in doc.matching(["operational flow", "business process", "process flow", "main flow",
+                           "operational concept", "concept of operation", "use case", "scenario",
+                           "user journey", "workflow", "business flow", "how it works"]):
+        label = doc.secs[i].label
+        tabs = [t for t in doc.tables_in(i) if len(t) > 1]
+        for t in tabs:
+            for r in t[1:]:
+                text = "; ".join(c for c in r if usable(c))
+                if text:
+                    add(flows, el(text, label, text=clean(text, 200)))
+        if not tabs:
+            for text in op.items(doc.secs[i].lines, 8):
+                add(flows, el(text, label, text=text))
+    return flows[:12]
+
+
+def find_functions(doc, comps):
+    funcs = []
+    list_from_sections(doc, ["function", "functional", "capabilit", "feature", "functional requirement",
+                             "processing", "system function"],
+                       [r"^(function|capability|feature|requirement|activity|process)", r"function|capabil"],
+                       {"performer": [r"component|performed|perform|system|service|module|owner|by\b"],
+                        "description": [r"description|detail|purpose"]}, funcs)
+    for f in funcs:
+        if f.get("detail") and not f.get("description"):
+            f["description"] = f.pop("detail")
+        f["name"] = re.sub(r"^(?:FR|F|REQ)-?\d+[.:]?\s*", "", f["name"]) or f["name"]
+        if not f.get("performer"):                        # "Validate order (Order API)" or a bullet's text
+            for c in comps:
+                if c["name"] and re.search(r"(?<![a-z])" + re.escape(c["name"].lower()) + r"(?![a-z])",
+                                           (f["name"] + " " + f.get("description", "")).lower()):
+                    f["performer"] = c["name"]
+                    break
+    if not funcs:
+        for m, where in scan(doc, FUNC_RX):
+            subj = strip_art(m.group(1))
+            if not subj:
+                continue
+            verb = m.group(2)
+            verb = verb[:-2] if verb.endswith("es") and verb[:-2].endswith(("ss", "sh", "ch", "x")) else \
+                verb[:-1] if verb.endswith("s") else verb
+            add(funcs, el(f"{verb.capitalize()} {m.group(3).strip()}", where, inferred=True, performer=subj))
+    return funcs[:40]
+
+
+def find_function_flows(doc, funcs):
+    flows = []
+    names = {norm(f["name"]) for f in funcs}
+    for i, t in doc.all_tables():
+        if len(t) < 2:
+            continue
+        head = t[0]
+        s = col(head, r"^(from|source|producer)", r"from|source")
+        d = col(head, r"^(to|target|consumer|destination)", r"target|destination")
+        if s is None or d is None:
+            continue
+        dat = col(head, r"data|payload|message|information|content|object")
+        in_func = re.search(r"function|data flow|processing|information flow|exchange", doc.secs[i].key)
+        for r in t[1:]:
+            r = r + [""] * (len(head) - len(r))
+            if not (usable(r[s]) and usable(r[d])):
+                continue
+            if in_func or norm(r[s]) in names or norm(r[d]) in names:
+                flows.append({"source": clean(r[s], 60), "target": clean(r[d], 60),
+                              "data": r[dat] if dat is not None and usable(r[dat]) else NOT_STATED,
+                              "section": doc.secs[i].label, "inferred": False})
+    return flows[:40]
+
+
+def find_entities(doc):
+    ents = []
+    list_from_sections(doc, ["data model", "logical data", "data entit", "entit", "data dictionary",
+                             "data object", "information model", "data design", "data architecture",
+                             "data store", "data structure"],
+                       [r"^(entity|data object|object|table|record|name|data item|data set)", r"entit"],
+                       {"attributes": [r"attribute|field|column|key|element"],
+                        "classification": [r"classif|sensitiv|data class|label"],
+                        "description": [r"description|purpose|meaning|definition"],
+                        "store": [r"store|database|system of record|location|held in"]}, ents)
+    ents = [e for e in ents if not re.search(r"^(relationship|cardinality)", e["name"].lower())]
+    for e in ents:
+        if e.get("detail") and not e.get("description") and not e.get("attributes"):
+            e["description"] = e.pop("detail")
+    if not ents:
+        for m, where in scan(doc, ENTITY_RX):
+            if strip_art(m.group(1)):
+                add(ents, el(strip_art(m.group(1)), where, inferred=True))
+    return ents[:40]
+
+
+def entities_from_relationships(ents, rels):
+    if not ents:
+        for r in rels:
+            for end in (r["source"], r["target"]):
+                add(ents, el(end, r["section"], inferred=True, description="named in a relationship"))
+
+
+def find_relationships(doc, ents):
+    rels = []
+    for i, t in doc.all_tables():
+        if len(t) < 2:
+            continue
+        head = t[0]
+        a = col(head, r"^(from|parent|entity a|source|entity 1|entity)\b", r"^from")
+        b = col(head, r"^(to|child|entity b|target|entity 2|related)", r"related entit")
+        c = col(head, r"cardinal|multiplicity|relationship|type")
+        if a is None or b is None or a == b or (c is None and not re.search(r"relationship", doc.secs[i].key)):
+            continue
+        for r in t[1:]:
+            r = r + [""] * (len(head) - len(r))
+            if usable(r[a]) and usable(r[b]):
+                rels.append({"source": clean(r[a], 60), "target": clean(r[b], 60),
+                             "kind": r[c] if c is not None and usable(r[c]) else NOT_STATED,
+                             "section": doc.secs[i].label, "inferred": False})
+    for i in doc.matching(["relationship", "data model", "logical data", "entit"]):
+        for b in bullets(doc.secs[i].lines) + [l for l in doc.secs[i].lines if not l.strip().startswith("|")]:
+            m = REL_RX.search(b)
+            if m:
+                rels.append({"source": m.group(1), "target": m.group(4),
+                             "kind": f"{m.group(2)} {m.group(3) or ''}".strip(),
+                             "section": doc.secs[i].label, "inferred": False})
+    if not rels:
+        for m, where in scan(doc, REL_RX):
+            rels.append({"source": m.group(1), "target": m.group(4),
+                         "kind": f"{m.group(2)} {m.group(3) or ''}".strip(), "section": where, "inferred": True})
+    seen, out = set(), []
+    for r in rels:
+        k = (norm(r["source"]), norm(r["target"]))
+        if k not in seen:
+            seen.add(k)
+            out.append(r)
+    return out[:40]
+
+
+def entity_classes(doc, ents, doc_class):
+    """Fill each entity's classification from a classification table or the document's own class."""
+    for i in doc.matching(["classification", "data classification", "data sensitivity"]):
+        for t in doc.tables_in(i):
+            if len(t) < 2:
+                continue
+            nc = col(t[0], r"entit|data|object|item|name") or 0
+            cc = col(t[0], r"classif|class|sensitiv|level")
+            if cc is None or cc == nc:
+                continue
+            for r in t[1:]:
+                r = r + [""] * (len(t[0]) - len(r))
+                for e in ents:
+                    if norm(e["name"]) and norm(e["name"]) == norm(r[nc]) and not e.get("classification"):
+                        e["classification"] = r[cc]
+                        e["classification_section"] = doc.secs[i].label
+        for b in bullets(doc.secs[i].lines):
+            name, val = split_name(b)
+            for e in ents:
+                if norm(e["name"]) == norm(name) and not e.get("classification") and val:
+                    e["classification"] = val
+                    e["classification_section"] = doc.secs[i].label
+    for e in ents:
+        if not e.get("classification"):
+            if doc_class:
+                e["classification"] = f"{doc_class['value']} (the document's classification)"
+                e["classification_section"] = doc_class["section"]
+            else:
+                e["classification"] = NOT_STATED
+
+
+def build(path, views):
+    doc = Doc(path)
+    meta = {k: doc.meta(v) for k, v in {
+        "title": ["title", "document title"], "project": ["project", "project name"],
+        "system": ["system", "system name", "application", "application name", "service name"],
+        "number": ["document number", "document no", "doc number", "document id"], "version": ["version"],
+        "classification": ["classification", "data classification", "document classification"]}.items()}
+    if not meta["title"] and doc.title_idx:
+        s = doc.secs[doc.title_idx]
+        meta["title"] = {"value": s.label, "section": s.label}
+    title = meta["title"]["value"] if meta["title"] else path.stem
+    interfaces = find_interfaces(doc)
+    comps = find_components(doc, interfaces)
+    res = {"source": str(path), "title": title, "meta": meta,
+           "generated": dt.date.today().strftime("%d-%b-%Y"), "views": {}}
+    if meta["system"]:
+        system = {"name": meta["system"]["value"], "section": meta["system"]["section"], "inferred": False}
+    else:
+        sysname = re.sub(r"\s*[-:(]?\s*\b(general design specification|design specification|gds|impact "
+                         r"assessment|design|specification)\b.*$", "", title, flags=re.I).strip() or title
+        system = {"name": sysname, "section": meta["title"]["section"] if meta["title"] else "file name",
+                  "inferred": True}
+    if "OV-1" in views:
+        ext = find_externals(doc, comps, interfaces)
+        res["views"]["OV-1"] = {"system": system, "actors": find_actors(doc), "external_systems": ext,
+                                "flows": find_flows(doc),
+                                "connections": [x for x in interfaces
+                                                if any(norm(e["name"]) in (norm(x["source"]), norm(x["target"]))
+                                                       for e in ext)]}
+    if "SV-1" in views:
+        res["views"]["SV-1"] = {"system": system, "components": comps, "interfaces": interfaces}
+    if "SV-4" in views:
+        funcs = find_functions(doc, comps)
+        res["views"]["SV-4"] = {"functions": funcs, "data_flows": find_function_flows(doc, funcs)}
+    if "DIV-2" in views:
+        ents = find_entities(doc)
+        rels = find_relationships(doc, ents)
+        entities_from_relationships(ents, rels)
+        entity_classes(doc, ents, meta["classification"])
+        res["views"]["DIV-2"] = {"entities": ents, "relationships": rels}
+    return res
+
+
+# ---------------------------------------------------------------- Markdown
+
+def cite(x, key="section"):
+    s = f"[§{x[key]}]" if x.get(key) else ""
+    return s + (" (inferred)" if x.get("inferred") else "")
+
+
+def cellv(v):
+    return (str(v) if v else NOT_STATED).replace("|", "/")
+
+
+def tbl(head, rows):
+    out = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
+    out += ["| " + " | ".join(cellv(c) for c in r) + " |" for r in rows]
+    return out
+
+
+def render_view(res, v, files=None, lint=None):
+    d = res["views"][v]
+    m = res["meta"]
+    src = pathlib.Path(res["source"]).name
+    ver = f", version {m['version']['value']}" if m["version"] else ""
+    cls = f"{m['classification']['value']} [§{m['classification']['section']}]" if m["classification"] \
+        else NOT_STATED
+    out = [f"# {v} {VIEW_TITLES[v]}: {res['title']}", "",
+           "| Field | Value |", "|---|---|",
+           f"| Viewpoint | {v} {VIEW_TITLES[v]} (DoDAF 2.02 ID; a draft, not a certified model) |",
+           f"| Source document | {src}{ver} |",
+           f"| Project | {m['project']['value'] + ' [§' + m['project']['section'] + ']' if m['project'] else NOT_STATED} |",
+           "| Prepared by | kit-viewpoints, for the architect to check |",
+           f"| Updated | {res['generated']} |",
+           f"| Classification | {cls} |"]
+    if files:
+        out.append(f"| Diagram | {files.get('drawio', NOT_STATED)} (built by kit-drawio from "
+                   f"{files.get('spec', 'the JSON spec')}) |")
+    out += ["", VIEW_ABOUT[v], ""]
+    missing = []
+    if v in ("OV-1", "SV-1"):
+        s = d["system"]
+        out += ["## The system", "", f"- {s['name']} {cite(s)}", ""]
+    if v == "OV-1":
+        out += ["## Actors", ""]
+        out += tbl(["Actor", "What they do", "Source"],
+                   [[a["name"], a.get("description"), cite(a)] for a in d["actors"]]) if d["actors"] else \
+            ["Not stated in the document."]
+        out += ["", "## External systems", ""]
+        out += tbl(["System", "Role or data", "Source"],
+                   [[e["name"], e.get("description") or e.get("direction"), cite(e)] for e in d["external_systems"]]) \
+            if d["external_systems"] else ["Not stated in the document."]
+        out += ["", "## Main flows", ""]
+        out += [f"- {f['text']} {cite(f)}" for f in d["flows"]] or ["- Not stated in the document."]
+        out += ["", "## Context graphic", "",
+                f"- Centre: {d['system']['name']}.",
+                f"- Left: the actors ({len(d['actors'])}), each joined to the system.",
+                f"- Right: the external systems ({len(d['external_systems'])}), each joined to the system; a "
+                "connection carries its protocol when SV-1 states one."]
+        out += [f"- Connection: {x['source']} to {x['target']}, {x['protocol']} {cite(x)}" for x in d["connections"]]
+        missing += [n for n, k in (("actors", "actors"), ("external systems", "external_systems"),
+                                   ("main flows", "flows")) if not d[k]]
+    elif v == "SV-1":
+        out += ["## Components", ""]
+        out += tbl(["Component", "Description", "Technology", "Hosting", "Source"],
+                   [[c["name"], c.get("description"), c.get("technology"), c.get("hosting"), cite(c)]
+                    for c in d["components"]]) if d["components"] else ["Not stated in the document."]
+        out += ["", "## Interfaces", ""]
+        out += tbl(["From", "To", "Protocol", "Port", "Data", "Security", "Source"],
+                   [[x["source"], x["target"], x["protocol"], x["port"], x.get("data"), x.get("security"), cite(x)]
+                    for x in d["interfaces"]]) if d["interfaces"] else ["Not stated in the document."]
+        missing += [n for n, k in (("components", "components"), ("interfaces", "interfaces")) if not d[k]]
+        nop = [x for x in d["interfaces"] if x["protocol"] == NOT_STATED or x["port"] == NOT_STATED]
+        if nop:
+            missing.append(f"protocol or port for {len(nop)} interface(s)")
+    elif v == "SV-4":
+        out += ["## Functions", ""]
+        out += tbl(["Function", "Performed by", "Description", "Source"],
+                   [[f["name"], f.get("performer"), f.get("description"), cite(f)] for f in d["functions"]]) \
+            if d["functions"] else ["Not stated in the document."]
+        out += ["", "## Data flows between functions", ""]
+        out += tbl(["From", "To", "Data", "Source"],
+                   [[x["source"], x["target"], x["data"], cite(x)] for x in d["data_flows"]]) \
+            if d["data_flows"] else ["Not stated in the document."]
+        missing += [n for n, k in (("functions", "functions"), ("data flows between functions", "data_flows"))
+                    if not d[k]]
+        nop = [f for f in d["functions"] if not f.get("performer")]
+        if nop:
+            missing.append(f"the performing component for {len(nop)} function(s)")
+    elif v == "DIV-2":
+        out += ["## Entities", ""]
+        out += tbl(["Entity", "Attributes", "Classification", "Description", "Source"],
+                   [[e["name"], e.get("attributes"),
+                     e["classification"] + (f" [§{e['classification_section']}]" if e.get("classification_section")
+                                            and e["classification_section"] != e["section"] else ""),
+                     e.get("description") or e.get("store"), cite(e)] for e in d["entities"]]) \
+            if d["entities"] else ["Not stated in the document."]
+        out += ["", "## Relationships", ""]
+        out += tbl(["From", "To", "Relationship", "Source"],
+                   [[r["source"], r["target"], r["kind"], cite(r)] for r in d["relationships"]]) \
+            if d["relationships"] else ["Not stated in the document."]
+        missing += [n for n, k in (("entities", "entities"), ("relationships", "relationships")) if not d[k]]
+        na = [e for e in d["entities"] if not e.get("attributes")]
+        if na:
+            missing.append(f"attributes for {len(na)} entit{'y' if len(na) == 1 else 'ies'}")
+        nc = [e for e in d["entities"] if e["classification"] == NOT_STATED]
+        if nc:
+            missing.append(f"classification for {len(nc)} entit{'y' if len(nc) == 1 else 'ies'}")
+    out += ["", "## Not stated", ""]
+    out += [f"- {x[:1].upper() + x[1:]}: not stated in the document." for x in missing] or \
+        ["- Nothing missing for this view."]
+    if lint is not None:
+        out += ["", "## Diagram lint", "", f"- {lint}"]
+    out += ["", "Every element is taken from the cited section of the source document; \"(inferred)\" means it "
+            "was found by keyword, not by a heading, table, or labelled field, so check it first. \"Not stated\" "
+            "means the document doesn't say. Viewpoint IDs follow DoDAF 2.02; the descriptions are Kit's own."]
+    return "\n".join(out) + "\n"
+
+
+# ---------------------------------------------------------------- draw.io specs
+
+def _box(nid, label, kind, x, y, w=1.9, h=0.7, sub=None, parent=None):
+    n = {"id": nid, "label": label, "kind": kind, "x": round(x, 3), "y": round(y, 3), "w": w, "h": h}
+    if sub:
+        n["sublabel"] = sub
+    if parent:
+        n["parent"] = parent
+    return n
+
+
+def _title(res, v):
+    m = res["meta"]
+    cls = m["classification"]["value"] if m["classification"] else NOT_STATED
+    return _box("title", f"{v} {VIEW_TITLES[v]}: {res['title']}", "plain", 0.3, 0.2, 7.0, 0.55,
+                sub=f"Classification: {cls}  |  Date: {res['generated']}  |  Source: "
+                    f"{pathlib.Path(res['source']).name}  |  Draft from kit-viewpoints")
+
+
+def _short(s, n=40):
+    s = s or ""
+    return s if len(s) <= n else s[:n - 3].rstrip() + "..."
+
+
+def _match(name, index):
+    k = norm(name)
+    if k in index:
+        return index[k]
+    for key, nid in index.items():
+        if key and k and (key in k or k in key):
+            return nid
+    return None
+
+
+def drawio_spec(res, v):
+    d = res["views"][v]
+    nodes, edges = [_title(res, v)], []
+    tag = lambda x: " (inferred)" if x.get("inferred") else ""   # noqa: E731
+    if v == "OV-1":
+        actors, ext = d["actors"], d["external_systems"]
+        rows = max(len(actors), len(ext), 1)
+        top = 1.2
+        cy = top + (rows * 1.0 - 0.9) / 2
+        nodes.append(_box("sys", d["system"]["name"], "new", 3.4, cy, 2.2, 0.9, sub="the system" + tag(d["system"])))
+        for i, a in enumerate(actors):
+            nodes.append(_box(f"a{i}", a["name"], "plain", 0.3, top + i * 1.0, 1.9, 0.6, sub="actor" + tag(a)))
+            edges.append({"from": f"a{i}", "to": "sys", "kind": "existing", "label": ""})
+        conn = {}
+        for x in d["connections"]:
+            for e in ext:
+                if norm(e["name"]) in (norm(x["source"]), norm(x["target"])):
+                    conn.setdefault(norm(e["name"]), x["protocol"] if x["protocol"] != NOT_STATED else "")
+        for i, e in enumerate(ext):
+            nodes.append(_box(f"x{i}", e["name"], "external", 6.8, top + i * 1.0, 1.9, 0.6,
+                              sub="external system" + tag(e)))
+            edges.append({"from": "sys", "to": f"x{i}", "kind": "external", "arrow": "both",
+                          "label": conn.get(norm(e["name"]), "")})
+    elif v == "SV-1":
+        comps = d["components"]
+        idx = {}
+        cols = 3
+        rows = max((len(comps) + cols - 1) // cols, 1)
+        zw, zh = cols * 2.4 + 0.3, rows * 1.2 + 0.6
+        nodes.append(_box("zone", d["system"]["name"] + " (system boundary)", "zone", 0.3, 1.0, zw, zh))
+        for i, c in enumerate(comps):
+            r, k = divmod(i, cols)
+            nid = f"c{i}"
+            idx[norm(c["name"])] = nid
+            nodes.append(_box(nid, c["name"], "system", 0.6 + k * 2.4, 1.5 + r * 1.2, 2.0, 0.7,
+                              sub=_short(c.get("technology") or "", 30) + tag(c), parent="zone"))
+        ext_i = 0
+        for j, x in enumerate(d["interfaces"]):
+            ends = []
+            for end in (x["source"], x["target"]):
+                nid = _match(end, idx)
+                if nid is None:
+                    nid = f"x{ext_i}"
+                    idx[norm(end)] = nid
+                    nodes.append(_box(nid, end, "external", 0.6 + zw + 0.6, 1.2 + ext_i * 1.0, 1.9, 0.6,
+                                      sub="outside the boundary"))
+                    ext_i += 1
+                ends.append(nid)
+            lab = " ".join(p for p in (x["protocol"], f"port {x['port']}" if x["port"] != NOT_STATED else "")
+                           if p and p != NOT_STATED)
+            if ends[0] != ends[1]:
+                edges.append({"from": ends[0], "to": ends[1], "kind": "existing",
+                              "label": (lab or "protocol not stated") + tag(x)})
+    elif v == "SV-4":
+        funcs = d["functions"]
+        groups = {}
+        for f in funcs:
+            groups.setdefault(f.get("performer") or "Component not stated", []).append(f)
+        idx = {}
+        x0 = 0.3
+        for gi, (perf, fs) in enumerate(groups.items()):
+            zid = f"z{gi}"
+            nodes.append(_box(zid, perf, "zone", x0, 1.0, 2.6, 0.6 + len(fs) * 0.9))
+            for k, f in enumerate(fs):
+                nid = f"f{len(idx)}"
+                idx[norm(f["name"])] = nid
+                nodes.append(_box(nid, f["name"], "system", x0 + 0.3, 1.45 + k * 0.9, 2.0, 0.65,
+                                  sub="function" + tag(f), parent=zid))
+            x0 += 3.0
+        for x in d["data_flows"]:
+            a, b = _match(x["source"], idx), _match(x["target"], idx)
+            if a and b and a != b:
+                edges.append({"from": a, "to": b, "kind": "existing",
+                              "label": (x["data"] if x["data"] != NOT_STATED else "data not stated") + tag(x)})
+    elif v == "DIV-2":
+        ents = d["entities"]
+        idx = {}
+        cols = 3
+        for i, e in enumerate(ents):
+            r, k = divmod(i, cols)
+            nid = f"e{i}"
+            idx[norm(e["name"])] = nid
+            sub = _short(e.get("attributes") or "attributes not stated", 44) + "\n" + \
+                _short(e["classification"], 44) + tag(e)
+            nodes.append(_box(nid, e["name"], "system", 0.3 + k * 2.9, 1.2 + r * 1.5, 2.4, 1.0, sub=sub))
+        for x in d["relationships"]:
+            a, b = _match(x["source"], idx), _match(x["target"], idx)
+            if a and b and a != b:
+                edges.append({"from": a, "to": b, "kind": "existing", "arrow": "none",
+                              "label": (x["kind"] if x["kind"] != NOT_STATED else "") + tag(x)})
+    if len(nodes) == 1:
+        nodes.append(_box("none", "Nothing stated for this view", "plain", 0.3, 1.2, 3.0, 0.6,
+                          sub="see the Markdown spec"))
+    return {"title": f"{v} {VIEW_TITLES[v]}", "nodes": nodes, "edges": edges}
+
+
+# ---------------------------------------------------------------- writing, drawing, lint
+
+def library_root(arg):
+    return ka.expand(arg) if arg else ka.library_root()
+
+
+def dest_dir(src, project, root_arg):
+    root = library_root(root_arg)
+    if project:
+        p = ka.expand(project)
+        if not p.is_dir():
+            if not root or not (root / "artifacts" / project).is_dir():
+                raise SystemExit(f"kit-viewpoints: no project folder {project} (give a folder, or a project "
+                                 "under <library root>/artifacts/)")
+            p = root / "artifacts" / project
+        return p / "viewpoints"
+    if root:
+        try:
+            rel = src.resolve().relative_to((root / "artifacts").resolve())
+            if len(rel.parts) > 1:
+                return root / "artifacts" / rel.parts[0] / "viewpoints"
+        except ValueError:
+            pass
+    return src.parent / "viewpoints"
+
+
+def lint_rules_set():
+    f = ka.CONTEXT / "diagrams.md"
+    if not f.exists():
+        return False
+    m = re.search(r"\*\*Lint rules:\*\*\s*(.+)", f.read_text(errors="replace"))
+    if not m:
+        return False
+    val = m.group(1).strip()
+    bt = re.search(r"`([^`]+)`", val)
+    val = bt.group(1) if bt else (val.split()[0] if val.split() else "")
+    return bool(val) and not val.lower().startswith(("not", "none", "optional"))
+
+
+def run_lint(files):
+    tool = HERE / "kit-diaglint"
+    if not tool.exists():
+        return None, "skipped: kit-diaglint isn't installed"
+    if not lint_rules_set():
+        return None, "skipped: diagrams.md names no lint rules"
+    r = subprocess.run([sys.executable, str(tool), "--json"] + [str(f) for f in files],
+                       capture_output=True, text=True, timeout=120)
+    try:
+        out = json.loads(r.stdout)
+    except ValueError:
+        return None, f"kit-diaglint couldn't run: {(r.stderr or r.stdout).strip()[:200]}"
+    per = {}
+    for fr in out.get("files", []):
+        n = sum(len(p["findings"]) for p in fr.get("pages", []))
+        per[pathlib.Path(fr.get("file", "")).name] = n
+    summary = (f"kit-diaglint against {out.get('standard') or out.get('rules')}: {out['errors']} error(s), "
+               f"{out['warnings']} warning(s) across {len(files)} file(s)")
+    return {"errors": out["errors"], "warnings": out["warnings"], "per_file": per, "rules": out.get("rules")}, \
+        summary
+
+
+def write_atomic(path, text):
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-viewpoints", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("doc")
+    ap.add_argument("--view", action="append", help="OV-1, SV-1, SV-4, or DIV-2 (default: all four)")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--write", action="store_true")
+    ap.add_argument("--force", action="store_true")
+    ap.add_argument("--project")
+    ap.add_argument("--styles", help="draw.io styles JSON for kit-drawio (default: KIT_DRAWIO_STYLES)")
+    ap.add_argument("--root")
+    a = ap.parse_args(argv)
+    views = VIEWS
+    if a.view:
+        want = [x.strip().upper() for v in a.view for x in v.split(",") if x.strip()]
+        bad = [x for x in want if x not in VIEWS]
+        if bad:
+            print(f"kit-viewpoints: unknown view {', '.join(bad)} (known: {', '.join(VIEWS)})", file=sys.stderr)
+            return 2
+        views = [v for v in VIEWS if v in want]
+    src = ka.expand(a.doc)
+    if not src.is_file():
+        print(f"kit-viewpoints: no such file {src}", file=sys.stderr)
+        return 2
+    if a.styles and not ka.expand(a.styles).is_file():
+        print(f"kit-viewpoints: no styles file {a.styles}", file=sys.stderr)
+        return 2
+    try:
+        res = build(src, views)
+    except SystemExit as e:
+        print(e, file=sys.stderr)
+        return 2
+    if not a.write:
+        if a.json:
+            print(json.dumps(res, indent=2))
+        else:
+            print("\n".join(render_view(res, v) for v in views), end="")
+        return 0
+
+    try:
+        d = dest_dir(src, a.project, a.root)
+    except SystemExit as e:
+        print(e, file=sys.stderr)
+        return 2
+    stem = src.stem
+    plan = {v: {"md": d / f"{stem}-{v.lower()}.md", "spec": d / f"{stem}-{v.lower()}-spec.json",
+                "drawio": d / f"{stem}-{v.lower()}.drawio"} for v in views}
+    clash = [p for f in plan.values() for p in f.values() if p.exists()]
+    if clash and not a.force:
+        print(f"kit-viewpoints: {clash[0]} exists ({len(clash)} file(s) in the way); add --force to replace them",
+              file=sys.stderr)
+        return 2
+    d.mkdir(parents=True, exist_ok=True)
+    drawio = HERE / "kit-drawio"
+    status, built = 0, []
+    res["files"] = {}
+    for v in views:
+        f = plan[v]
+        write_atomic(f["spec"], json.dumps(drawio_spec(res, v), indent=2) + "\n")
+        cmd = [sys.executable, str(drawio), str(f["spec"]), "-o", str(f["drawio"])]
+        if a.styles:
+            cmd += ["--styles", str(ka.expand(a.styles))]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if r.returncode != 0:
+            print(f"kit-viewpoints: kit-drawio couldn't build {f['drawio'].name}: {r.stderr.strip()}",
+                  file=sys.stderr)
+            status = 1
+        else:
+            built.append(f["drawio"])
+        res["files"][v] = {k: str(p) for k, p in f.items()}
+    lint, summary = run_lint(built) if built else (None, "skipped: no draw.io files were built")
+    res["lint"] = {"summary": summary, **(lint or {})}
+    for v in views:
+        f = plan[v]
+        line = summary
+        if lint and f["drawio"].name in lint["per_file"]:
+            line += f"; {lint['per_file'][f['drawio'].name]} finding(s) in this view's file"
+        write_atomic(f["md"], render_view(res, v, {"drawio": f["drawio"].name, "spec": f["spec"].name}, line))
+    if a.json:
+        print(json.dumps(res, indent=2))
+    else:
+        for v in views:
+            for p in plan[v].values():
+                print(f"kit-viewpoints: wrote {p}")
+        print(f"kit-viewpoints: diagram lint {summary}")
+    return status
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -8,6 +8,52 @@ versions follow [semantic versioning](https://semver.org).
 ## [Unreleased]
 
 ### Added
+- `kit-controls`: NIST SP 800-53 Rev 5 (OSCAL 5.2.0), MITRE ATT&CK Enterprise v20.0, and the CTID
+  ATT&CK-to-800-53 mapping as compact data; lookups, search, and suggestions for a threat model. Threat
+  models get ATT&CK and 800-53 columns; red-team notes optional ones. The framework profile lists the
+  CRI Profile v2.x and NIST SP 800-53 Rev 5.
+- `kit-exceptions` (policy exception register with an exceptions monitor), `kit-audit-export
+  --controls/--request/--only` (control evidence packs), `kit-pbc` (audit request tracker); compliance.md
+  fields Exception register, Control map, PBC tracker; templates exception-register, pbc-tracker,
+  control-map.example.json.
+- Guard integrity monitor (`MONITOR_GUARD`); `kit-audit privileges` least-privilege review with a
+  quarterly weekly-review line; `doctor.py --readiness [--json]` as the source of readiness figures.
+- `kit-questions` open-question tracker (question-tracker template); the IA writer, GDS writer, and
+  intake triager use it.
+- Skills `exec-summary` and `requirements-extraction`, installed without overwriting; `kit-templatecheck`
+  template drift check used by the writers and reviewer.
+- Monitors (roadmap F, slice 3): agent drift (shipped vs live vs installed; `kit-alerts drift --diff`),
+  library freshness (published documents missing from the indexes, an inferred cloud-sync stall),
+  and items waiting too long (follow-up drafts in `briefs/followups/`, never sent); dashboard banners
+  and brief lines; keys `MONITOR_DRIFT`, `MONITOR_LIBRARY`, `MONITOR_WAITING`, `MONITOR_TIMEOUT`,
+  `LIBRARY_UNINDEXED_MAX`, `LIBRARY_INDEX_MAX_DAYS`, `LIBRARY_SYNC_MAX_DAYS`, `WAITING_MAX_DAYS`.
+- Run and cost alerts (`run_alerts.py`, `kit-alerts`): failed or overdue scheduled runs, a cost
+  projection over the warning level, spend over the stop level, and daily spikes with no budget each
+  get a queue item, a dashboard banner, and a brief line, cleared on recovery. Keys `RUN_ALERTS`,
+  `RUN_ALERTS_TIMEOUT`, `RUN_FAIL_STREAK`, `RUN_WINDOW_<MODE>`, `COST_ALERT_PROJECTION`,
+  `COST_SPIKE_FACTOR`.
+- `kit-viewpoints` (J4): DoDAF-style OV-1, SV-1, SV-4, and DIV-2 drafts from a GDS, cited, with draw.io
+  output and optional lint; `viewpoints-template.md`; the diagrammer offers it on request.
+- `kit-coverage` (J10): framework coverage per design and across the portfolio, HTML and JSON in
+  `briefs/`, respecting the framework profile.
+- TOGAF-style deliverable templates (J2): architecture vision, statement of architecture work,
+  architecture definition document, architecture requirements specification, transition
+  architecture, implementation and migration plan; on request, named in `writing.md`.
+- `kit-diaglint`: lints draw.io (compressed or not) and Visio diagrams against a JSON rules file
+  (palette, fonts, minimum text size, title block, legend, connectors, line types, shapes, page and
+  view labels); example rules in `templates/diagram-lint-rules.example.json`; optional Lint rules field
+  in `diagrams.md`; the diagrammer lints before reporting and the reviewer lints diagrams beside a
+  document. `kit-diagram-diff` now shares its parser through `shared/kit_diagram.py`.
+- `kit-onepager`: cited one-page executive summary of an IA or GDS (Markdown, JSON, Word);
+  `executive-onepager-template.md`; the deck builder offers it with decks.
+- `kit-decisions`: proposed ADR drafts from architectural decisions in meeting minutes; the meeting
+  scribe flags them and the decision recorder reviews each draft.
+- `kit-stakeholders`: role-only stakeholder maps from the library; the status reporter asks for one
+  and the handoff agent uses it.
+- Connector outage alerts: two failed morning checks in a row (`CONNECTOR_FAIL_STREAK`) add one work
+  item and a dashboard banner; recovery clears them.
+- Monthly regulatory watch (`REG_WATCH`, off by default): first-Monday researcher brief on the regimes
+  in `compliance.md`, public sources only, saved in the library.
 - red-team agent (roadmap G1): adversarial architecture critic before peer review, with
   `red-team-review-template.md`; threat-modeler agent (G2): STRIDE threat model per data flow,
   feeding the risk and compliance mapper and implementation planner, with
@@ -131,6 +177,15 @@ versions follow [semantic versioning](https://semver.org).
   behaviour is unchanged (checked against a frozen copy of the old code).
 
 ### Changed
+- `kit-drawio` uses the team style file (`memory/context/drawio-styles.json`) by default when present.
+- `kit-sysprofile` fills the optional FEAF reference models row from catalog tags or the curator's
+  system page.
+- Red team and threat modeler, after their first real run: retrospective mode for published
+  documents, figures read as images, shared high-availability and IA-drift checks, a rule for missing
+  RTO and RPO, a follow-on designs section; controls named only by reference count as "inherited,
+  unverified", fix owners for other teams' systems, and a conflicts-and-defects section.
+- The PostgreSQL SQL transport (psycopg) is now tested against PostgreSQL 17.0: `kit-team db-init` and
+  the live test passed. SQL Server stays untested.
 - `kit-lifecycle` flags versions past standard support but inside paid extended support as
   `extended` (urgency from the extended end) instead of `past`; `counts` gains `extended`, other
   keys unchanged. `kit-roadmap` includes them (year 1 when the extended end is within 12 months).
@@ -152,6 +207,9 @@ versions follow [semantic versioning](https://semver.org).
   `--allow-plain` (or encryption).
 
 ### Fixed
+- `kit-coverage` read the CRI Profile row as NIST CSF; its CSF pattern is anchored now.
+- kit-reliability now reads Windows (run.ps1) log timestamps; the to-do sync records clean runs in
+  `sync.ok`, so a quiet working sync isn't mistaken for a stalled one.
 - `kit-connect --read` reported a working connector as failed: the gateway reads its setup before the
   call and hit the 3-turn limit. Turns raised to 10, and the connector guard's audit log now decides.
 - MySQL sharing: readers kept a stale snapshot (REPEATABLE READ) and missed other Kits' newer

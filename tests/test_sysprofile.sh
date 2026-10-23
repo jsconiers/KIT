@@ -51,5 +51,22 @@ python3 "$TOOL" "Ledger Core" --write --project payments >/dev/null && [ -f "$L/
 python3 "$TOOL" "Ledger Core" --write --project payments >/dev/null 2>&1 && bad "overwrote without --force" || ok "refuses to overwrite without --force"
 python3 "$TOOL" "Ledger Core" --write --project payments --force >/dev/null && ok "--force replaces" || bad "force"
 
+# FEAF reference models row
+has "FEAF row blank when untagged" "| FEAF reference models | (optional) |" "$(python3 "$TOOL" "Ledger Core")"
+printf '| LIB-0002 | Ledger Core data design | note [FEAF: Data, Application] |\n| LIB-0003 | Cache Tier | [FEAF: Infrastructure] |\n' >> "$L/CATALOG.md"
+out="$(python3 "$TOOL" "Ledger Core")"
+has "FEAF from catalog tag, cited" "| FEAF reference models | Data, Application \[CATALOG.md:4\] |" "$out"
+hasnot "other system's FEAF tag ignored" "FEAF reference models | .*Infrastructure" "$out"
+python3 "$TOOL" "Ledger Core" --json | python3 -c "import json,sys; d=json.load(sys.stdin)['feaf']; assert d['models']==['Data','Application'] and not d['inferred'], d" && ok "FEAF in json" || bad "FEAF in json"
+mkdir -p "$L/knowledge/systems"
+printf '# Cache Tier\n\n- **FEAF reference models:** Infrastructure, Security (inferred)\n' > "$L/knowledge/systems/cache-tier.md"
+printf '| LIB-0003 | Cache Tier | no tag |\n' > "$L/CATALOG.md"
+out="$(python3 "$TOOL" "Cache Tier")"
+has "FEAF from curator page marked inferred" "| FEAF reference models | Infrastructure, Security (inferred) \[knowledge/systems/cache-tier.md:3\] |" "$out"
+printf '# Cache Tier\n\n| FEAF reference models | Infrastructure |\n' > "$L/knowledge/systems/cache-tier.md"
+out="$(python3 "$TOOL" "Cache Tier")"
+has "FEAF from curator page, not inferred" "| FEAF reference models | Infrastructure \[knowledge/systems/cache-tier.md:3\] |" "$out"
+hasnot "explicit curator line not marked inferred" "(inferred)" "$out"
+
 echo "kit-sysprofile tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

@@ -1,0 +1,599 @@
+#!/usr/bin/env python3
+"""kit-onepager: a one-page executive summary of an impact assessment (IA) or design spec (GDS).
+
+  kit-onepager DOC                       print the one-pager as Markdown (nothing is written)
+  kit-onepager DOC --json                the findings as JSON
+  kit-onepager DOC --write [--force]     save <doc>-onepager.md next to the source
+  kit-onepager DOC --write --project P   save it in P/onepager/ instead (P is a folder, or a
+                                         project name under <library root>/artifacts/)
+  kit-onepager DOC --docx [--force]      also render a one-page Word file, <doc>-onepager.docx,
+                                         in the same place (works with or without --write)
+  kit-onepager DOC --root DIR            use a library root other than the one in library.md
+
+DOC is Markdown or text, a .docx (read straight from the file, so Word isn't needed), or a PDF
+(through pdftotext, when it's installed). It finds, by section heading and by labelled fields
+("Business driver: ...", or a two-column "| Field | Value |" table): what and why (purpose and
+business driver), scope, the decision or ask, key design choices, cost or ROM if stated, the top
+three risks (by rating when the risk table has one), dates and gates, status, and open questions.
+Every line is cited to the section it came from, as [§3.1 Scope]. Where the document says nothing,
+the line reads "not stated"; it never fills a gap. The Word file carries the document's
+classification (for example CONFIDENTIAL) in its header when the document states one. Read-only
+unless --write or --docx; it never overwrites without --force, and never calls an outside service.
+The layout follows templates/executive-onepager-template.md.
+"""
+import argparse
+import datetime as dt
+import json
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+import xml.etree.ElementTree as ET
+import zipfile
+from xml.sax.saxutils import escape
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import kit_arch as ka  # noqa: E402
+
+W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+MAX_DOCX_XML = 50 * 1024 * 1024
+CLIP = 220
+FRONT = "(front matter)"
+NOT_STATED = "not stated"
+
+# key, title, heading keywords (first match wins, in this order), labelled-field names, max lines
+FIELDS = [
+    ("what_why", "What and why",
+     ["business driver", "purpose", "problem statement", "business need", "justification", "objective",
+      "executive summary", "background", "introduction", "summary", "overview"],
+     ["business driver", "purpose", "objective"], 2),
+    ("scope", "Scope", ["scope"], ["scope", "in scope"], 2),
+    ("ask", "The decision or ask",
+     ["decision required", "decision requested", "decisions required", "the ask", "ask", "approval requested",
+      "recommendation"],
+     ["decision required", "decision requested", "ask", "approval requested", "recommendation"], 2),
+    ("design", "Key design choices",
+     ["key design", "design decision", "design choice", "proposed solution", "solution overview",
+      "recommended option", "solution design", "architecture overview", "target architecture",
+      "proposed design", "solution", "architecture", "design"],
+     ["key design choices", "proposed solution"], 4),
+    ("cost", "Cost (ROM)",
+     ["rom", "rough order", "cost", "budget", "estimate", "financial", "funding"],
+     ["rom", "cost", "estimated cost", "budget", "rough order of magnitude"], 2),
+    ("risks", "Top risks", ["risk"], [], 3),
+    ("dates", "Dates and gates",
+     ["key dates", "milestone", "timeline", "schedule", "gates", "dates", "phases", "implementation plan",
+      "roadmap"],
+     ["target date", "go-live", "go live", "target go-live"], 5),
+    ("status", "Status", ["current status", "document status", "status"],
+     ["status", "document status"], 2),
+    ("open", "Open questions",
+     ["open question", "open issue", "open item", "outstanding item", "outstanding question",
+      "outstanding", "questions", "issues"],
+     [], 4),
+]
+META = {"title": ["title", "document title"], "project": ["project", "project name"],
+        "number": ["document number", "document no", "doc number", "document id"],
+        "version": ["version"], "demand": ["demand", "demand number", "ticket"],
+        "classification": ["classification", "data classification", "document classification"]}
+
+HEAD_MD = re.compile(r"^\s*(#{1,6})\s+(.*?)\s*#*\s*$")
+HEAD_NUM = re.compile(r"^\s*(\d+(?:\.\d+){0,3})\.?\s+([A-Z][^.:;|]{1,70})$")
+HEAD_BOLD = re.compile(r"^\s*\*\*([^*]{2,70})\*\*:?\s*$")
+SEP = re.compile(r"^\s*\|[\s:|-]+\|\s*$")
+BULLET = re.compile(r"^\s*(?:[-*+•]|\d+[.)]|[a-z][.)])\s+")
+KV = re.compile(r"^\s*[-*]?\s*\*{0,2}([A-Za-z][A-Za-z /()-]{1,40}?)\*{0,2}\s*:\s*\*{0,2}\s*(.+)$")
+DATE = re.compile(r"\b(\d{1,2}[- ](Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[- ]\d{4}|"
+                  r"\d{4}-\d{2}-\d{2}|(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]* \d{4}|"
+                  r"Q[1-4] ?\d{4})\b", re.I)
+MONEY = re.compile(r"([$£€]\s?\d|\b\d[\d,.]*\s?(k|m|bn)?\s?(USD|GBP|EUR)\b|\bROM\b)", re.I)
+RANK = {"critical": 4, "very high": 4, "high": 3, "significant": 3, "medium": 2, "moderate": 2,
+        "med": 2, "low": 1, "very low": 0}
+
+
+# ---------- reading ----------
+
+def docx_lines(path):
+    """Text of a .docx, one paragraph per line: headings as '#' lines, tables as '|' rows."""
+    with zipfile.ZipFile(path) as z:
+        info = z.getinfo("word/document.xml")
+        if info.file_size > MAX_DOCX_XML:
+            raise ValueError("document.xml is too large to read")
+        root = ET.fromstring(z.read(info))
+    body = root.find(f"{W}body")
+    out = []
+
+    def ptext(p):
+        parts = []
+        for el in p.iter():
+            if el.tag == f"{W}t" and el.text:
+                parts.append(el.text)
+            elif el.tag in (f"{W}tab", f"{W}br"):
+                parts.append(" ")
+        return re.sub(r"\s+", " ", "".join(parts)).strip()
+
+    for el in (body if body is not None else []):
+        if el.tag == f"{W}p":
+            text = ptext(el)
+            if not text:
+                continue
+            style = el.find(f"{W}pPr/{W}pStyle")
+            val = style.get(f"{W}val", "") if style is not None else ""
+            m = re.search(r"heading\s*(\d)", val, re.I)
+            if m:
+                text = "#" * min(int(m.group(1)), 6) + " " + text
+            elif val.lower() == "title":
+                text = "# " + text
+            elif re.search(r"list", val, re.I):
+                text = "- " + text
+            out.append(text)
+        elif el.tag == f"{W}tbl":
+            out.append("")
+            for i, tr in enumerate(el.iter(f"{W}tr")):
+                cells = [" ".join(t for t in (ptext(p) for p in tc.iter(f"{W}p")) if t).replace("|", "/")
+                         for tc in tr.findall(f"{W}tc")]
+                out.append("| " + " | ".join(cells) + " |")
+                if i == 0:
+                    out.append("|" + "---|" * len(cells))
+            out.append("")
+    return out
+
+
+def pdf_lines(path):
+    exe = shutil.which("pdftotext")
+    if not exe:
+        sys.exit("kit-onepager: pdftotext isn't installed, so PDFs can't be read; "
+                 "use the .docx or Markdown version of the document")
+    r = subprocess.run([exe, "-enc", "UTF-8", str(path), "-"], capture_output=True, text=True, timeout=120)
+    if r.returncode != 0:
+        sys.exit(f"kit-onepager: pdftotext couldn't read {path}")
+    return [l.replace("\f", "") for l in r.stdout.splitlines()]
+
+
+def read_doc(path):
+    suf = path.suffix.lower()
+    if suf == ".docx":
+        try:
+            return docx_lines(path)
+        except (zipfile.BadZipFile, KeyError, ET.ParseError, ValueError) as e:
+            sys.exit(f"kit-onepager: can't read {path} as a Word file ({e})")
+    if suf == ".pdf":
+        return pdf_lines(path)
+    return ka.read_lines(path, limit=20 * 1024 * 1024)
+
+
+# ---------- structure ----------
+
+def clean(s, n=CLIP):
+    s = re.sub(r"\s+", " ", re.sub(r"[*`]|\[(?:x| )\]", "", s or "")).strip().strip("|").strip()
+    return s if len(s) <= n else s[:n - 3].rstrip() + "..."
+
+
+class Section:
+    def __init__(self, label, level, start):
+        self.label, self.level, self.start, self.lines = label, level, start, []
+
+    @property
+    def key(self):
+        return re.sub(r"^[\d.\s]+", "", self.label).lower().strip(" :")
+
+
+def sections(lines, plain):
+    out = [Section(FRONT, 0, 0)]
+    for i, line in enumerate(lines):
+        m = HEAD_MD.match(line)
+        level = label = None
+        if m:
+            level, label = len(m.group(1)), m.group(2)
+        elif HEAD_BOLD.match(line) and not KV.match(line.replace("**", "")):
+            level, label = 6, HEAD_BOLD.match(line).group(1)
+        elif plain and HEAD_NUM.match(line):
+            g = HEAD_NUM.match(line)
+            level, label = g.group(1).count(".") + 1, f"{g.group(1)} {g.group(2).strip()}"
+        if label is not None:
+            out.append(Section(clean(re.sub(r"[*_`]", "", label), 90), level, i))
+        else:
+            out[-1].lines.append(line)
+    return out
+
+
+def with_children(secs, idx):
+    """The section's own lines plus those of the subsections under it."""
+    s = secs[idx]
+    lines = list(s.lines)
+    for t in secs[idx + 1:]:
+        if t.level <= s.level:
+            break
+        lines += [f"## {t.label}"] + t.lines
+    return lines
+
+
+def tables(lines):
+    """Markdown tables as lists of rows (cell lists); the first row is the header."""
+    out, cur = [], None
+    for line in lines + [""]:
+        s = line.strip()
+        if s.startswith("|"):
+            if SEP.match(s):
+                continue
+            cells = [clean(c, 400) for c in s.strip("|").split("|")]
+            if cur is None:
+                cur = []
+                out.append(cur)
+            cur.append(cells)
+        else:
+            cur = None
+    return out
+
+
+def kv_pairs(secs):
+    """Labelled fields: (label-lower, value, section label), from 2-column tables and 'Label: value'."""
+    out = []
+    for s in secs:
+        for t in tables(s.lines):
+            rows = t if len(t[0]) == 2 else []
+            for r in rows:
+                if len(r) == 2 and r[1] and not r[1].startswith("<"):
+                    out.append((r[0].lower().strip(" :"), r[1], s.label))
+        for line in s.lines:
+            if line.strip().startswith("|"):
+                continue
+            m = KV.match(line)
+            if m and len(m.group(2).strip()) > 1:
+                out.append((m.group(1).lower().strip(), clean(m.group(2)), s.label))
+    return out
+
+
+def kv_get(pairs, names):
+    for n in names:
+        for k, v, where in pairs:
+            if k == n:
+                return v, where
+    return None
+
+
+def items(lines, limit):
+    """Readable lines from a section: bullets, table rows, or sentences, in order."""
+    out, para = [], []
+
+    def flush():
+        if para:
+            text = " ".join(para)
+            for sent in re.split(r"(?<=[.!?])\s+(?=[A-Z0-9])", text):
+                if clean(sent):
+                    out.append(clean(sent))
+            para.clear()
+
+    head = None
+    for line in lines:
+        s = line.strip()
+        if not s or HEAD_MD.match(s):
+            flush()
+            head = None
+            continue
+        if s.startswith("|"):
+            flush()
+            if SEP.match(s):
+                continue
+            cells = [clean(c, 400) for c in s.strip("|").split("|")]
+            if head is None:
+                head = cells
+                continue
+            pairs = [c for c in cells if c and c not in ("-", "n/a")]
+            if pairs:
+                out.append(clean("; ".join(pairs)))
+            continue
+        head = None
+        if BULLET.match(s):
+            flush()
+            out.append(clean(BULLET.sub("", s)))
+        else:
+            para.append(s)
+    flush()
+    return [o for o in out if o and not o.startswith("<")][:limit]
+
+
+def title_index(secs):
+    """Index of the heading that is the document's title, not a section, or None."""
+    if len(secs) < 2 or secs[1].level != 1:
+        return None
+    ones = [s for s in secs[1:] if s.level == 1]
+    lab = secs[1].label
+    if len(ones) == 1 or re.search(r"impact assessment|design spec|(?<![a-z])(gds|ia)(?![a-z])", lab, re.I):
+        return 1
+    if not re.match(r"\d", lab) and all(re.match(r"\d", s.label) for s in ones[1:]):
+        return 1
+    return None
+
+
+def find_section(secs, words, used):
+    """The first section (after the document's title) whose heading has one of the words."""
+    title = title_index(secs)
+    for w in words:
+        rx = re.compile(r"(?<![a-z])" + re.escape(w) + r"(?:s|es)?(?![a-z])")
+        for i, s in enumerate(secs):
+            if i and i != title and i not in used and rx.search(s.key):
+                if items(with_children(secs, i), 1):
+                    return i
+    return None
+
+
+def top_risks(lines, limit):
+    """Up to `limit` risks, highest rating first when the table has a rating column."""
+    for t in tables(lines):
+        if len(t) < 2:
+            continue
+        head = [h.lower() for h in t[0]]
+        rcol = next((i for i, h in enumerate(head) if re.search(r"rating|severity|score|level|priority|rag", h)),
+                    None)
+        if rcol is None:
+            rcol = next((i for i, h in enumerate(head) if re.search(r"impact", h)), None)
+        rows = []
+        for n, r in enumerate(t[1:]):
+            r = r + [""] * (len(head) - len(r))
+            val = (r[rcol] if rcol is not None else "").lower()
+            rank = next((v for k, v in sorted(RANK.items(), key=lambda kv: -len(kv[0])) if k in val), None)
+            if rank is None:
+                num = re.search(r"\d+(\.\d+)?", val)
+                rank = float(num.group()) if num else -1
+            cells = [f"{t[0][i]}: {c}" if i == rcol or re.search(r"mitigat|response|owner", head[i]) else c
+                     for i, c in enumerate(r)
+                     if c and c not in ("-", "n/a") and not re.fullmatch(r"(R|RSK|RISK)-?\d+", c, re.I)]
+            rows.append((-rank, n, clean("; ".join(cells))))
+        if rows:
+            return [r[2] for r in sorted(rows)[:limit]]
+    return items(lines, limit)
+
+
+def fallback_lines(secs, rx, words, limit):
+    out = []
+    for s in secs:
+        for line in s.lines:
+            if rx.search(line) and re.search(words, line, re.I) and not SEP.match(line.strip()):
+                out.append((clean(BULLET.sub("", line.strip())), s.label))
+                if len(out) >= limit:
+                    return out
+    return out
+
+
+# ---------- building ----------
+
+def doc_kind(path, title):
+    t = f"{path.stem} {title}".lower()
+    if re.search(r"impact[- ]assessment|(?<![a-z])ia(?![a-z])", t):
+        return "IA"
+    if re.search(r"design spec|(?<![a-z])gds(?![a-z])", t):
+        return "GDS"
+    return "document"
+
+
+def build(path):
+    lines = read_doc(path)
+    plain = path.suffix.lower() not in (".md", ".markdown", ".docx")
+    secs = sections(lines, plain)
+    pairs = kv_pairs(secs)
+    meta = {}
+    for k, names in META.items():
+        hit = kv_get(pairs, names)
+        meta[k] = {"value": hit[0], "section": hit[1]} if hit else None
+    ti = title_index(secs)
+    if not meta["title"] and ti:
+        meta["title"] = {"value": secs[ti].label, "section": secs[ti].label}
+    title = meta["title"]["value"] if meta["title"] else path.stem
+    fields, used = {}, set()
+    for key, label, words, kvs, limit in FIELDS:
+        got = []
+        idx = find_section(secs, words, used)
+        if idx is not None:
+            used.add(idx)
+            body = with_children(secs, idx)
+            texts = top_risks(body, limit) if key == "risks" else items(body, limit)
+            got = [(t, secs[idx].label) for t in texts]
+        hit = kv_get(pairs, kvs) if kvs and not got else None
+        if hit:
+            got.append((clean(hit[0]), hit[1]))
+        if not got and key == "cost":
+            got = fallback_lines(secs, MONEY, r"cost|rom|budget|estimate|capex|opex", limit)
+        if not got and key == "dates":
+            got = fallback_lines(secs, DATE, r"go[- ]live|milestone|gate|review|cutover|target|deliver|due",
+                                 limit)
+        fields[key] = {"label": label, "stated": bool(got),
+                       "items": [{"text": t, "section": s} for t, s in got[:limit]]}
+    return {"source": str(path), "kind": doc_kind(path, title), "title": title,
+            "meta": meta, "fields": fields,
+            "generated": dt.date.today().strftime("%d-%b-%Y")}
+
+
+def cite(section):
+    return f"[§{section}]"
+
+
+def mv(res, k):
+    m = res["meta"].get(k)
+    return f"{m['value']} {cite(m['section'])}" if m else NOT_STATED
+
+
+def render(res):
+    src = pathlib.Path(res["source"]).name
+    ver = res["meta"]["version"]
+    num = res["meta"]["number"]
+    srcdoc = f"{res['kind']}: {src}" + (f", {num['value']}" if num else "") + (f", version {ver['value']}" if ver else "")
+    out = [f"# Executive one-pager: {res['title']}", "",
+           "| Field | Value |", "|---|---|",
+           f"| Project | {mv(res, 'project')} |",
+           f"| Source document | {srcdoc} |",
+           f"| Demand | {mv(res, 'demand')} |",
+           "| Prepared by | kit-onepager, for the architect to check |",
+           f"| Updated | {res['generated']} |",
+           f"| Classification | {mv(res, 'classification')} |", ""]
+    for key, *_ in FIELDS:
+        f = res["fields"][key]
+        out += [f"## {f['label']}", ""]
+        if not f["stated"]:
+            out.append(f"- {NOT_STATED.capitalize()} in the document.")
+        for it in f["items"]:
+            out.append(f"- {it['text']} {cite(it['section'])}")
+        out.append("")
+    out.append("Every line is taken from the cited section of the source document; \"not stated\" means "
+               "the document doesn't say. Check it against the document before it goes to leadership.")
+    return "\n".join(out) + "\n"
+
+
+# ---------- Word ----------
+
+def run(text, bold=False, size=None, color=None):
+    rpr = ""
+    if bold or size or color:
+        rpr = "<w:rPr>" + ("<w:b/>" if bold else "") + (f'<w:color w:val="{color}"/>' if color else "") + \
+              (f'<w:sz w:val="{size}"/>' if size else "") + "</w:rPr>"
+    return f'<w:r>{rpr}<w:t xml:space="preserve">{escape(text)}</w:t></w:r>'
+
+
+def para(content, style=None, align=None):
+    ppr = ""
+    if style or align:
+        ppr = "<w:pPr>" + (f'<w:pStyle w:val="{style}"/>' if style else "") + \
+              (f'<w:jc w:val="{align}"/>' if align else "") + "</w:pPr>"
+    return f"<w:p>{ppr}{content}</w:p>"
+
+
+def docx_bytes_parts(res):
+    ns = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" ' \
+         'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
+    body = [para(run(f"Executive one-pager: {res['title']}"), "Title")]
+    m = res["meta"]
+    facts = [f"Source: {res['kind']} {pathlib.Path(res['source']).name}"]
+    if m["version"]:
+        facts.append(f"version {m['version']['value']}")
+    if m["project"]:
+        facts.append(f"project {m['project']['value']}")
+    facts.append(f"updated {res['generated']}")
+    body.append(para(run(", ".join(facts), size=16, color="595959")))
+    for key, *_ in FIELDS:
+        f = res["fields"][key]
+        body.append(para(run(f["label"]), "Heading2"))
+        if not f["stated"]:
+            body.append(para(run("Not stated in the document.", color="595959"), "Bullet"))
+        for it in f["items"]:
+            body.append(para(run("• " + it["text"] + " ") + run(cite(it["section"]), size=14, color="7F7F7F"),
+                             "Bullet"))
+    label = m["classification"]["value"].upper() if m["classification"] else ""
+    hdr_ref = '<w:headerReference w:type="default" r:id="rIdHdr"/>' if label else ""
+    sect = (f'<w:sectPr>{hdr_ref}<w:pgSz w:w="12240" w:h="15840"/>'
+            '<w:pgMar w:top="864" w:right="864" w:bottom="864" w:left="864" w:header="432" w:footer="432" '
+            'w:gutter="0"/></w:sectPr>')
+    document = (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<w:document {ns}><w:body>'
+                + "".join(body) + sect + "</w:body></w:document>")
+    styles = (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<w:styles {ns}>'
+              '<w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:cs="Calibri"/>'
+              '<w:sz w:val="19"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="40" '
+              'w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults>'
+              '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>'
+              '<w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/><w:basedOn w:val="Normal"/>'
+              '<w:pPr><w:spacing w:after="60"/></w:pPr><w:rPr><w:b/><w:sz w:val="30"/></w:rPr></w:style>'
+              '<w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/>'
+              '<w:basedOn w:val="Normal"/><w:pPr><w:keepNext/><w:spacing w:before="100" w:after="20"/>'
+              '<w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b/><w:color w:val="1F3864"/><w:sz w:val="21"/>'
+              '</w:rPr></w:style>'
+              '<w:style w:type="paragraph" w:styleId="Bullet"><w:name w:val="Bullet"/><w:basedOn w:val="Normal"/>'
+              '<w:pPr><w:ind w:left="216" w:hanging="144"/></w:pPr></w:style></w:styles>')
+    header = (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<w:hdr {ns}>'
+              + para(run(label, bold=True, size=18, color="C00000"), align="right") + "</w:hdr>")
+    ct = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+          '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+          '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+          '<Default Extension="xml" ContentType="application/xml"/>'
+          '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.'
+          'wordprocessingml.document.main+xml"/>'
+          '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.'
+          'wordprocessingml.styles+xml"/>'
+          + ('<Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.'
+             'wordprocessingml.header+xml"/>' if label else "")
+          + '</Types>')
+    rels = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/'
+            'officeDocument" Target="word/document.xml"/></Relationships>')
+    drels = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+             '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+             '<Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/'
+             'relationships/styles" Target="styles.xml"/>'
+             + ('<Relationship Id="rIdHdr" Type="http://schemas.openxmlformats.org/officeDocument/2006/'
+                'relationships/header" Target="header1.xml"/>' if label else "")
+             + '</Relationships>')
+    parts = {"[Content_Types].xml": ct, "_rels/.rels": rels, "word/document.xml": document,
+             "word/styles.xml": styles, "word/_rels/document.xml.rels": drels}
+    if label:
+        parts["word/header1.xml"] = header
+    return parts
+
+
+def write_docx(res, dest):
+    tmp = dest.with_name(dest.name + ".tmp")
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, data in docx_bytes_parts(res).items():
+            z.writestr(name, data)
+    tmp.replace(dest)
+
+
+# ---------- main ----------
+
+def dest_dir(src, project, root_arg):
+    if not project:
+        return src.parent
+    p = ka.expand(project)
+    if not p.is_dir():
+        root = ka.expand(root_arg) if root_arg else ka.library_root()
+        if not root or not (root / "artifacts" / project).is_dir():
+            sys.exit(f"kit-onepager: no project folder {project} (give a folder, or a project under "
+                     "<library root>/artifacts/)")
+        p = root / "artifacts" / project
+    return p / "onepager"
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-onepager", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("doc")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--write", action="store_true")
+    ap.add_argument("--docx", action="store_true")
+    ap.add_argument("--project")
+    ap.add_argument("--force", action="store_true")
+    ap.add_argument("--root")
+    a = ap.parse_args(argv)
+    src = ka.expand(a.doc)
+    if not src.is_file():
+        sys.exit(f"kit-onepager: no such file {src}")
+    res = build(src)
+    if a.json:
+        print(json.dumps(res, indent=2))
+    text = render(res)
+    if not (a.write or a.docx):
+        if not a.json:
+            print(text, end="")
+        return 0
+    d = dest_dir(src, a.project, a.root)
+    targets = []
+    if a.write:
+        targets.append(d / f"{src.stem}-onepager.md")
+    if a.docx:
+        targets.append(d / f"{src.stem}-onepager.docx")
+    for t in targets:
+        if t.exists() and not a.force:
+            sys.exit(f"kit-onepager: {t} exists; add --force to replace it")
+    d.mkdir(parents=True, exist_ok=True)
+    for t in targets:
+        if t.suffix == ".md":
+            tmp = t.with_name(t.name + ".tmp")
+            tmp.write_text(text)
+            tmp.replace(t)
+        else:
+            write_docx(res, t)
+        print(f"kit-onepager: wrote {t}", file=sys.stderr if a.json else sys.stdout)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

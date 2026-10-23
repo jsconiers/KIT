@@ -1,0 +1,720 @@
+#!/usr/bin/env python3
+"""kit-questions: a per-project tracker for the open questions in IA and GDS drafts and intake notes.
+
+  kit-questions extract DOC --project P [--owner-default ROLE] [--write]
+                              find the open questions in DOC and merge new ones into P/questions.md
+  kit-questions list --project P [--status S] [--owner ROLE]
+                              the tracker's questions, filtered
+  kit-questions ask [IDS ...] --project P [--owner ROLE] [--due DD-Mmm-YYYY | --due-days N] [--write]
+                              a draft message per owner role for the architect to send; with --write
+                              it saves P/questions-ask-<YYYY-MM-DD>.md and marks the questions asked
+  kit-questions answer ID "TEXT" --source "WHERE" --project P [--goes-to "SECTION"] [--write]
+                              record an answer and where it came from
+  kit-questions status IDS STATE --project P [--write]
+                              set a status by hand (open, asked, answered, closed, superseded)
+  kit-questions apply --project P
+                              per answered question, the IA or GDS section to update in the next draft
+  kit-questions due --project P [--days N]
+                              asked questions past due or due within N days (default 3)
+
+Every command takes --json, and --root DIR for a library root other than the one in library.md.
+P is a folder, or a project name under <library root>/artifacts/. Read-only by default: extract,
+ask, answer, and status print what they would change and write only with --write. ask never sends
+anything; the architect sends the drafts.
+
+What counts as a question: every list item or question-mark paragraph in a section titled "Open
+questions", "Questions", or "Clarifying questions" (a Markdown or Word heading, or a bold line), and
+anywhere else a numbered list item that ends in "?". Markdown, text, and .docx files are read; .docx
+comes straight from the file, so Word isn't needed. The owner role comes from a hint in the item: a
+trailing "(SRE)" or "(Owner: Compliance)", or a leading "SRE:". Otherwise from the section's intro
+line ("For the requester ... unless another owner is named"), then --owner-default, then "requester"
+for clarifying questions, else "unassigned". Questions are matched on normalised text (case,
+punctuation, numbering, owner hints, and [citations] ignored), so a re-run never duplicates a
+question and never touches an answer. "Answer goes to" is a keyword suggestion from the IA or GDS
+headings, marked "(suggested)" for the writer to confirm. It never calls an outside service.
+"""
+import argparse
+import datetime as dt
+import json
+import pathlib
+import re
+import sys
+import xml.etree.ElementTree as ET
+import zipfile
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import kit_arch as ka  # noqa: E402
+
+STATES = ["open", "asked", "answered", "closed", "superseded"]
+COLS = ["Q-ID", "Question", "Source", "Owner role", "Asked", "Due", "Status", "Answer",
+        "Answer source", "Answer goes to"]
+KEYS = ["id", "question", "source", "owner", "asked", "due", "status", "answer", "answer_source", "goes_to"]
+TITLE_RX = re.compile(r"^(?:\d+(?:\.\d+)*\.?\s+)?(open questions|clarifying questions|questions)\b(.*)$", re.I)
+HEAD_RX = re.compile(r"^\s*(#{1,6})\s+(.*?)\s*#*\s*$")
+BOLD_RX = re.compile(r"^\s*(?:\*\*|__)(.+?)(?:\*\*|__)\s*:?\s*$")
+NUM_RX = re.compile(r"^\s*(\d{1,3})[.)]\s+(.*)$")
+BUL_RX = re.compile(r"^\s*[-*+]\s+(?:\[[ xX]\]\s+)?(.*)$")
+SEP_RX = re.compile(r"^\s*\|[\s:|-]+\|\s*$")
+NOT_ROLE = set("""what which who whom whose how where when why is are was were does do did can could should
+would will shall may might has have confirm note please if the a an please""".split())
+NOT_TARGET = re.compile(r"question|assumption|risk|issue|executive summary|sources|references|contents|"
+                        r"revision|document control|approval|sign-?off|glossary|appendix|demand record", re.I)
+W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+MAX_DOCX_XML = 50 * 1024 * 1024
+
+
+def today():
+    return dt.date.today()
+
+
+def fmt(d):
+    return d.strftime("%d-%b-%Y")
+
+
+def parse_date(s):
+    try:
+        return dt.datetime.strptime(s.strip(), "%d-%b-%Y").date()
+    except (ValueError, AttributeError):
+        return None
+
+
+def clean(s):
+    return re.sub(r"\s+", " ", (s or "").replace("|", "/")).strip()
+
+
+# ---------- reading documents ----------
+
+def docx_blocks(path):
+    """('h', level, text), ('p', text, numbered), ('row', cells, is_header) from a .docx."""
+    with zipfile.ZipFile(path) as z:
+        info = z.getinfo("word/document.xml")
+        if info.file_size > MAX_DOCX_XML:
+            raise ValueError("document.xml is too large to read")
+        root = ET.fromstring(z.read(info))
+    body = root.find(f"{W}body")
+
+    def ptext(p):
+        parts = []
+        for el in p.iter():
+            if el.tag == f"{W}t" and el.text:
+                parts.append(el.text)
+            elif el.tag in (f"{W}tab", f"{W}br"):
+                parts.append(" ")
+        return re.sub(r"\s+", " ", "".join(parts)).strip()
+
+    out = []
+    for el in (body if body is not None else []):
+        if el.tag == f"{W}p":
+            text = ptext(el)
+            if not text:
+                continue
+            style = el.find(f"{W}pPr/{W}pStyle")
+            val = style.get(f"{W}val", "") if style is not None else ""
+            m = re.search(r"heading\s*(\d)", val, re.I)
+            if m:
+                out.append(("h", int(m.group(1)), text))
+            elif val.lower() == "title":
+                out.append(("h", 1, text))
+            else:
+                numbered = el.find(f"{W}pPr/{W}numPr") is not None or "list" in val.lower()
+                runs = [r for r in el.iter(f"{W}r") if (r.findtext(f"{W}t") or "").strip()]
+                bold = bool(runs) and all(r.find(f"{W}rPr/{W}b") is not None for r in runs)
+                if bold and TITLE_RX.match(text.rstrip(":")) and len(text) < 80:
+                    out.append(("h", 7, text.rstrip(":")))
+                else:
+                    out.append(("p", text, numbered))
+        elif el.tag == f"{W}tbl":
+            for i, tr in enumerate(el.iter(f"{W}tr")):
+                cells = [" ".join(t for t in (ptext(p) for p in tc.iter(f"{W}p")) if t)
+                         for tc in tr.findall(f"{W}tc")]
+                out.append(("row", cells, i == 0))
+            out.append(("end",))
+    return out
+
+
+def md_blocks(path):
+    out, head = [], None
+    for line in ka.read_lines(path):
+        s = line.strip()
+        if s.startswith("|"):
+            if SEP_RX.match(s):
+                continue
+            cells = [c.strip() for c in s.strip("|").split("|")]
+            out.append(("row", cells, head is None))
+            head = True
+            continue
+        if head:
+            out.append(("end",))
+            head = None
+        if not s:
+            out.append(("blank",))
+            continue
+        m = HEAD_RX.match(line)
+        if m:
+            out.append(("h", len(m.group(1)), re.sub(r"[*_`]", "", m.group(2)).strip()))
+            continue
+        b = BOLD_RX.match(line)
+        if b and TITLE_RX.match(b.group(1).strip().rstrip(":")):
+            out.append(("h", 7, b.group(1).strip().rstrip(":")))
+            continue
+        n, u = NUM_RX.match(line), BUL_RX.match(line)
+        if n:
+            out.append(("item", n.group(2).strip(), True))
+        elif u:
+            out.append(("item", u.group(1).strip(), False))
+        elif line[:1] in (" ", "\t") and out and out[-1][0] == "item":
+            out[-1] = ("item", out[-1][1] + " " + s, out[-1][2])
+        else:
+            out.append(("p", s, False))
+    return out
+
+
+def blocks(path):
+    if path.suffix.lower() == ".docx":
+        res = []
+        for b in docx_blocks(path):
+            if b[0] == "p":
+                m = NUM_RX.match(b[1])
+                if m:
+                    res.append(("item", m.group(2).strip(), True))
+                elif b[2]:
+                    res.append(("item", b[1], True))
+                else:
+                    res.append(b)
+            else:
+                res.append(b)
+        return res
+    return md_blocks(path)
+
+
+# ---------- owners and normalising ----------
+
+def role_like(s):
+    words = s.split()
+    if not 1 <= len(words) <= 4 or any(c.isdigit() for c in s) or "?" in s:
+        return False
+    if words[0].lower() in NOT_ROLE or not (words[0][0].isupper() or words[0].isupper()):
+        return False
+    return all(re.fullmatch(r"[A-Za-z][A-Za-z&/.'-]*", w) for w in words)
+
+
+def split_owner(text):
+    """(question text without the owner hint, owner hint or '')."""
+    t = text.strip()
+    m = re.search(r"[\(\[]\s*owner\s*:\s*([^)\]]+?)\s*[\)\]]", t, re.I)
+    if m:
+        return clean(t[:m.start()] + t[m.end():]), m.group(1).strip()
+    m = re.match(r"^\s*(?:\*\*)?([A-Za-z][A-Za-z &/.'-]{0,40}?)(?:\*\*)?\s*:\s+(\S.*)$", t)
+    if m and len(m.group(1).split()) <= 3 and role_like(m.group(1)):
+        rest = m.group(2)
+        return clean(rest[:1].upper() + rest[1:]), m.group(1).strip()
+    m = re.search(r"\(\s*([^()]{2,40}?)\s*\)\s*([?.]?)\s*$", t)
+    if m and role_like(m.group(1)):
+        return clean(t[:m.start()].rstrip() + (m.group(2) or "")), m.group(1).strip()
+    return clean(t), ""
+
+
+def norm(text):
+    q, _ = split_owner(re.sub(r"^\s*\d{1,3}[.)]\s+", "", text))
+    q = re.sub(r"\[[^\]]*\]", " ", q.lower())
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", q)).strip()
+
+
+def intro_owner(text):
+    m = re.match(r"^\s*(?:questions\s+)?for\s+(?:the\s+)?(.+?)(?:\s+unless\b.*|[.:]\s*$|$)", text, re.I)
+    if not m:
+        return ""
+    first = re.split(r",|\s+and\s+|\s+or\s+", m.group(1))[0].strip()
+    first = re.sub(r"^the\s+", "", first, flags=re.I)
+    return first if 0 < len(first.split()) <= 4 else ""
+
+
+# ---------- extracting ----------
+
+def extract(path, owner_default=None):
+    bl = blocks(path)
+    found, stack = [], []          # stack of (level, title)
+    sect = None                    # dict: level, title, owner, clarifying
+    item_no = 0
+    header = None
+
+    def label():
+        return " > ".join(t for _, t in stack) or "(before the first heading)"
+
+    def add(raw, numbered_item, owner_cell=""):
+        q, hint = split_owner(raw)
+        q = q.strip()
+        if not q or len(norm(q)) < 4:
+            return
+        owner = hint or owner_cell
+        if not owner and sect:
+            owner = sect["owner"] or owner_default or ("requester" if sect["clarifying"] else "")
+        owner = owner or owner_default or "unassigned"
+        found.append({"question": q, "owner": owner, "section": label(),
+                      "item": numbered_item})
+
+    for b in bl:
+        kind = b[0]
+        if kind == "h":
+            level, title = b[1], b[2]
+            while stack and stack[-1][0] >= level:
+                stack.pop()
+            stack.append((level, title))
+            if sect and level <= sect["level"]:
+                sect = None
+            if TITLE_RX.match(title):
+                sect = {"level": level, "title": title, "owner": "",
+                        "clarifying": "clarif" in title.lower()}
+                item_no = 0
+            header = None
+            continue
+        if kind in ("blank", "end"):
+            header = None if kind == "end" else header
+            continue
+        if kind == "row":
+            cells, is_head = b[1], b[2]
+            if is_head:
+                header = [c.lower() for c in cells]
+                continue
+            if not sect:
+                continue
+            qcol = next((i for i, h in enumerate(header or []) if "question" in h), None)
+            ocol = next((i for i, h in enumerate(header or []) if "owner" in h), None)
+            text = cells[qcol] if qcol is not None and qcol < len(cells) else \
+                next((c for c in cells if c.rstrip().endswith("?")), "")
+            if text:
+                item_no += 1
+                add(text, item_no, cells[ocol] if ocol is not None and ocol < len(cells) else "")
+            continue
+        text = b[1]
+        if sect:
+            if kind == "item":
+                item_no += 1
+                add(text, item_no)
+            elif kind == "p":
+                if not sect["owner"] and not split_owner(text)[0].endswith("?") and intro_owner(text):
+                    sect["owner"] = intro_owner(text)
+                elif split_owner(text)[0].endswith("?"):
+                    item_no += 1
+                    add(text, item_no)
+        elif kind == "item" and b[2] and split_owner(text)[0].endswith("?"):
+            add(text, None)
+    return found
+
+
+# ---------- where the answer goes ----------
+
+def doc_kind(path):
+    n = path.name.lower()
+    if re.search(r"(^|[-_ .])(gds|design-spec)", n):
+        return "GDS"
+    if re.search(r"(^|[-_ .])(ia|impact-assessment)([-_ .]|$)", n):
+        return "IA"
+    return ""
+
+
+def latest(folder, kind):
+    best = None
+    for p in folder.glob("*"):
+        if p.suffix.lower() not in (".md", ".docx") or doc_kind(p) != kind or p.name.startswith("~$"):
+            continue
+        m = re.search(r"v(\d+)(?:\.(\d+))?", p.name)
+        key = (int(m.group(1)), int(m.group(2) or 0)) if m else (-1, 0)
+        key += (p.stat().st_mtime,)
+        if best is None or key > best[0]:
+            best = (key, p)
+    return best[1] if best else None
+
+
+def target_sections(path):
+    """[(label, title-terms, body-terms)] for an IA or GDS, skipping question and front-matter sections."""
+    secs, stack, cur = [], [], None
+    for b in blocks(path):
+        if b[0] == "h" and b[1] <= 6:
+            while stack and stack[-1][0] >= b[1]:
+                stack.pop()
+            stack.append((b[1], b[2]))
+            cur = {"label": " > ".join(t for _, t in stack), "title": b[2], "body": []}
+            secs.append(cur)
+        elif cur is not None and b[0] in ("p", "item", "row"):
+            cur["body"].append(" ".join(b[1]) if b[0] == "row" else b[1])
+    out = []
+    for s in secs:
+        if any(NOT_TARGET.search(t) for t in s["label"].split(" > ")):
+            continue
+        out.append((s["label"], set(ka.tokens(s["title"])), set(ka.tokens(" ".join(s["body"])))))
+    return out
+
+
+def suggest(question, kind, sections):
+    if not sections:
+        return f"{kind or 'IA'}: section to be chosen by the writer"
+    qt = set(ka.tokens(question))
+    best, score = None, 0.0
+    for label, tt, bt in sections:
+        s = 3 * len(qt & tt) + len(qt & bt) + 0.1 * label.count(" > ")
+        if s > score:
+            best, score = label, s
+    if best is None or score < 3:
+        return f"{kind or 'IA'}: section to be chosen by the writer"
+    return f"{kind} § {best} (suggested)"
+
+
+# ---------- the tracker file ----------
+
+def project_folder(p, root):
+    f = ka.expand(p)
+    if not f.is_dir() and root:
+        f = root / "artifacts" / p
+    if not f.is_dir():
+        sys.exit(f"kit-questions: no project folder {p} (give a folder, or a project under "
+                 "<library root>/artifacts/)")
+    return f.resolve()
+
+
+def load(folder):
+    path = folder / "questions.md"
+    tr = {"project": folder.name, "sources": [], "rows": [], "path": path, "exists": path.exists()}
+    if not path.exists():
+        return tr
+    in_q = False
+    for line in path.read_text(errors="ignore").splitlines():
+        s = line.strip()
+        if s.startswith("## "):
+            in_q = s[3:].strip().lower() == "questions"
+            continue
+        if s.startswith("| Sources |"):
+            v = s.strip("|").split("|", 1)[1].strip()
+            tr["sources"] = [x.strip() for x in v.split(";") if x.strip() and x.strip() != "none"]
+        if not in_q or not s.startswith("|") or SEP_RX.match(s):
+            continue
+        cells = [c.strip() for c in s.strip("|").split("|")]
+        if cells[0] == "Q-ID" or not re.fullmatch(r"Q-\d+", cells[0]):
+            continue
+        cells += [""] * (len(KEYS) - len(cells))
+        tr["rows"].append(dict(zip(KEYS, cells[:len(KEYS)])))
+    return tr
+
+
+def counts(rows):
+    by_state = {s: sum(1 for r in rows if r["status"] == s) for s in STATES}
+    by_owner = {}
+    for r in rows:
+        by_owner[r["owner"]] = by_owner.get(r["owner"], 0) + 1
+    return by_state, by_owner
+
+
+def render(tr):
+    by_state, by_owner = counts(tr["rows"])
+    out = [f"# Open questions: {tr['project']}", "",
+           "| Field | Value |", "|---|---|",
+           f"| Project | {tr['project']} |",
+           f"| Updated | {fmt(today())}, by kit-questions |",
+           f"| Sources | {'; '.join(tr['sources']) or 'none'} |",
+           "| Classification | internal (raise it if any source is confidential) |", "",
+           "## Summary", "",
+           f"- Questions: {len(tr['rows'])} ("
+           + ", ".join(f"{by_state[s]} {s}" for s in STATES) + ")",
+           "- By owner role: " + (", ".join(f"{k} {v}" for k, v in by_owner.items()) or "none"), "",
+           "## Questions", "",
+           "| " + " | ".join(COLS) + " |", "|" + "---|" * len(COLS)]
+    for r in tr["rows"]:
+        out.append("| " + " | ".join(clean(r.get(k, "")) for k in KEYS) + " |")
+    out += ["",
+            "## How to use this tracker", "",
+            "- `kit-questions extract <draft> --project <project> --write` adds new questions from a "
+            "draft or intake note; it never duplicates a question or touches an answer.",
+            "- `kit-questions ask --project <project> --write` saves draft messages grouped by owner role "
+            "for the architect to send, and marks those questions asked with a due date.",
+            "- `kit-questions answer Q-001 \"...\" --source \"...\" --project <project> --write` records "
+            "an answer; `kit-questions apply --project <project>` lists the sections to update in the next "
+            "draft.",
+            "- \"Answer goes to\" marked (suggested) is a keyword match; the writer confirms or edits it. "
+            "Status is one of open, asked, answered, closed, superseded.", ""]
+    return "\n".join(out)
+
+
+def save(tr):
+    tmp = tr["path"].with_suffix(".tmp")
+    tmp.write_text(render(tr))
+    tmp.replace(tr["path"])
+
+
+def next_id(rows):
+    n = max([int(r["id"][2:]) for r in rows] or [0])
+    return f"Q-{n + 1:03d}"
+
+
+def pick(tr, ids):
+    want = []
+    for x in ids:
+        for part in x.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            m = re.fullmatch(r"(?:Q-?)?(\d+)", part, re.I)
+            if not m:
+                sys.exit(f"kit-questions: {part} is not a question ID (Q-001)")
+            want.append(f"Q-{int(m.group(1)):03d}")
+    rows = {r["id"]: r for r in tr["rows"]}
+    missing = [w for w in want if w not in rows]
+    if missing:
+        sys.exit(f"kit-questions: not in the tracker: {', '.join(missing)}")
+    return [rows[w] for w in want]
+
+
+def done(tr, a, msg, data):
+    if a.json:
+        print(json.dumps(data, indent=2))
+    else:
+        print(msg)
+    if a.write:
+        save(tr)
+        if not a.json:
+            print(f"kit-questions: wrote {tr['path']}")
+    elif not a.json:
+        print("(read-only; add --write to save)")
+    return 0
+
+
+# ---------- commands ----------
+
+def cmd_extract(a, folder, tr):
+    doc = ka.expand(a.doc)
+    if not doc.is_file():
+        sys.exit(f"kit-questions: {doc} not found")
+    try:
+        found = extract(doc, a.owner_default)
+    except (zipfile.BadZipFile, KeyError, ET.ParseError, ValueError) as e:
+        sys.exit(f"kit-questions: couldn't read {doc.name} ({e})")
+    kind = doc_kind(doc)
+    tdoc = doc if kind else latest(folder, "IA")
+    tkind = kind or ("IA" if tdoc else "")
+    sections = target_sections(tdoc) if tdoc else []
+    have = {norm(r["question"]): r for r in tr["rows"]}
+    try:
+        src = str(doc.resolve().relative_to(folder))
+    except ValueError:
+        src = doc.name
+    added, kept = [], []
+    for f in found:
+        k = norm(f["question"])
+        if k in have:
+            kept.append(have[k]["id"])
+            continue
+        where = f"{src} § {f['section']}" + (f", item {f['item']}" if f["item"] else "")
+        row = {"id": next_id(tr["rows"]), "question": f["question"], "source": where, "owner": f["owner"],
+               "asked": "", "due": "", "status": "open", "answer": "", "answer_source": "",
+               "goes_to": suggest(f["question"], tkind, sections)}
+        tr["rows"].append(row)
+        have[k] = row
+        added.append(row)
+    if added:
+        stamp = f"{src} ({fmt(today())})"
+        tr["sources"] = [s for s in tr["sources"] if not s.startswith(src + " (")] + [stamp]
+    _, by_owner = counts(added)
+    msg = [f"kit-questions: {len(found)} questions in {doc.name}; {len(added)} new, "
+           f"{len(kept)} already tracked", "New by owner role: "
+           + (", ".join(f"{k} {v}" for k, v in by_owner.items()) or "none")]
+    msg += [f"  {r['id']} [{r['owner']}] {r['question']}" for r in added]
+    return done(tr, a, "\n".join(msg), {"document": str(doc), "found": len(found), "added": added,
+                                       "already_tracked": kept, "tracker": str(tr["path"])})
+
+
+def cmd_list(a, tr):
+    rows = [r for r in tr["rows"] if (not a.status or r["status"] == a.status)
+            and (not a.owner or r["owner"].lower() == a.owner.lower())]
+    if a.json:
+        print(json.dumps({"tracker": str(tr["path"]), "questions": rows}, indent=2))
+        return 0
+    if not tr["exists"]:
+        print(f"kit-questions: no tracker yet ({tr['path']}); run extract first")
+        return 0
+    by_state, by_owner = counts(rows)
+    print(f"{len(rows)} questions (" + ", ".join(f"{by_state[s]} {s}" for s in STATES) + ")")
+    print("By owner role: " + (", ".join(f"{k} {v}" for k, v in by_owner.items()) or "none"))
+    for r in rows:
+        extra = f" due {r['due']}" if r["due"] else ""
+        print(f"{r['id']} [{r['status']}{extra}] ({r['owner']}) {r['question']}")
+    return 0
+
+
+def cmd_ask(a, folder, tr):
+    rows = pick(tr, a.ids) if a.ids else [r for r in tr["rows"] if r["status"] == "open"]
+    rows = [r for r in rows if r["status"] in ("open", "asked")
+            and (not a.owner or r["owner"].lower() == a.owner.lower())]
+    if not rows:
+        print("kit-questions: nothing to ask (no open questions match)")
+        return 0
+    due = parse_date(a.due) if a.due else today() + dt.timedelta(days=a.due_days)
+    if a.due and not due:
+        sys.exit("kit-questions: --due must be DD-Mmm-YYYY, for example 02-Oct-2026")
+    groups = {}
+    for r in rows:
+        groups.setdefault(r["owner"], []).append(r)
+    out = [f"# Questions to send: {tr['project']}", "",
+           f"Drafted {fmt(today())} by kit-questions from `questions.md`. Drafts only: the architect "
+           "reviews, edits, and sends each message. Nothing has been sent.", "",
+           "| Field | Value |", "|---|---|",
+           f"| Project | {tr['project']} |",
+           f"| Questions | {len(rows)}, for {len(groups)} owner roles |",
+           f"| Reply by | {fmt(due)} |",
+           "| Classification | internal (raise it if any source is confidential) |", ""]
+    for owner, rs in groups.items():
+        out += [f"## To: {owner} ({len(rs)})", "",
+                f"Subject: {tr['project']}: {len(rs)} open question{'s' if len(rs) != 1 else ''} for "
+                f"the impact assessment", "",
+                "Hello,", "",
+                f"While drafting the assessment for {tr['project']} we have the questions below for "
+                f"you. Could you reply by {fmt(due)}? Please quote the question ID in your answer, and say "
+                "if someone else should answer one.", ""]
+        out += [f"{i}. {r['id']}: {r['question']}" for i, r in enumerate(rs, 1)]
+        out += ["", "Thank you.", ""]
+    text = "\n".join(out)
+    dest = folder / f"questions-ask-{today().isoformat()}.md"
+    data = {"draft": str(dest), "due": fmt(due),
+            "groups": {o: [r["id"] for r in rs] for o, rs in groups.items()}}
+    if a.json:
+        data["text"] = text
+        print(json.dumps(data, indent=2))
+    else:
+        print(text)
+    if not a.write:
+        if not a.json:
+            print("(read-only; add --write to save the draft and mark these questions asked)")
+        return 0
+    if dest.exists() and not a.force:
+        sys.exit(f"kit-questions: {dest} exists; add --force to replace it")
+    tmp = dest.with_suffix(".tmp")
+    tmp.write_text(text)
+    tmp.replace(dest)
+    # A draft isn't a question asked: set the due date now, and mark them asked only after sending
+    # (kit-questions status <ids> asked).
+    for r in rows:
+        r["due"] = fmt(due)
+    save(tr)
+    if not a.json:
+        print(f"kit-questions: wrote {dest}\nkit-questions: after sending it, mark them asked: "
+              f"kit-questions status {' '.join(r['id'] for r in rows)} asked --project <project> --write")
+    return 0
+
+
+def cmd_answer(a, tr):
+    (r,) = pick(tr, [a.id])
+    if not a.source.strip():
+        sys.exit("kit-questions: --source must say where the answer came from")
+    r["answer"], r["answer_source"], r["status"] = clean(a.text), clean(a.source), "answered"
+    if a.goes_to:
+        r["goes_to"] = clean(a.goes_to)
+    return done(tr, a, f"{r['id']} answered: {r['answer']} [source: {r['answer_source']}]\n"
+                       f"Goes to: {r['goes_to']}", r)
+
+
+def cmd_status(a, tr):
+    if a.state not in STATES:
+        sys.exit(f"kit-questions: status must be one of {', '.join(STATES)}")
+    rows = pick(tr, a.ids)
+    for r in rows:
+        if a.state == "asked" and not r["asked"]:
+            r["asked"] = fmt(today())
+        r["status"] = a.state
+    return done(tr, a, "\n".join(f"{r['id']} -> {a.state}" for r in rows),
+                {"updated": [r["id"] for r in rows], "status": a.state})
+
+
+def cmd_apply(a, tr):
+    rows = [r for r in tr["rows"] if r["status"] == "answered"]
+    if a.json:
+        print(json.dumps({"tracker": str(tr["path"]), "updates": [
+            {"id": r["id"], "goes_to": r["goes_to"], "question": r["question"], "answer": r["answer"],
+             "answer_source": r["answer_source"], "source": r["source"]} for r in rows]}, indent=2))
+        return 0
+    if not rows:
+        print("kit-questions: no answered questions to apply")
+        return 0
+    print(f"# Answers to work into the next draft: {tr['project']}\n")
+    for r in rows:
+        print(f"- {r['goes_to']}\n  {r['id']}: {r['question']}\n  Answer: {r['answer']} "
+              f"[source: {r['answer_source']}]\n  Asked in: {r['source']}")
+    print("\nAfter the draft carries an answer, close it: kit-questions status <ids> closed --project "
+          f"{tr['project']} --write")
+    return 0
+
+
+def cmd_due(a, tr):
+    limit = today() + dt.timedelta(days=a.days)
+    rows = []
+    for r in tr["rows"]:
+        d = parse_date(r["due"])
+        if r["status"] in ("open", "asked") and d and d <= limit:
+            rows.append(dict(r, overdue=d < today()))
+    if a.json:
+        print(json.dumps({"tracker": str(tr["path"]), "as_of": fmt(today()), "due": rows}, indent=2))
+        return 0
+    if not rows:
+        print(f"kit-questions: nothing due by {fmt(limit)}")
+        return 0
+    for r in sorted(rows, key=lambda x: parse_date(x["due"])):
+        tag = "OVERDUE" if r["overdue"] else "due"
+        print(f"{r['id']} [{tag} {r['due']}] ({r['owner']}) {r['question']}")
+    return 0
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-questions", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--project", required=True)
+    common.add_argument("--root")
+    common.add_argument("--json", action="store_true")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("extract", parents=[common])
+    p.add_argument("doc")
+    p.add_argument("--owner-default", dest="owner_default")
+    p.add_argument("--write", action="store_true")
+    p = sub.add_parser("list", parents=[common])
+    p.add_argument("--status", choices=STATES)
+    p.add_argument("--owner")
+    p = sub.add_parser("ask", parents=[common])
+    p.add_argument("ids", nargs="*")
+    p.add_argument("--owner")
+    p.add_argument("--due")
+    p.add_argument("--due-days", dest="due_days", type=int, default=5)
+    p.add_argument("--write", action="store_true")
+    p.add_argument("--force", action="store_true")
+    p = sub.add_parser("answer", parents=[common])
+    p.add_argument("id")
+    p.add_argument("text")
+    p.add_argument("--source", required=True)
+    p.add_argument("--goes-to", dest="goes_to")
+    p.add_argument("--write", action="store_true")
+    p = sub.add_parser("status", parents=[common])
+    p.add_argument("ids", nargs="+")
+    p.add_argument("state")
+    p.add_argument("--write", action="store_true")
+    sub.add_parser("apply", parents=[common])
+    p = sub.add_parser("due", parents=[common])
+    p.add_argument("--days", type=int, default=3)
+    a = ap.parse_args(argv)
+    root = ka.expand(a.root) if a.root else ka.library_root()
+    folder = project_folder(a.project, root)
+    tr = load(folder)
+    if a.cmd == "extract":
+        return cmd_extract(a, folder, tr)
+    if a.cmd == "list":
+        return cmd_list(a, tr)
+    if not tr["exists"]:
+        sys.exit(f"kit-questions: no tracker yet ({tr['path']}); run extract first")
+    if a.cmd == "ask":
+        return cmd_ask(a, folder, tr)
+    if a.cmd == "answer":
+        return cmd_answer(a, tr)
+    if a.cmd == "status":
+        return cmd_status(a, tr)
+    if a.cmd == "apply":
+        return cmd_apply(a, tr)
+    return cmd_due(a, tr)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

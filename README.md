@@ -2,7 +2,7 @@
 
 Kit is an AI personal assistant that lives in Claude Code, with a staff of specialist subagents. It's
 one agent working for one person. It keeps your to-do list and its own, a one-page status, notes on your work,
-lessons from its own mistakes, and your preferences, and it directs a staff of 30 specialist
+lessons from its own mistakes, and your preferences, and it directs a staff of 32 specialist
 agents (Claude Code subagents) for you.
 
 **Why Kit?** Kit is named after KITT, the AI car in the 1980s TV series *Knight Rider* that helped its
@@ -24,6 +24,30 @@ affiliated with them.)
   reports to you.
 - **Helps with architecture work.** Matches a new demand to published reference architectures,
   profiles a system from the library's records, sizes a workload, and compares diagram versions.
+  Before peer review, the red team attacks a design and the threat modeler runs STRIDE per data flow;
+  `kit-trace` traces each requirement to the design, tests, and change.
+- **Maps designs to frameworks.** A framework profile says which frameworks apply (NIST CSF 2.0,
+  PCI DSS, CIS, CISA Zero Trust and Secure by Design, SOX ITGC); the compliance mapper maps only
+  those, with a CSF 2.0 coverage check (`kit-csf`), a Zero Trust maturity rating, Secure by Design
+  review questions, and a hardening-baseline check.
+- **Watches the connections, runs, cost, and rules.** A connector that fails two mornings running, a
+  scheduled run that fails twice or goes overdue, or a cost projection over the warning level becomes
+  a work item, a dashboard banner, and a brief line, cleared on recovery (`kit-alerts`). Kit also
+  flags agents that drifted from the shipped version, published documents missing from the library
+  indexes, and queue items waiting more than a week (with a follow-up draft, never sent). An optional monthly regulatory watch has the researcher brief you
+  on public changes to the regimes you list.
+- **Turns meetings and designs into records.** Architectural decisions in minutes become proposed
+  ADR drafts (`kit-decisions`); a stakeholder map by role comes from the library
+  (`kit-stakeholders`); any IA or GDS gets a cited one-page executive summary (`kit-onepager`);
+  diagrams are linted against your standard (`kit-diaglint`); a GDS yields DoDAF-style viewpoints
+  (`kit-viewpoints`); `kit-coverage` shows framework coverage across designs. TOGAF-style deliverable
+  templates are there on request.
+- **Supports audits and compliance.** A policy exception register with expiry alerts, evidence packs
+  organised by control, an audit request tracker, and a quarterly least-privilege review of the
+  agents' tools (`kit-audit privileges`). NIST SP 800-53 Rev 5 and MITRE ATT&CK ship as data
+  (`kit-controls`), and threat models and red-team notes cite them.
+- **Watches your estate.** `kit-lifecycle` flags operating systems and products past or near end of
+  support, including those only covered by paid extended support, from a CMDB export.
 - **Prepares your day.** Meeting prep packs, inbox triage suggestions, mail still awaiting a reply,
   1:1 prep, an accomplishments log, and calendar holds as drafts you open and save.
 - **Asks before acting.** Anything that sends, deletes, installs, commits, pushes, changes
@@ -51,9 +75,9 @@ agent meant to reach outside systems; the connector guard keeps its calls read-o
 
 | When | Run | What you get |
 |---|---|---|
-| Weekdays 07:45 | Morning brief | To-dos, calendar, mail needing you, health and audit issues, queue hygiene |
+| Weekdays 07:45 | Morning brief | A connector health line, to-dos, calendar, mail needing you, health and audit issues, queue hygiene |
 | Mon to Thu 09:00 | Work list | What Kit can do on its own today; you approve it in a session |
-| Monday 06:30 | Weekly review | The week, the queue, audit, horizon scan, watch, sprint review, cost, quality, retrospective (first Monday) |
+| Monday 06:30 | Weekly review | The week, the queue, audit, what changed on your demands (optional refresh), horizon scan, watch, sprint review, cost, quality, retrospective (first Monday) |
 | Weekdays 17:30 | End-of-day wrap-up (optional) | What moved, what's due tomorrow, commitments not yet in the queue |
 | Weekdays, every 30 minutes (optional) | Meeting prep | A prep pack per upcoming meeting (a plain script; no Claude run) |
 | Daily 12:30 | Backup | An encrypted, checked archive of Kit's folder and history, in the folder you choose |
@@ -97,6 +121,19 @@ The installer links these into `~/.local/bin` (all in `shared/bin/`):
 | `kit-csf` | Coverage of a NIST CSF 2.0 mapping per Function, with gaps, blanks, and ID checks; `--portfolio` across projects |
 | `kit-sizing` | Rough-order compute, storage, and network sizing, every assumption shown |
 | `kit-diagram-diff` | What changed between two versions of a draw.io or Visio diagram |
+| `kit-diaglint` | Checks draw.io and Visio diagrams against your team's diagramming standard (a JSON rules file): palette, fonts, title block, legend, line types, connectors, shapes, view labels |
+| `kit-onepager` | One-page executive summary of an IA or GDS (Markdown, .docx, or PDF), every line cited, "not stated" where the document is silent; Markdown, JSON, or Word |
+| `kit-decisions` | Drafts proposed ADRs from architectural decisions in meeting minutes, with the classifying rule shown; never accepts anything |
+| `kit-viewpoints` | DoDAF-style viewpoint drafts (OV-1, SV-1, SV-4, DIV-2) from a GDS, every element cited, with a draw.io file per view in the team style |
+| `kit-coverage` | Framework coverage per design and across the portfolio (CSF 2.0, Zero Trust, Secure by Design, standards, threat models, red team, waivers), filtered by your framework profile; HTML and JSON |
+| `kit-controls` | Look up NIST SP 800-53 Rev 5 controls and MITRE ATT&CK techniques and mitigations, search both, and suggest techniques and controls for a threat model (marked "suggested"); offline |
+| `kit-exceptions` | Policy exception register: list, add, and what's expired, expiring, or overdue for review (with a morning alert) |
+| `kit-pbc` | Audit request (PBC) tracker: track auditors' requests, gather an evidence pack per request, draft responses (never sent) |
+| `kit-questions` | Open-question tracker per project: extract questions from drafts and notes, draft messages by owner (never sent), record answers, show where each answer goes |
+| `kit-templatecheck` | Template drift check: sections missing, renamed, reordered, or added, the template version, and leftover placeholder text |
+| `doctor.py --readiness` | Agent readiness (no known limit, limits, blocked) and why, by cause; the source for readiness figures in the docs |
+| `kit-alerts` | Open alerts (runs, cost, connectors, connector-guard integrity, agent drift, library indexes, items waiting too long, policy exceptions); `check` recomputes; `drift --diff <agent>` shows a drifted agent |
+| `kit-stakeholders` | Stakeholder map by role (never names) from the demand register, minutes, status reports, intake notes, and RACI tables |
 | `kit-labcheck` | Flags production or confidential data in lab requests and runbooks; warns when a runbook names no hardening baseline |
 | `kit-lifecycle` | End-of-support early warning from an inventory and sourced dates: past, extended (inside paid extended support), urgent, warning; a data-quality section; `--import` turns a CMDB export into the inventory |
 | `kit-roadmap` | Drafts a 1-to-3-year technology roadmap |
@@ -126,7 +163,7 @@ The installer links these into `~/.local/bin` (all in `shared/bin/`):
 | `kit-pause` | Kill switch: stops scheduled runs and connector calls until `kit-pause resume` |
 | `kit-connect` | Connector check: guard, credential variables by name, Claude Code health |
 | `kit-backup` | Checked archive of Kit's folder and history to a folder you choose (local or shared), encrypted on request; `verify`, `restore` |
-| `kit-audit-export` | A dated evidence pack of Kit's controls for a compliance or security review |
+| `kit-audit-export` | A dated evidence pack of Kit's controls for a compliance or security review; `--controls` organises it by control for an audit request, with gaps listed |
 | `kit-retention` | Retention rules with legal holds; reports, and only moves files with `--yes` |
 | `kit-outlook` | Checks Outlook answers before a run, retrying; never starts it |
 | `kit-degraded` | The morning brief from Kit's files with no model call (budget stop, failed or timed-out run) |
@@ -142,6 +179,12 @@ checks), `kit-publish` (writes this Kit's shareable records), `kit-grammar` (opt
 grammar pass), `kit-drawio` (editable draw.io files), and `vsdx-finish` (Visio title blocks and
 legends).
 
+## Skills
+
+Kit ships two Claude Code skills in `kit/skills/`: `exec-summary` (one-page leadership summaries) and
+`requirements-extraction` (numbered, testable requirements with sources and conflicts). The installer
+copies them into `~/.claude/skills` only where no skill of that name exists, and names any it skips.
+
 ## Safety model
 
 - **Ask first.** The installer adds ask rules to Claude Code's settings for deleting, pushing,
@@ -152,7 +195,8 @@ legends).
   are suggestions that never move, flag, or answer mail.
 - **Read-only connectors.** Agents reach outside systems through MCP servers. The connector guard
   (a Claude Code hook) allows only listed servers and read tools, denies writes, and records every
-  call, result, and failure in an audit log. `kit-audit` reviews the log daily and weekly.
+  call, result, and failure in an audit log. `kit-audit` reviews the log daily and weekly, and flags
+  searches whose filter a system may have silently ignored.
 - **Kill switch.** `kit-pause` stops every scheduled run and every connector call at once.
 - **Information, not instructions.** Text Kit reads in files, mail, web pages, other Kits'
   records, or phone requests is never treated as an order.
@@ -175,7 +219,7 @@ Kit's records with a hash manifest and chain; `kit-team sync` pulls everyone's i
 and the team dashboard renders from it. Records from other Kits are checked and shown as
 information only. An organization profile (`sharing-policy.json`) limits transports, shared roots,
 and classification. A SQL transport shares through a database instead: MySQL is tested (`kit-team db-init` creates the
-database); PostgreSQL and SQL Server are untested.
+database), and so is PostgreSQL; SQL Server is untested.
 `kit-team load` shows each Kit's open demands, IAs, GDSs, and POCs by owner role, with due windows,
 aging, and an overload flag; `kit-team experts <topic>` ranks Kits by the evidence they've shared,
 with record ids cited. Kit content can also be shared as Claude Code plugins through an internal
@@ -241,7 +285,7 @@ yourself." INSTALL.md covers Windows, scheduled runs, connectors, and the rest.
 | [DEPENDENCIES.md](DEPENDENCIES.md) | What each agent and tool needs, and what happens without it |
 | [shared/KIT-RUN.md](shared/KIT-RUN.md) | Running agents outside Claude Code, and its limits |
 | `shared/records/README.md` | Shared record formats and trust rules |
-| `shared/sql/README.md` | The SQL transport (MySQL tested; PostgreSQL and SQL Server untested) |
+| `shared/sql/README.md` | The SQL transport (MySQL and PostgreSQL tested; SQL Server untested) |
 
 ## Privacy
 

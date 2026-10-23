@@ -33,7 +33,7 @@ For installing and configuring, see INSTALL.md; for how the pieces fit, see DESI
 | `kit-backup` | Python 3.8, git | Same code; permissions set on macOS only | No backups; BACKUP_DIR unset means a folder next to Kit, which doesn't survive a lost computer |
 | `kit-retention` | Python 3.8 | Same code | Everything is kept (the default anyway) |
 | `kit-outlook` | `osascript`, `pgrep`, classic Outlook | macOS; reports "skipped" elsewhere | run.sh skips the check; calendar and mail fail the old way |
-| `kit-team` | Python 3.8 (sqlite3 is in the standard library); for Transport sql (MySQL with PyMySQL tested; others UNTESTED), the dialect's driver: psycopg 3, pyodbc (with ODBC Driver 18) or pymssql, PyMySQL or mysql-connector-python | Same code; owner-only permissions on macOS only | No team view; kit-publish still writes records |
+| `kit-team` | Python 3.8 (sqlite3 is in the standard library); for Transport sql (MySQL with PyMySQL and PostgreSQL with psycopg 3 tested; SQL Server UNTESTED), the dialect's driver: psycopg 3, pyodbc (with ODBC Driver 18) or pymssql, PyMySQL or mysql-connector-python | Same code; owner-only permissions on macOS only | No team view; kit-publish still writes records |
 | `kit-precedent` | Python 3.8 | Same code | The precedent finder searches the indexes by hand |
 | `kit-cost` | Python 3.8; Claude Code with `--output-format json` (uses its `modelUsage` for cost by model) | Same code; run.sh guard is macOS (the Windows runner doesn't record cost yet) | No ledger or budget guard; runs go ahead as before |
 | `kit-queue` | Python 3.8 | Same code | No hygiene report; the brief falls back to listing items untouched for seven days |
@@ -53,6 +53,21 @@ For installing and configuring, see INSTALL.md; for how the pieces fit, see DESI
 | `kit-refarch` | Python 3.8; a reference-architecture index in the library | Same code | Match by hand with kit-precedent |
 | `kit-sysprofile` | Python 3.8; the library root | Same code | Assemble profiles by hand |
 | `kit-trace` | Python 3.8; the project's IA (Markdown or .docx), plus its GDS, test plan, and change request when they exist | Same code | Trace requirements by hand in the template |
+| `kit-controls` | Python 3.8; `shared/data/nist-800-53r5.json` (NIST, public domain), `mitre-attack-enterprise.json` (MITRE ATT&CK, MITRE licence and notice), `attack-to-800-53.json` (CTID Mappings Explorer, Apache 2.0) | Same code | Look up controls in the published catalogs by hand |
+| `kit-exceptions` | Python 3.8; compliance.md's Exception register (or the default location) | Same code | Keep the register by hand from the template |
+| `kit-pbc` | Python 3.8; compliance.md's PBC tracker; kit-audit-export for gather | Same code | Track requests by hand from the template |
+| `kit-templatecheck` | Python 3.8; writing.md's Templates line, or --template | Same code | Compare the draft's headings with the template by eye |
+| `kit-alerts` | Python 3.8; kit-reliability and kit-cost data; the monitors read `.install/kit/agents`, `library.md` and the synced published folders (listing only), and `QUEUE.md` | Same code | Check kit-reliability and kit-cost by hand |
+| `kit-coverage` | Python 3.8; the library's artifacts; compliance.md's framework profile | Same code | Read each project's CSF, Zero Trust, standards, and threat-model files by hand |
+| `kit-questions` | Python 3.8; the project's IA or GDS draft or intake note (Markdown or .docx) | Same code | Keep the question tracker template by hand |
+| `kit-csf` | Python 3.8; `shared/data/csf2.json` | Same code | Count the mapping's rows by hand |
+| `kit-decisions` | Python 3.8; meeting minutes with a Decisions section; decisions.md | Same code | The decision recorder drafts ADRs by hand |
+| `kit-diaglint` | Python 3.8; a rules file named in diagrams.md | Same code | Check diagrams against the standard by eye |
+| `kit-onepager` | Python 3.8; pdftotext for PDFs (optional) | Same code; pdftotext optional | Write the one-pager from the template |
+| `kit-settings` | Python 3.8 | Same code | Edit `.install/shared/morning/config` by hand |
+| `kit-stakeholders` | Python 3.8; the demand register, minutes, status reports, intake notes | Same code | Fill the stakeholder map template by hand |
+| `kit-update` | Python 3.8; git; the repo clone | Same code | Rerun the installer from the repo |
+| `kit-viewpoints` | Python 3.8; kit-drawio; pdftotext for PDFs (optional) | Same code | Draw the viewpoints by hand |
 | `kit-sizing` | Python 3.8 | Same code | Size by hand from the template |
 | `kit-diagram-diff` | Python 3.8 | Same code | Compare diagrams by eye |
 | `kit-wins` | Python 3.8 | Same code | Wins collected by hand |

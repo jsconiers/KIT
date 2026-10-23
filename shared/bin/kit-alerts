@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""kit-alerts: Kit's open alerts (failed scheduled runs, cost, agent drift, library freshness, items
+waiting too long, connector outages), and a recompute.
+
+  kit-alerts                 the open alerts, from briefs/alerts.json and briefs/connectors-alerts.json
+  kit-alerts check           recompute the run, cost, and monitor alerts now (adds or clears queue items,
+                             follow-up drafts, and the dashboard banners, as the scheduled runs do), then
+                             show them
+  kit-alerts check --dry-run say what's wrong now without recording or writing anything
+  kit-alerts ... --only runs|cost|drift|library|waiting|guard   just one kind (any monitor run_alerts lists)
+  kit-alerts drift           the open drift alerts (same as --only drift)
+  kit-alerts drift --diff <agent>   a unified diff of the shipped agent against the live one (owner name
+                             filled in, model line aside); changes nothing
+  kit-alerts ... --json      as JSON
+
+The scheduled runs (run.sh, run.ps1) recompute the run and cost alerts at the end of every run with
+shared/morning/run_alerts.py, which has the rules and the config keys (RUN_FAIL_STREAK,
+RUN_WINDOW_<MODE>, COST_ALERT_PROJECTION, COST_SPIKE_FACTOR). The monitors are its modules
+monitor_drift.py, monitor_library.py, monitor_waiting.py, and monitor_guard.py (MONITOR_<KIND>, GUARD_NORESULT_HOURS,
+GUARD_WINDOW_DAYS, MONITOR_TIMEOUT,
+LIBRARY_UNINDEXED_MAX, LIBRARY_INDEX_MAX_DAYS, LIBRARY_SYNC_MAX_DAYS, WAITING_MAX_DAYS). Connector outages come from the
+morning connector check (connector_health.py); kit-alerts only shows them. It reads only Kit's logs,
+ledger, agents, queue, and the library's folder listings and indexes; it never calls a model or a
+connector, and never opens a published document.
+
+To undo: RUN_ALERTS="off" in the config stops the scheduled runs raising them; delete
+briefs/alerts.json to clear what's open (and check off the queue items).
+"""
+import argparse
+import datetime as dt
+import importlib.machinery
+import importlib.util
+import json
+import os
+import pathlib
+import sys
+
+KIT = pathlib.Path(os.path.expanduser(os.environ.get("KIT_DIR", "~/Claude/Agents/kit")))
+HERE = pathlib.Path(__file__).resolve().parent
+RUN_ALERTS = HERE.parent / "morning" / "run_alerts.py"
+
+
+def load_run_alerts():
+    loader = importlib.machinery.SourceFileLoader("run_alerts", str(RUN_ALERTS))
+    spec = importlib.util.spec_from_loader("run_alerts", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def read_json(path):
+    try:
+        data = json.loads(path.read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def connector_lines(alerts):
+    out = []
+    for name, a in sorted(alerts.items()):
+        a = a if isinstance(a, dict) else {}
+        out.append(f"Connector outage: {name} failing since {a.get('since', '?')}, {a.get('streak', '?')} mornings "
+                   f"running" + (f" ({a['reason']})" if a.get("reason") else "") + " (see kit-connect test).")
+    return out
+
+
+def main(argv):
+    if not RUN_ALERTS.exists():
+        sys.exit(f"kit-alerts: {RUN_ALERTS} is missing; rerun the installer")
+    ra = load_run_alerts()
+    ap = argparse.ArgumentParser(prog="kit-alerts", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("cmd", nargs="?", choices=["show", "check", "drift"], default="show")
+    ap.add_argument("--only", choices=["runs", "cost", *ra.MONITORS])
+    ap.add_argument("--diff", metavar="AGENT", help="with drift: diff the shipped agent against the live one")
+    ap.add_argument("--dry-run", action="store_true", help="with check: record nothing")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--now", help=argparse.SUPPRESS)   # tests: pretend it's this YYYY-MM-DDTHH:MM
+    args = ap.parse_args(argv)
+    if args.cmd == "drift":
+        if args.diff:
+            sys.path.insert(0, str(RUN_ALERTS.parent))
+            import monitor_drift  # noqa: E402
+            rc, text = monitor_drift.diff(str(KIT), args.diff, ra.Config(str(KIT)))
+            print(text)
+            return 0 if rc in (0, 1) else 1
+        args.only = "drift"
+    elif args.diff:
+        sys.exit("kit-alerts: --diff goes with drift: kit-alerts drift --diff <agent>")
+    if args.cmd == "check":
+        now = dt.datetime.fromisoformat(args.now) if args.now else dt.datetime.now()
+        state = ra.compute(str(KIT), now, args.only, track=not args.dry_run)
+        lines = ra.preview_lines(state, args.only) if args.dry_run else ra.lines(state, args.only)
+    else:
+        state = read_json(KIT / "briefs" / "alerts.json")
+        state.setdefault("alerts", {})
+        lines = ra.lines(state, args.only)
+    if args.only:
+        kind = ra.kind_of(args.only)
+        state["alerts"] = {k: v for k, v in state.get("alerts", {}).items()
+                           if isinstance(v, dict) and v.get("kind") == kind}
+        conn = {}
+    else:
+        conn = read_json(KIT / "briefs" / "connectors-alerts.json")
+        lines += connector_lines(conn)
+    if args.json:
+        out = {"alerts": state.get("alerts", {}), "connectors": conn, "lines": lines}
+        if args.dry_run:
+            out["preview"] = state.get("preview", {})
+        print(json.dumps(out,
+                         indent=1, sort_keys=True, default=str))
+        return 0
+    if not lines:
+        print("kit-alerts: nothing open" + (" (dry run)" if args.dry_run else "") + ".")
+        return 0
+    print(f"kit-alerts: {len(lines)} open" + (" (dry run; nothing recorded)" if args.dry_run else "") + ":")
+    for ln in lines:
+        print(f"  - {ln}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

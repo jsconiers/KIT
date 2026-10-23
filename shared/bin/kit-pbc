@@ -1,0 +1,280 @@
+#!/usr/bin/env python3
+"""kit-pbc: track auditors' "provided by client" (PBC) requests.
+
+  kit-pbc [list] [--status S] [--audit TEXT] [--json]   every request in the tracker
+  kit-pbc due [--days N] [--json]                       overdue, and due within N days (default 7),
+                                                        for requests not yet provided or closed
+  kit-pbc add --audit A --item TEXT --controls ID,ID --due DATE [--id ID] [--requester ROLE]
+              [--owner ROLE] [--status S] [--evidence E] [--notes N] [--write] [--json]
+  kit-pbc gather ID --from DATE --to DATE [--map MAP] [--zip] [--dry-run]
+  kit-pbc draft ID [--json]
+  ... --tracker FILE                                    use this tracker, not the one compliance.md names
+
+The tracker is a Markdown table in the library: **PBC tracker** in memory/context/compliance.md
+(default compliance/audit-requests/pbc-tracker.md in the library root), started from
+templates/pbc-tracker-template.md. Each request has a folder next to the tracker, named by its ID.
+
+add is read-only by default: it prints the row (ID PBC-0001 and up unless --id gives the auditor's
+own). --write adds it, creating the tracker from the template if there isn't one. Statuses: open,
+gathering, drafted, provided, closed. Text that looks like a credential is refused.
+
+gather runs kit-audit-export --controls for the request's control IDs, with the request ID, into
+<request folder>/evidence-<from>-to-<to>/ (--dry-run prints the command). draft writes
+<request folder>/response-draft-<date>.md for the owner to review: the request, what was gathered
+(from the newest pack's CONTROLS.md), the gaps, and the open points. Kit never sends it and never
+marks a request provided. Neither changes the tracker: update the status and evidence links there.
+Local files only.
+"""
+import argparse
+import datetime as dt
+import json
+import os
+import pathlib
+import subprocess
+import sys
+
+BIN = pathlib.Path(__file__).resolve().parent
+for cand in (BIN.parent, pathlib.Path(os.path.expanduser(os.environ.get("KIT_DIR", "~/Claude/Agents/kit"))) / ".install/shared"):
+    if (cand / "kit_compliance.py").exists():
+        sys.path.insert(0, str(cand))
+        break
+import kit_compliance as kc  # noqa: E402
+
+PROG = "kit-pbc"
+
+
+def die(msg):
+    sys.exit(f"{PROG}: {msg}")
+
+
+def tracker(args):
+    path = kc.pbc_tracker(None, args.tracker)
+    if not path:
+        die("no tracker: set the library root in library.md or an absolute PBC tracker in compliance.md")
+    return path
+
+
+def public(r):
+    return {k: v for k, v in r.items() if not k.startswith("_") and k not in ("status_n", "due_d")}
+
+
+def find(args):
+    path = tracker(args)
+    _, _, recs = kc.load_pbc(path)
+    for r in recs:
+        if r["id"].lower() == args.id.lower():
+            return path, r
+    die(f"no request {args.id} in {path}")
+
+
+def folder(path, r):
+    return path.parent / kc.slug(r["id"], 60).upper()
+
+
+def cmd_list(args):
+    path = tracker(args)
+    _, found, recs = kc.load_pbc(path)
+    if args.status:
+        recs = [r for r in recs if r["status_n"] == args.status.lower()]
+    if args.audit:
+        recs = [r for r in recs if args.audit.lower() in r["audit"].lower()]
+    if args.json:
+        print(json.dumps({"tracker": str(path), "exists": path.exists(), "requests": [public(r) for r in recs]}, indent=2))
+        return 0
+    if not path.exists():
+        print(f"{PROG}: no tracker yet at {path}; `{PROG} add ... --write` starts one from the template")
+        return 0
+    if found is None:
+        die(f"{path} has no table with Request ID and Due date columns")
+    print(f"{PROG}: {len(recs)} request(s) in {path}")
+    for r in recs:
+        print(f"  {r['id']:<10} {r['status'] or '(no status)':<10} due {r['due'] or '-':<12} "
+              f"{', '.join(r['control_ids']) or '-':<14} {r['item'][:60]}")
+    return 0
+
+
+def cmd_due(args):
+    path = tracker(args)
+    _, _, recs = kc.load_pbc(path)
+    on, days = kc.today(), (args.days if args.days is not None else 7)
+    due = kc.pbc_due(recs, on, days)
+
+    def item(r, n, key):
+        return {"id": r["id"], "audit": r["audit"], "item": r["item"], "controls": r["control_ids"],
+                "owner": r["owner"], "status": r["status"], "due": r["due_d"].isoformat(), key: n}
+    if args.json:
+        print(json.dumps({"tracker": str(path), "today": on.isoformat(), "days": days,
+                          "overdue": [item(r, n, "days_overdue") for r, n in due["overdue"]],
+                          "due_soon": [item(r, n, "days_left") for r, n in due["due_soon"]]}, indent=2))
+        return 0
+    if not due["overdue"] and not due["due_soon"]:
+        print(f"{PROG}: nothing due: no open request is overdue or due within {days} days")
+        return 0
+    for r, n in due["overdue"]:
+        print(f"  OVERDUE {n} day(s)  {r['id']}: {r['item'][:60]} (due {kc.fmt(r['due_d'])}, {r['status']}"
+              + (f", owner {r['owner']}" if r["owner"] else "") + ")")
+    for r, n in due["due_soon"]:
+        print(f"  due in {n} day(s)  {r['id']}: {r['item'][:60]} (due {kc.fmt(r['due_d'])}, {r['status']})")
+    return 0
+
+
+def cmd_add(args):
+    path = tracker(args)
+    text, found, recs = kc.load_pbc(path)
+    if path.exists() and found is None:
+        die(f"{path} has no table with Request ID and Due date columns")
+    status = (args.status or "open").lower()
+    if status not in kc.PBC_STATUSES:
+        die(f"status must be one of: {', '.join(kc.PBC_STATUSES)}")
+    due = kc.parse_date(args.due)
+    if not due:
+        die("--due must be DD-Mmm-YYYY or YYYY-MM-DD")
+    rid = (args.id or kc.next_id(recs, "PBC")).strip()
+    if any(r["id"].lower() == rid.lower() for r in recs):
+        die(f"{rid} is already in the tracker")
+    controls = ", ".join(c for c in (x.strip() for x in args.controls.replace(";", ",").split(",")) if c)
+    rec = {"id": rid, "audit": args.audit, "item": args.item, "controls": controls,
+           "requester": args.requester or "", "due": kc.fmt(due), "owner": args.owner or "", "status": status,
+           "evidence": args.evidence or "", "notes": args.notes or ""}
+    hits = kc.cred_hits(" ".join(rec.values()))
+    if hits:
+        die(f"refused: the row has text that looks like a credential ({', '.join(hits)})")
+    if not text:
+        text = kc.template(None, "pbc-tracker-template.md")
+        if not text:
+            die("no tracker and no pbc-tracker-template.md to start one from")
+        found = kc.find_table(text, kc.PBC_MUST)
+    new = kc.append_row(text, found, kc.PBC_COLUMNS, rec)
+    row = new.splitlines()[kc.find_table(new, kc.PBC_MUST)[2] - 1]
+    if args.write:
+        kc.write(path, new)
+    if args.json:
+        print(json.dumps({"tracker": str(path), "written": bool(args.write), "request": rec, "row": row}, indent=2))
+        return 0
+    print(row)
+    print(f"{PROG}: {'added' if args.write else 'read-only; --write adds'} {rid} to {path}")
+    return 0
+
+
+def cmd_gather(args):
+    path, r = find(args)
+    if not r["control_ids"]:
+        die(f"{r['id']} names no control IDs; add them in the tracker's Control IDs column")
+    start, end = kc.parse_date(args.start or ""), kc.parse_date(args.end or "")
+    if not start or not end:
+        die("gather needs --from and --to (the audit period), as DD-Mmm-YYYY or YYYY-MM-DD")
+    out = folder(path, r) / f"evidence-{start}-to-{end}"
+    cmd = [sys.executable, str(BIN / "kit-audit-export"), "--controls"] + ([args.map] if args.map else []) + [
+        "--request", r["id"], "--only", ",".join(r["control_ids"]), "--from", str(start), "--to", str(end),
+        "--out", str(out)] + (["--zip"] if args.zip else [])
+    if args.dry_run:
+        print(" ".join(cmd))
+        return 0
+    if out.exists():
+        die(f"{out} already exists; move it aside or choose another period")
+    res = subprocess.run(cmd, text=True, capture_output=True)
+    sys.stdout.write(res.stdout)
+    sys.stderr.write(res.stderr)
+    if res.returncode == 0:
+        print(f"{PROG}: evidence for {r['id']} in {out}. Update the tracker: status gathering, evidence link {out}")
+    return res.returncode
+
+
+def newest_pack(fold):
+    packs = sorted((p for p in fold.glob("evidence-*") if (p / "controls.json").exists()),
+                   key=lambda p: p.stat().st_mtime)
+    return packs[-1] if packs else None
+
+
+def cmd_draft(args):
+    path, r = find(args)
+    fold = folder(path, r)
+    pack = newest_pack(fold) if fold.is_dir() else None
+    data = json.loads(kc.read(pack / "controls.json")) if pack else None
+    on = kc.today()
+    lines = [f"# Response draft: {r['id']}", "",
+             "Draft for the owner's review. Kit never sends this or marks the request provided; the owner "
+             "checks it, attaches the evidence, and sends it.", "",
+             "| Field | Value |", "|---|---|",
+             f"| Request ID | {r['id']} |", f"| Audit | {r['audit']} |", f"| Requested item | {r['item']} |",
+             f"| Control IDs | {', '.join(r['control_ids']) or 'none named'} |",
+             f"| Requester (role) | {r['requester']} |", f"| Due date | {r['due']} |",
+             f"| Owner (role) | {r['owner']} |", f"| Status in the tracker | {r['status']} |",
+             f"| Classification | <internal or confidential: set before sending> |",
+             f"| Drafted | {kc.fmt(on)} by kit-pbc |", "", "## Response", ""]
+    gaps = []
+    if data:
+        lines += [f"In response to {r['id']}, the evidence for {', '.join(r['control_ids'])} for the period "
+                  f"{data['from']} to {data['to']} is in the attached evidence pack "
+                  f"(`{pack.name}`, with a SHA-256 manifest).", "",
+                  "| Control | Evidence provided | Gaps |", "|---|---|---|"]
+        for c in data["controls"]:
+            ev = "; ".join(f"{e['source']}: {e['count']}" for e in c["evidence"] if e["count"]) or "none"
+            lines.append(f"| {c['id']} {c['name']} | {ev} | {'no evidence in the period' if c['gap'] else 'none'} |")
+            if c["gap"]:
+                gaps.append(f"{c['id']} {c['name']}: no evidence in the period")
+        gaps += [f"{m}: not in the control map" for m in data.get("not_in_map", [])]
+    else:
+        lines += ["<No evidence gathered yet. Run `kit-pbc gather " + r["id"] + " --from <date> --to <date>` "
+                  "and draft again, or describe the evidence here.>"]
+    lines += ["", "## Open points for the owner", ""]
+    lines += [f"- {g}: explain, provide another way, or agree a remediation before sending." for g in gaps]
+    lines += ["- Check that every attached file is in scope for the request and holds nothing confidential "
+              "beyond what was asked for.",
+              "- Confirm the period matches the audit's.",
+              f"- After sending, set the status in the tracker to provided and add the evidence link."]
+    if r["notes"]:
+        lines += ["", "## Notes from the tracker", "", r["notes"]]
+    text = "\n".join(lines) + "\n"
+    hits = kc.cred_hits(text)
+    if hits:
+        die(f"refused: the draft would hold text that looks like a credential ({', '.join(hits)})")
+    out = fold / f"response-draft-{on}.md"
+    n = 2
+    while out.exists():
+        out = fold / f"response-draft-{on}-{n}.md"
+        n += 1
+    kc.write(out, text)
+    if args.json:
+        print(json.dumps({"request": r["id"], "draft": str(out), "pack": str(pack) if pack else None, "gaps": gaps},
+                         indent=2))
+        return 0
+    print(f"{PROG}: response draft for {r['id']} in {out} (never sent; for the owner to review)")
+    for g in gaps:
+        print(f"  gap: {g}")
+    return 0
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog=PROG, description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("command", nargs="?", default="list", choices=("list", "due", "add", "gather", "draft"))
+    ap.add_argument("id", nargs="?")
+    ap.add_argument("--tracker")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--status")
+    ap.add_argument("--audit")
+    ap.add_argument("--days", type=int)
+    for f in ("item", "controls", "due", "requester", "owner", "evidence", "notes", "map"):
+        ap.add_argument(f"--{f}")
+    ap.add_argument("--id", dest="new_id")
+    ap.add_argument("--from", dest="start")
+    ap.add_argument("--to", dest="end")
+    ap.add_argument("--zip", action="store_true")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--write", action="store_true")
+    a = ap.parse_args(argv)
+    if a.command == "add":
+        missing = [f"--{f}" for f in ("audit", "item", "controls", "due") if not getattr(a, f)]
+        if missing:
+            die(f"add needs {', '.join(missing)}")
+        a.id = a.new_id
+        return cmd_add(a)
+    if a.command in ("gather", "draft"):
+        if not a.id:
+            die(f"{a.command} needs a request ID")
+        return cmd_gather(a) if a.command == "gather" else cmd_draft(a)
+    return cmd_due(a) if a.command == "due" else cmd_list(a)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

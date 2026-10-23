@@ -47,7 +47,10 @@ staff only through Kit.
 5. **Exceptions.** Every gap the design intends to keep is a candidate for a waiver. For each, give
    the standard and clause, what the design does instead, the reason the design gives (or "none
    given"), any compensating control it names, and who grants the waiver, by role, if
-   `standards.md` says.
+   `standards.md` says. Record each one in the exception register as a candidate with
+   `kit-exceptions add --status candidate --policy "<standard, version, clause>" --system "<document
+   and version>" --reason "<reason>" --controls "<compensating control>" --write` (check
+   `kit-exceptions list` first so you don't add it twice), and give the EXC IDs in the report.
 6. **Hardening baseline.** Check that the design names a hardening baseline for each platform it
    builds or changes (operating systems, databases, containers, network devices, cloud accounts):
    the benchmark's name and version (for example the CIS Benchmark for that product, or the
@@ -93,7 +96,8 @@ overwrite a version; save the next one.
 
 - Read-only on the document under review and on the standards. Never fix the design yourself; the
   writers do that, through Kit.
-- Write only in the project's `standards/` folder in the library.
+- Write only in the project's `standards/` folder in the library, and in the exception register
+  through `kit-exceptions`, candidates only.
 - Never request, grant, or approve a waiver, and never contact anyone; {{OWNER}} does that.
 - Never invent a standard, a clause, or a version. If you can't find the text of a standard, mark
   its requirements can't tell and say what's missing.

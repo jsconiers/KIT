@@ -1,0 +1,498 @@
+#!/usr/bin/env python3
+"""kit-decisions: draft proposed ADRs from the decisions in meeting minutes.
+
+  kit-decisions                      scan every project's minutes (<library root>/artifacts/*/meetings/)
+  kit-decisions --project SLUG       scan one project's minutes
+  kit-decisions FILE_OR_DIR...       scan these minutes files or folders
+  kit-decisions ... --brief          list the decisions and the verdicts, without the draft text
+  kit-decisions ... --json           the same as JSON, for scripts
+  kit-decisions ... --write          save the drafts, add them to INDEX.md as proposed, log them
+  kit-decisions ... --root DIR       use a library root other than the one in library.md
+
+It reads the Decisions section of each minutes file (a table, or one bullet per decision), sorts
+each decision into architectural or not with simple keyword rules (it prints the rule that fired),
+and drafts an ADR for each architectural one from the ADR template that memory/context/decisions.md
+names, numbered from the decisions folder's INDEX.md (**Next number**, never reused). Read-only by
+default: it prints the drafts and the numbers they would take. --write saves each draft in the
+decisions folder as ADR-<nnnn>-<slug>.md with status proposed, citing the minutes file, its date,
+and the decision row; it never marks anything accepted and never changes an existing ADR. A
+decision already drafted from the same minutes file and row is skipped. Local files only.
+"""
+import argparse
+import json
+import os
+import pathlib
+import re
+import sys
+
+BIN = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(BIN.parent))
+import kit_daily as kd  # noqa: E402
+
+MARK = "kit-decisions: source="
+
+# Architectural signals: (label, pattern). The first matching words are quoted in the reason.
+ARCH = [
+    ("architecture or design", r"architect\w*|re-?architect\w*|designs?|designed"),
+    ("platform or infrastructure", r"platforms?|infrastructure|cloud|on-?prem\w*|hosting|kubernetes|containers?|"
+                                   r"clusters?|databases?|data ?stores?|middleware|message (?:bus|queue|broker)|"
+                                   r"api gateway|landing zone|mainframe|operating system"),
+    ("standard or reference architecture", r"standards?|baselines?|reference architectures?|waivers?|guardrails?"),
+    ("vendor or product choice", r"vendors?|suppliers?|products?|licen[cs]\w*|saas|paas|iaas|build,? (?:vs\.? |or )?buy|"
+                                 r"adopt\w*|select(?:ed)? (?:as|for)|choose|chose|chosen|in favou?r of|"
+                                 r"replac\w*|migrat\w*|retir\w*|decommission\w*|sunset\w*"),
+    ("pattern or integration", r"patterns?|integrations?|interfaces?|event-driven|pub/?sub|microservices?|monolith\w*|"
+                               r"asynchronous|synchronous|streaming|apis?"),
+    ("topology or network", r"topology|networks?|segment\w*|subnets?|vlans?|firewalls?|dmz|load ?balanc\w*|"
+                            r"active[- ](?:active|passive)|multi-?region|regions?|availability zones?|data ?cent(?:er|re)s?"),
+    ("security control", r"security|encrypt\w*|tls|mtls|mfa|authenticat\w*|authori[sz]\w*|sso|saml|oauth\w*|"
+                         r"kerberos|ntlm|pki|certificates?|secrets? management|vault|key management|hsm|"
+                         r"privileged access|iam|identity provider|siem|zero trust"),
+    ("DR or resilience", r"dr|disaster recovery|rto|rpo|dr tier|tier [0-9]|availability|failover|resilien\w*|"
+                         r"backups?|replicat\w*|high availability"),
+    ("data architecture", r"data classification|data retention|schemas?|data models?|master data|data residency"),
+]
+# Signals that a decision is about running the project, not the architecture.
+NOT_ARCH = [
+    ("scheduling or logistics", r"reschedul\w*|postpon\w*|next (?:meeting|session|call|review)|meet again|"
+                                r"calendar|invites?|agenda|move the (?:meeting|review|session|call)"),
+    ("budget, staffing, or funding", r"budgets?|headcount|staffing|resourcing|hire|hiring|funding|purchase order"),
+    ("documentation or communication", r"minutes|circulate|send (?:out|the)|share the|communicat\w*|newsletter|"
+                                       r"update the (?:doc|document|page|wiki|deck)|slides?"),
+    ("process or governance admin", r"timesheets?|status report|raid log|ticket hygiene|naming of the folder"),
+]
+ARCH_RE = [(lab, re.compile(r"\b(?:" + pat + r")\b", re.I)) for lab, pat in ARCH]
+NOT_RE = [(lab, re.compile(r"\b(?:" + pat + r")\b", re.I)) for lab, pat in NOT_ARCH]
+WEAK = {"design", "designs", "designed"}  # on their own these don't beat a logistics signal
+
+
+def classify(text):
+    """(architectural?, reason). The reason names the rule and the words that matched."""
+    hits = []
+    for lab, rx in ARCH_RE:
+        found = sorted({m.group(0).lower() for m in rx.finditer(text)})
+        if found:
+            hits.append((lab, found))
+    neg = []
+    for lab, rx in NOT_RE:
+        found = sorted({m.group(0).lower() for m in rx.finditer(text)})
+        if found:
+            neg.append((lab, found))
+    words = {w for _, f in hits for w in f}
+    if hits and not (neg and words <= WEAK):
+        return True, "mentions " + "; ".join(f"{lab} ({', '.join(f[:3])})" for lab, f in hits)
+    if neg:
+        why = "; ".join(f"{lab} ({', '.join(f[:3])})" for lab, f in neg)
+        if hits:
+            why += "; 'design' alone doesn't outweigh it"
+        return False, why
+    return False, ("no architectural signal (design, architecture, platform, standard, vendor or product "
+                   "choice, pattern, topology, security control, DR tier, data architecture)")
+
+
+# ---------- minutes ----------
+
+def cells(line):
+    s = line.strip()
+    if not s.startswith("|"):
+        return None
+    return [c.strip() for c in s.strip("|").split("|")]
+
+
+def is_sep(cs):
+    return cs is not None and all(re.fullmatch(r":?-{2,}:?", c or "-") or c == "" for c in cs) and any(cs)
+
+
+def placeholder(s):
+    s = s.strip()
+    return not s or s.startswith("<") or s.lower() in ("none", "n/a", "-", "none recorded", "no decisions")
+
+
+TAG = re.compile(r"\[(PM|Architect|Transcript)\]", re.I)
+
+
+def section(lines, rx):
+    """The lines under the first heading matching rx, up to the next heading of the same or higher level."""
+    for i, ln in enumerate(lines):
+        m = re.match(r"^(#{1,6})\s+(.*)$", ln)
+        if m and rx.search(m.group(2)):
+            lvl = len(m.group(1))
+            out = []
+            for nxt in lines[i + 1:]:
+                h = re.match(r"^(#{1,6})\s", nxt)
+                if h and len(h.group(1)) <= lvl:
+                    break
+                out.append(nxt)
+            return out
+    return []
+
+
+def decisions_in(text):
+    lines = text.splitlines()
+    body = section(lines, re.compile(r"^(?:key\s+)?decisions?\b", re.I))
+    out = []
+    header = None
+    for ln in body:
+        cs = cells(ln)
+        if cs is not None:
+            if is_sep(cs):
+                continue
+            if header is None:
+                header = [c.lower() for c in cs]
+                continue
+            row = dict(zip(header, cs + [""] * (len(header) - len(cs))))
+
+            def col(*names):
+                for h in header:
+                    if any(n in h for n in names):
+                        return row.get(h, "")
+                return ""
+            what = col("decision", "what", "summary", "description") or max(cs, key=len)
+            if placeholder(what):
+                continue
+            out.append({"text": what, "by": col("by", "decider", "who", "owner"), "id": col("#", "id", "ref", "no"),
+                        "scope": col("scope"), "source": col("source") or " ".join(TAG.findall(what))})
+            continue
+        m = re.match(r"^\s*(?:[-*]|\d+[.)])\s+(.*)$", ln)
+        if m and not ln.startswith("  " * 2):
+            what = m.group(1).strip()
+            if placeholder(what):
+                continue
+            by = ""
+            mb = re.search(r"\b(?:decided by|by|decider)\s*:?\s*([^|;\[\]]+?)\s*(?:[|;\[]|$)", what, re.I)
+            if mb and ("|" in what or ";" in what or re.search(r"decided by|decider", what, re.I)):
+                by = mb.group(1).strip()
+            src = " ".join("[" + t + "]" for t in TAG.findall(what))
+            what = re.split(r"\s+\|\s+", what)[0]
+            out.append({"text": what, "by": by, "id": "", "scope": "", "source": src})
+        elif out and ln.strip() and ln.startswith((" ", "\t")) and not cells(ln):
+            out[-1]["text"] += " " + ln.strip()
+    for i, d in enumerate(out, 1):
+        d["row"] = i
+        d["text"] = kd.mask(" ".join(TAG.sub("", d["text"]).split()))
+        d["by"] = kd.mask(d["by"])
+    return out
+
+
+def minutes_date(path, text):
+    d = kd.parse_date(path.name)
+    if d:
+        return d
+    for field in ("Date", "Meeting date"):
+        m = re.search(r"\b" + field + r"\b\s*(?:\*\*)?\s*[:|]\s*(?:\*\*)?\s*([^|\n]+)", text)
+        if m and kd.parse_date(m.group(1)):
+            return kd.parse_date(m.group(1))
+    return kd.parse_date(text)
+
+
+def project_of(path, text):
+    parts = path.resolve().parts
+    if "artifacts" in parts:
+        i = parts.index("artifacts")
+        if i + 1 < len(parts) - 1:
+            return parts[i + 1]
+    m = re.search(r"\bProject(?: or POC)?\b\s*(?:\*\*)?\s*[:|]\s*(?:\*\*)?\s*([^|\n<]+)", text)
+    return kd.slug(m.group(1)) if m and m.group(1).strip() else path.parent.name
+
+
+def minutes_files(args, root):
+    found = []
+    if args.paths:
+        for p in args.paths:
+            p = pathlib.Path(os.path.expanduser(p))
+            if p.is_dir():
+                found += sorted(x for x in p.rglob("*.md") if x.name not in ("LOG.md", "INDEX.md"))
+            elif p.is_file():
+                found.append(p)
+            else:
+                print(f"kit-decisions: not found: {p}", file=sys.stderr)
+        return found
+    if not root:
+        sys.exit("kit-decisions: no library root; set it in memory/context/library.md or pass --root")
+    arts = root / "artifacts"
+    projects = [arts / args.project] if args.project else (sorted(arts.iterdir()) if arts.is_dir() else [])
+    for proj in projects:
+        meet = proj / "meetings"
+        if meet.is_dir():
+            found += sorted(x for x in meet.glob("*.md") if x.name not in ("LOG.md", "INDEX.md"))
+    return found
+
+
+# ---------- decisions folder ----------
+
+def setup():
+    return kd.read(kd.CONTEXT / "decisions.md")
+
+
+def decisions_dir(root):
+    val = kd.setting(setup(), "Folder")
+    m = re.search(r"`([^`]+)`", val)
+    rel = m.group(1) if m else "decisions/"
+    p = pathlib.Path(os.path.expanduser(rel))
+    if p.is_absolute():
+        return p
+    return (root / p) if root else None
+
+
+def template_text():
+    m = re.search(r"`([^`]*adr[^`]*\.md)`", kd.setting(setup(), "Template"))
+    cands = [pathlib.Path(os.path.expanduser(m.group(1)))] if m else []
+    cands += [kd.KIT / "templates/adr-template.md", BIN.parents[1] / "kit/templates/adr-template.md",
+              BIN.parents[2] / "templates/adr-template.md"]
+    for c in cands:
+        if c.is_file():
+            return kd.read(c), c
+    return "", None
+
+
+def recorded(ddir):
+    """{(minutes file name, row): ADR id} for decisions already drafted, plus the highest number used."""
+    seen, top = {}, 0
+    if not ddir or not ddir.is_dir():
+        return seen, top
+    for f in ddir.glob("ADR-*.md"):
+        m = re.match(r"ADR-(\d+)", f.name)
+        if not m:
+            continue
+        top = max(top, int(m.group(1)))
+        t = kd.read(f)
+        for src, row in re.findall(re.escape(MARK) + r"(\S+?)#row(\d+)", t):
+            seen[(pathlib.Path(src).name, int(row))] = f"ADR-{m.group(1)}"
+    idx = re.sub(r"^.*Next number.*$", "", kd.read(ddir / "INDEX.md"), flags=re.M | re.I)
+    for n in re.findall(r"\bADR-(\d{3,})\b", idx):
+        top = max(top, int(n))
+    return seen, top
+
+
+def next_number(ddir):
+    _, top = recorded(ddir)
+    m = re.search(r"Next number:?\**\s*:?\s*(?:ADR-)?(\d+)", kd.read(ddir / "INDEX.md") if ddir else "", re.I)
+    nxt = int(m.group(1)) if m else 1
+    return max(nxt, top + 1)
+
+
+# ---------- drafting ----------
+
+def title_of(text):
+    t = re.sub(r"^(?:it was |we )?(?:decided|agreed|resolved)(?: that| to)?\s+", "", text.strip(), flags=re.I)
+    t = re.sub(r"^we will\s+", "", t, flags=re.I)
+    t = TAG.sub("", t).strip().rstrip(".")
+    t = t[:1].upper() + t[1:]
+    return kd.clip(t, 80)
+
+
+TBC = "to be confirmed"
+
+
+def draft(num, d, tmpl):
+    nid = f"ADR-{num:04d}"
+    title = title_of(d["text"])
+    rel = d["rel"]
+    when = kd.fmt(d["date"]) if d["date"] else "date not found"
+    cite = f"{rel}, {when}, §Decisions row {d['row']}" + (f" ({d['id']})" if d["id"] else "") + \
+           (f" {d['source']}" if d["source"] else "")
+    by = d["by"] or TBC
+    fields = {
+        "status": "proposed",
+        "date decided": "not decided (proposed; recorded in the minutes of " + when + ")",
+        "decided by": f"{by} (as the minutes record it; confirm the role before accepting)",
+        "project": d["project"],
+        "demand or ticket": TBC,
+        "related documents": f"Minutes {rel}",
+        "related adrs": "none found by kit-decisions; check the index and the knowledge base",
+        "revisit by": TBC,
+        "classification": "internal (to be confirmed)",
+    }
+    sections = {
+        "context": [f"Raised in the {d['project']} meeting of {when} and recorded in its minutes [{cite}]. "
+                    f"Add the problem, what forces the decision now, and the scope from the minutes and the "
+                    f"project's documents."],
+        "decision drivers": [f"- {TBC} (the minutes don't record the drivers)"],
+        "options considered": ["| Option | Summary | Pros | Cons |", "|---|---|---|---|",
+                               f"| A. As recorded | {kd.clip(d['text'], 120)} | {TBC} | {TBC} |",
+                               f"| B. {TBC} | | | |",
+                               f"| C. Do nothing | {TBC} | | |"],
+        "decision": [f"As recorded in the minutes: \"{d['text']}\" [{cite}]",
+                     "", "Proposed only: kit-decisions drafts, and the decision recorder confirms who decided and "
+                         "when before anything is accepted."],
+        "rationale": [f"To be confirmed. Why the draft was made: the decision {d['reason']} (kit-decisions rule; inferred)."],
+        "consequences": [f"- **Positive:** {TBC}", f"- **Negative:** {TBC}",
+                         f"- **Risks and mitigations:** {TBC}", f"- **Standards and compliance:** {TBC}",
+                         f"- **Follow-up actions:** confirm the decider and date with the meeting's chair (role)"],
+        "sources": [f"- Meeting minutes {cite}"],
+        "change log": ["| Date | Change | By (role) |", "|---|---|---|",
+                       f"| {kd.fmt(kd.today())} | Drafted as proposed from meeting minutes by kit-decisions | decision recorder |"],
+    }
+    out = [f"<!-- {MARK}{rel}#row{d['row']} -->"]
+    lines = tmpl.splitlines() if tmpl else []
+    if not lines:  # no template found: the same fields and sections, in the example's order
+        lines = ["# ADR-<nnnn>: <title>", "", "| Field | Value |", "|---|---|"] + \
+                [f"| {k.capitalize()} | <> |" for k in fields] + \
+                sum([["", f"## {s.capitalize()}", "", "<>"] for s in sections], [])
+    i = 0
+    seen_head = False
+    while i < len(lines):
+        ln = lines[i]
+        if ln.startswith("# ") and not seen_head:
+            seen_head = True
+            out.append(f"# {nid}: {title}")
+            i += 1
+            # drop the template's own introduction, up to the first table or heading
+            while i < len(lines) and not lines[i].startswith(("|", "#")):
+                i += 1
+            out.append("")
+            continue
+        cs = cells(ln)
+        if cs and len(cs) >= 2 and not is_sep(cs) and cs[0].lower() in fields:
+            out.append(f"| {cs[0]} | {fields[cs[0].lower()]} |")
+            i += 1
+            continue
+        m = re.match(r"^##\s+(.*)$", ln)
+        if m:
+            name = m.group(1).strip()
+            out += [ln, ""]
+            i += 1
+            while i < len(lines) and not lines[i].startswith("## "):
+                i += 1
+            body = sections.get(name.lower(), ["To be confirmed."])
+            out += body + [""]
+            continue
+        if re.search(r"<[^>]*>", ln) and not cs:
+            i += 1  # guidance line from the template
+            continue
+        out.append(ln)
+        i += 1
+    text = "\n".join(out).rstrip() + "\n"
+    return nid, title, text
+
+
+def update_index(ddir, rows, nxt):
+    idx = ddir / "INDEX.md"
+    text = kd.read(idx)
+    if not text.strip():
+        text = ("# Architecture decision records\n\n"
+                "One row per ADR. Numbers are never reused.\n\n"
+                f"- **Next number:** ADR-{nxt:04d}\n\n"
+                "| ADR | Title | Status | Date | Project | File |\n|---|---|---|---|---|---|\n")
+    if re.search(r"Next number", text, re.I):
+        text = re.sub(r"(Next number:?\**\s*:?\s*)(?:ADR-)?\d+", lambda m: f"{m.group(1)}ADR-{nxt:04d}", text,
+                      count=1, flags=re.I)
+    else:
+        text = text.rstrip() + f"\n\n- **Next number:** ADR-{nxt:04d}\n"
+    lines = text.splitlines()
+    last = None
+    for j, ln in enumerate(lines):
+        cs = cells(ln)
+        if cs and any("adr" in c.lower() for c in cs) and j + 1 < len(lines) and is_sep(cells(lines[j + 1])):
+            last = j + 1
+            k = j + 2
+            while k < len(lines) and cells(lines[k]) is not None:
+                last = k
+                k += 1
+    if last is None:
+        lines += ["", "| ADR | Title | Status | Date | Project | File |", "|---|---|---|---|---|---|"]
+        last = len(lines) - 1
+    lines[last + 1:last + 1] = rows
+    kd.write(idx, "\n".join(lines).rstrip() + "\n")
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-decisions", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("paths", nargs="*")
+    ap.add_argument("--project")
+    ap.add_argument("--root")
+    ap.add_argument("--write", action="store_true")
+    ap.add_argument("--brief", action="store_true")
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args(argv)
+    root = pathlib.Path(os.path.expanduser(args.root)) if args.root else kd.library_root()
+    files = minutes_files(args, root)
+    ddir = decisions_dir(root)
+    if not ddir:
+        sys.exit("kit-decisions: no decisions folder; set the library root or an absolute Folder in decisions.md")
+    tmpl, tpath = template_text()
+    seen, _ = recorded(ddir)
+    num = next_number(ddir)
+    results = []
+    for f in files:
+        text = kd.read(f)
+        try:
+            rel = str(f.resolve().relative_to(root.resolve())) if root else f.name
+        except ValueError:
+            rel = f.name
+        date, project = minutes_date(f, text), project_of(f, text)
+        for d in decisions_in(text):
+            arch, reason = classify(d["text"])
+            d.update(file=str(f), rel=rel, date=date, project=project, architectural=arch, reason=reason)
+            key = (f.name, d["row"])
+            if key in seen:
+                d.update(verdict="already recorded", adr=seen[key])
+            elif arch:
+                nid, title, body = draft(num, d, tmpl)
+                d.update(verdict="draft", adr=nid, title=title, draft=body,
+                         path=str(ddir / f"{nid}-{kd.slug(title)}.md"))
+                seen[key] = nid
+                num += 1
+            else:
+                d.update(verdict="not architectural")
+            results.append(d)
+    drafts = [d for d in results if d["verdict"] == "draft"]
+    if args.write and drafts:
+        for d in drafts:
+            p = pathlib.Path(d["path"])
+            if p.exists():
+                sys.exit(f"kit-decisions: {p.name} already exists; nothing written")
+        rows = []
+        log = kd.read(ddir / "LOG.md").rstrip() or "# Decision records log\n"
+        for d in drafts:
+            kd.write(pathlib.Path(d["path"]), d["draft"])
+            when = kd.fmt(d["date"]) if d["date"] else ""
+            rows.append(f"| {d['adr']} | {d['title']} | proposed | {when} | {d['project']} | {pathlib.Path(d['path']).name} |")
+            log = log.rstrip() + ("\n\n" if log.lstrip().startswith("#") and "\n- " not in log else "\n") + (f"- {kd.fmt(kd.today())}: {d['adr']} drafted as proposed by kit-decisions "
+                                         f"from {d['rel']} row {d['row']}.") + "\n"
+        update_index(ddir, rows, num)
+        kd.write(ddir / "LOG.md", log)
+    if args.json:
+        out = [{k: (kd.fmt(v) if k == "date" and v else v) for k, v in d.items() if k != "draft" or not args.brief}
+               for d in results]
+        print(json.dumps({"next_number": f"ADR-{num:04d}", "decisions_folder": str(ddir),
+                          "template": str(tpath) if tpath else None, "written": bool(args.write and drafts),
+                          "decisions": out}, indent=2, default=str))
+        return 0
+    n_arch = sum(1 for d in results if d["verdict"] == "draft")
+    n_not = sum(1 for d in results if d["verdict"] == "not architectural")
+    n_old = sum(1 for d in results if d["verdict"] == "already recorded")
+    print(f"kit-decisions: {len(files)} minutes file(s), {len(results)} decision(s): {n_arch} new architectural, "
+          f"{n_not} not architectural, {n_old} already recorded")
+    if not tpath:
+        print("kit-decisions: note: no ADR template found; drafts use the example's fields and sections")
+    cur = None
+    for d in results:
+        if d["file"] != cur:
+            cur = d["file"]
+            when = kd.fmt(d["date"]) if d["date"] else "date not found"
+            print(f"\n== {d['rel']} ({when}, project {d['project']})")
+        short = kd.clip(d["text"], 90)
+        if d["verdict"] == "draft":
+            print(f"  row {d['row']}  architectural -> {'drafted' if args.write else 'would be'} {d['adr']} "
+                  f"(proposed): {short}\n          why: {d['reason']}")
+        elif d["verdict"] == "already recorded":
+            print(f"  row {d['row']}  already recorded in {d['adr']}: {short}")
+        else:
+            print(f"  row {d['row']}  not architectural: {short}\n          why: {d['reason']}")
+    if drafts and not args.brief and not args.write:
+        for d in drafts:
+            print(f"\n----- draft {d['adr']} -> {pathlib.Path(d['path']).name} -----\n{d['draft']}")
+    if args.write and drafts:
+        print(f"\nkit-decisions: wrote {len(drafts)} proposed ADR(s) in {ddir}; INDEX.md next number ADR-{num:04d}")
+    elif drafts:
+        print(f"\nkit-decisions: read-only; --write saves {len(drafts)} draft(s) in {ddir} as proposed "
+              f"(next number after them: ADR-{num:04d})")
+    elif not results:
+        print("kit-decisions: no decisions found in the minutes' Decisions sections")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

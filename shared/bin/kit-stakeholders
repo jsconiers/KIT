@@ -1,0 +1,572 @@
+#!/usr/bin/env python3
+"""kit-stakeholders: build a project's stakeholder map, by role, from the library.
+
+  kit-stakeholders PROJECT           print the map for <library root>/artifacts/PROJECT
+  kit-stakeholders PROJECT --write   save it as the project's stakeholders.md (or a dated draft beside it)
+  kit-stakeholders PROJECT --json    the roles, signals, and sources as JSON
+  kit-stakeholders --list            list the projects in the library
+  kit-stakeholders ... --root DIR    use a library root other than the one in library.md
+
+Sources, each read only if it exists: the demand register (role columns on the project's rows, such
+as demand manager, project manager, requester), the project's meeting minutes (attendees, action
+owners, and who decided), status reports (escalation owners), the intake triage note (requester,
+sign-off, approver), and any RACI table in the project's markdown documents. Output follows the
+stakeholder map template that memory/context/status.md names.
+
+People appear by role only. Every entry is matched against a fixed list of roles; anything that
+isn't a recognisable role (a name, for example) is left out and counted, never printed. There is no
+option to include names. Influence and interest come from simple signals and are marked
+"(inferred)": sign-off, approver, decider, accountable, or a board = high influence; escalation
+owner, responsible, or a managing role = medium; frequent action owner (2+) or the requester = high
+interest. --write never overwrites an existing stakeholders.md: it writes stakeholders-draft-<date>.md
+beside it for a person to merge. Local files only; nothing is sent.
+"""
+import argparse
+import json
+import os
+import pathlib
+import re
+import sys
+
+BIN = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(BIN.parent))
+import kit_daily as kd  # noqa: E402
+
+MARK = "<!-- kit-stakeholders -->"
+
+# Canonical roles, most specific first. Only these ever reach the output.
+ROLES = [
+    ("Executive sponsor", r"executive sponsor"), ("Sponsor", r"sponsors?"),
+    ("Architecture review board", r"architecture review board|arb"), ("Design authority", r"design authority"),
+    ("Change advisory board", r"change advisory board|change board|cab"),
+    ("Steering committee", r"steering (?:committee|group)|steerco"),
+    ("Demand manager", r"demand manager"), ("Programme manager", r"program(?:me)? manager"),
+    ("Project manager", r"project manager|pm"), ("Change manager", r"change manager"),
+    ("Delivery manager", r"delivery manager"), ("Service manager", r"service manager"),
+    ("Operations lead", r"operations (?:lead|manager)|ops lead"),
+    ("Product owner", r"product owner"), ("Service owner", r"service owner"),
+    ("System owner", r"system owner|application owner|app owner"), ("Business owner", r"business owner"),
+    ("Data owner", r"data owner"), ("Risk owner", r"risk owner"), ("Requester", r"requester|requestor|requested by"),
+    ("Enterprise architect", r"enterprise architect"), ("Solution architect", r"solutions? architect"),
+    ("Security architect", r"security architect"), ("Infrastructure architect", r"infrastructure architect"),
+    ("Network architect", r"network architect"), ("Data architect", r"data architect"),
+    ("Cloud architect", r"cloud architect"), ("Application architect", r"application architect"),
+    ("Architect", r"architects?"),
+    ("Engineering lead", r"engineering lead|tech(?:nical)? lead|lead engineer"),
+    ("Site reliability engineer", r"site reliability engineers?|sre"),
+    ("Network engineer", r"network engineers?|network team"), ("Platform engineer", r"platform engineers?|platform team"),
+    ("Infrastructure engineer", r"infrastructure engineers?|infrastructure team"), ("Engineer", r"engineers?|engineering team"),
+    ("Developer", r"developers?|development team|dev team"),
+    ("Database administrator", r"database administrators?|dbas?"), ("System administrator", r"system administrators?|sysadmins?"),
+    ("Test lead", r"test lead|qa lead|test manager"), ("Tester", r"testers?|qa"),
+    ("Business analyst", r"business analysts?|ba"),
+    ("Information security", r"information security|infosec|security team|ciso|security officer"),
+    ("Compliance", r"compliance(?: officer| team| owner)?"), ("Risk", r"risk (?:team|manager|officer)|operational risk"),
+    ("Legal", r"legal"), ("Procurement", r"procurement|sourcing team"), ("Finance", r"finance"),
+    ("PMO", r"pmo"), ("Service desk", r"service desk|help ?desk"), ("Operations", r"operations team|ops team|operations"),
+    ("Vendor", r"vendors?|suppliers?"), ("Auditor", r"internal audit|auditors?"), ("Director", r"director"),
+]
+ROLE_RE = [(name, re.compile(r"(?<![\w-])(?:" + pat + r")(?![\w-])", re.I)) for name, pat in ROLES]
+HEAD_OF = re.compile(r"(?<![\w-])head of ([a-z&]+(?: (?!and\b)[a-z&]+)?)", re.I)
+BOARDS = {"Executive sponsor", "Sponsor", "Architecture review board", "Design authority", "Change advisory board",
+          "Steering committee"}
+MANAGING = {"Demand manager", "Programme manager", "Project manager", "Delivery manager", "Change manager",
+            "Service owner", "System owner", "Product owner", "Business owner"}
+RACI_CELL = re.compile(r"^[RACI](?:\s*[/,&+]\s*[RACI])*$")
+
+
+def roles_in(text):
+    """Canonical roles named in text, longest match first, no overlaps. Free text never passes through."""
+    text = re.sub(r"\[(?:PM|Architect|Transcript)\]", " ", text or "", flags=re.I)
+    spans, found = [], []
+    for m in HEAD_OF.finditer(text):
+        spans.append((m.start(), m.end()))
+        found.append((m.start(), "Head of " + m.group(1).lower()))
+    for name, rx in ROLE_RE:
+        for m in rx.finditer(text):
+            if any(m.start() < e and s < m.end() for s, e in spans):
+                continue
+            spans.append((m.start(), m.end()))
+            found.append((m.start(), name))
+    out = []
+    for _, n in sorted(found):
+        if n not in out:
+            out.append(n)
+    return out
+
+
+def cells(line):
+    s = line.strip()
+    return [c.strip() for c in s.strip("|").split("|")] if s.startswith("|") else None
+
+
+def is_sep(cs):
+    return cs is not None and any(cs) and all(re.fullmatch(r":?-{2,}:?", c) or c == "" for c in cs)
+
+
+def empty(s):
+    s = (s or "").strip()
+    return not s or s.startswith("<") or s.lower() in ("-", "n/a", "none", "tbc", "to be confirmed", "unknown")
+
+
+def tables(lines):
+    """[(header cells, [row cells...], start line)] for each markdown table."""
+    out, i = [], 0
+    while i < len(lines) - 1:
+        h, s = cells(lines[i]), cells(lines[i + 1])
+        if h and is_sep(s):
+            rows, j = [], i + 2
+            while j < len(lines) and cells(lines[j]) is not None:
+                rows.append(cells(lines[j]) + [""] * max(0, len(h) - len(cells(lines[j]))))
+                j += 1
+            out.append((h, rows, i))
+            i = j
+        else:
+            i += 1
+    return out
+
+
+def section(lines, rx):
+    for i, ln in enumerate(lines):
+        m = re.match(r"^(#{1,6})\s+(.*)$", ln)
+        if m and rx.search(m.group(2)):
+            out = []
+            for nxt in lines[i + 1:]:
+                h = re.match(r"^(#{1,6})\s", nxt)
+                if h and len(h.group(1)) <= len(m.group(1)):
+                    break
+                out.append(nxt)
+            return out
+    return []
+
+
+def field(text, *labels):
+    """Values of '**Label:** value', 'Label: value', or '| Label | value |' lines, for any label given."""
+    vals = []
+    for ln in text.splitlines():
+        cs = cells(ln)
+        if cs and len(cs) >= 2 and not is_sep(cs):
+            lab, val = cs[0].strip("* "), cs[1]
+        else:
+            m = re.match(r"^\s*(?:[-*]\s+)?\**([A-Za-z][\w ()/-]{1,40}?)\**\s*:\s*\**\s*(.+)$", ln)
+            if not m:
+                continue
+            lab, val = m.group(1), m.group(2)
+        if any(re.search(r"(?<![\w])(?:" + lb + r")(?![\w])", lab, re.I) for lb in labels) and not empty(val):
+            vals.append((lab.strip(), val.strip()))
+    return vals
+
+
+class Map:
+    def __init__(self):
+        self.r = {}
+        self.dropped = 0
+        self.gates = []      # (gate, signer role, consulted roles, source)
+        self.concerns = []   # (role, concern, source)
+        self.used = {}
+
+    def add(self, text, src, **sig):
+        rs = roles_in(text)
+        if not rs and not empty(text):
+            self.dropped += 1
+        for role in rs:
+            self.put(role, src, **sig)
+        return rs
+
+    def put(self, role, src, **sig):
+        e = self.r.setdefault(role, {"actions": 0, "meetings": set(), "signoff": False, "decider": False,
+                                     "escalations": 0, "requester": False, "register": False, "raci": set(),
+                                     "sources": []})
+        e["actions"] += sig.get("action", 0)
+        if sig.get("meeting"):
+            e["meetings"].add(sig["meeting"])
+        for k in ("signoff", "decider", "requester", "register"):
+            e[k] = e[k] or bool(sig.get(k))
+        e["escalations"] += sig.get("escalation", 0)
+        e["raci"] |= set(sig.get("raci", ""))
+        if src not in e["sources"]:
+            e["sources"].append(src)
+
+
+def read_register(root, project, m):
+    rel = re.search(r"`([^`]+)`", kd.setting(kd.read(kd.CONTEXT / "demands.md"), "Register") or "")
+    path = pathlib.Path(os.path.expanduser(rel.group(1))) if rel else pathlib.Path("demands/REGISTER.md")
+    path = path if path.is_absolute() else root / path
+    text = kd.read(path)
+    if not text:
+        return None
+    m.used["register"] = path
+    want = kd.slug(project)
+    for h, rows, _ in tables(text.splitlines()):
+        hl = [c.lower() for c in h]
+        pcol = next((i for i, c in enumerate(hl) if "project" in c and not roles_in(c)), None)
+        ncol = next((i for i, c in enumerate(hl) if c in ("#", "number", "demand", "ticket", "id", "demand or ticket")), 0)
+        for row in rows:
+            cand = [row[pcol]] if pcol is not None else row
+            if not any(want and want == kd.slug(c) or (want in kd.slug(c) and len(want) > 3) for c in cand):
+                continue
+            src = f"{path.name} {kd.clip(row[ncol], 20)}".strip()
+            for i, head in enumerate(h):
+                val = row[i] if i < len(row) else ""
+                if empty(val) or i == pcol:
+                    continue
+                hr = roles_in(head)
+                if hr and not re.search(r"\b(role)\b", head, re.I):
+                    for role in hr:
+                        m.put(role, f"{src} ({head.lower()})", register=True, requester=role == "Requester")
+                elif re.search(r"\brole\b|\bowner\b|assign", head, re.I):
+                    m.add(val, f"{src} ({head.lower()})", register=True)
+    return path
+
+
+def read_minutes(pdir, m):
+    files = sorted(p for p in (pdir / "meetings").glob("*.md") if p.name not in ("LOG.md", "INDEX.md")) \
+        if (pdir / "meetings").is_dir() else []
+    for f in files:
+        text = kd.read(f)
+        lines = text.splitlines()
+        src = f"minutes {f.name}"
+        att = []
+        for _, val in field(text, "Attendees", "Present", "Participants"):
+            att += re.split(r"[;,]|\band\b", val)
+        att += [re.sub(r"^\s*[-*]\s+", "", ln) for ln in section(lines, re.compile(r"^(attendees|present|participants)\b", re.I))
+                if re.match(r"^\s*[-*]\s+", ln)]
+        for a in att:
+            m.add(a, src + " (attendee)", meeting=f.name)
+        for ln in lines:
+            mo = re.search(r"\|\s*owner:\s*([^|]+)", ln)
+            if ln.lstrip().startswith("- [action]") and mo and mo.group(1).strip().lower() not in ("owner",):
+                m.add(mo.group(1), src + " (action owner)", action=1)
+        for h, rows, _ in tables(section(lines, re.compile(r"^action", re.I))):
+            oc = next((i for i, c in enumerate(h) if "owner" in c.lower() or c.lower() == "who"), None)
+            for row in rows if oc is not None else []:
+                if row[oc].strip().lower() != "owner":
+                    m.add(row[oc], src + " (action owner)", action=1)
+        dec = section(lines, re.compile(r"^(?:key\s+)?decisions?\b", re.I))
+        for h, rows, _ in tables(dec):
+            bc = next((i for i, c in enumerate(h) if re.search(r"\bby\b|decider|who", c, re.I)), None)
+            for row in rows if bc is not None else []:
+                m.add(row[bc], src + " (decided)", decider=True)
+        for ln in dec:
+            mo = re.search(r"decided by\s*:?\s*([^|;\[\]]+)", ln, re.I)
+            if mo and not cells(ln):
+                m.add(mo.group(1), src + " (decided)", decider=True)
+    if files:
+        m.used["minutes"] = len(files)
+
+
+def read_status(pdir, m):
+    files = sorted((pdir / "status").glob("*.md")) if (pdir / "status").is_dir() else []
+    for f in files:
+        body = section(kd.read(f).splitlines(), re.compile(r"escalat", re.I))
+        src = f"{f.name} §Escalations"
+        for h, rows, _ in tables(body):
+            oc = next((i for i, c in enumerate(h) if re.search(r"owner|escalate to|\bto\b|decider|decision|role|who", c, re.I)), None)
+            tc = next((i for i, c in enumerate(h) if re.search(r"escalation|item|issue|what|description|ask", c, re.I)
+                       and i != oc), None)
+            for row in rows if oc is not None else []:
+                for role in m.add(row[oc], src, escalation=1):
+                    if tc is not None and not empty(row[tc]):
+                        m.concerns.append((role, kd.clip(row[tc], 100), src))
+        for ln in body:
+            if not re.match(r"^\s*[-*]\s+", ln) or empty(re.sub(r"^\s*[-*]\s+", "", ln)):
+                continue
+            mo = re.search(r"(?:owner|escalate to|escalated to|decision owner|decision from)\s*:?\s*([^|;()\[\]]+)", ln, re.I)
+            target = mo.group(1) if mo else ln
+            what = re.split(r"\s+[|(]\s*(?:owner|escalate to|decision owner)", re.sub(r"^\s*[-*]\s+", "", ln), flags=re.I)[0]
+            for role in m.add(target, src, escalation=1):
+                m.concerns.append((role, kd.clip(what, 100), src))
+    if files:
+        m.used["status"] = len(files)
+
+
+GATE_LABEL = r"sign-?\s?off|signs off|approver|approval|approved by|accountable"
+
+
+def read_intake(pdir, m):
+    files = sorted((pdir / "intake").glob("*.md")) if (pdir / "intake").is_dir() else []
+    for f in files:
+        text = kd.read(f)
+        src = f"intake {f.name}"
+        for lab, val in field(text, "Requester", "Requestor", "Requested by"):
+            # The field names the role; the value may be a name, so only roles in it are kept.
+            m.put("Requester", f"{src} ({lab.lower()})", requester=True)
+            rs = [r for r in roles_in(val) if r != "Requester"]
+            for role in rs:
+                m.put(role, f"{src} ({lab.lower()})", requester=True)
+            if not rs:
+                m.dropped += 1
+        for lab, val in field(text, "Sponsor"):
+            m.put("Sponsor", f"{src} ({lab.lower()})")
+            if not [r for r in roles_in(val) if r != "Sponsor"]:
+                m.dropped += 1
+        for lab, val in field(text, GATE_LABEL):
+            for role in m.add(val, f"{src} ({lab.lower()})", signoff=True):
+                rest = re.sub(r"\s*\(?(?:" + GATE_LABEL + r")\)?\s*", " ", lab, flags=re.I).strip(" -:()")
+                m.gates.append((lab if rest else "Project sign-off", role, "", src))
+    if files:
+        m.used["intake"] = len(files)
+
+
+def read_raci(pdir, m):
+    n = 0
+    for f in sorted(pdir.rglob("*")):
+        if f.suffix.lower() not in (".md", ".txt") or f.name.startswith("stakeholders") or not f.is_file():
+            continue
+        lines = kd.read(f).splitlines()
+        for h, rows, start in tables(lines):
+            hl = [c.lower() for c in h]
+            before = " ".join(lines[max(0, start - 4):start]).lower()
+            src = f"{f.relative_to(pdir)} §RACI"
+            if "raci" in hl and any(roles_in(r[0]) for r in rows):           # roles down the side
+                rc = hl.index("raci")
+                for row in rows:
+                    if RACI_CELL.match(row[rc].upper().strip() or "-"):
+                        for role in roles_in(row[0]):
+                            m.put(role, src, raci=re.sub(r"[^RACI]", "", row[rc].upper()), signoff="A" in row[rc].upper())
+                            n += 1
+                continue
+            body = [c for r in rows for c in r[1:] if c.strip()]
+            if not body or sum(1 for c in body if RACI_CELL.match(c.upper())) < 0.6 * len(body):
+                continue
+            if "raci" not in before and "raci" not in " ".join(hl) and not any(roles_in(c) for c in h[1:]):
+                continue
+            for row in rows:
+                acct, cons = [], []
+                for i, c in enumerate(row[1:], 1):
+                    letters = re.sub(r"[^RACI]", "", c.upper())
+                    if not letters or i >= len(h):
+                        continue
+                    for role in roles_in(h[i]):
+                        m.put(role, src, raci=letters, signoff="A" in letters)
+                        n += 1
+                        (acct if "A" in letters else cons if "C" in letters else []).append(role)
+                if acct and not empty(row[0]):
+                    for role in acct:
+                        m.gates.append((kd.clip(row[0], 60), role, ", ".join(cons), src))
+    if n:
+        m.used["raci"] = n
+
+
+def assess(e, role):
+    infl = "high" if (e["signoff"] or e["decider"] or "A" in e["raci"] or role in BOARDS) else \
+        "medium" if (e["escalations"] or "R" in e["raci"] or role in MANAGING) else "low"
+    inter = "high" if (e["actions"] >= 2 or e["requester"] or "R" in e["raci"]) else \
+        "medium" if (e["actions"] or e["meetings"] or e["escalations"] or e["register"] or e["raci"]) else "low"
+    if e["raci"]:
+        raci = next(x for x in "ARCI" if x in e["raci"])  # the strongest letter, for the project as a whole
+    else:
+        raci = ("A" if e["signoff"] or e["decider"] else "R" if e["actions"] else "C" if e["meetings"] else "I") + \
+               " (inferred)"
+    need = []
+    if e["signoff"]:
+        need.append("decision papers before each gate they sign off")
+    elif e["decider"]:
+        need.append("options and a recommendation before each decision")
+    if e["escalations"]:
+        need.append("escalations with options, impact, and the decision needed")
+    if e["requester"]:
+        need.append("progress against the request, and answers to open questions")
+    if e["actions"]:
+        need.append("clear actions with due dates")
+    if e["register"] and not need:
+        need.append("status and dates for the demand")
+    if e["meetings"] and not need:
+        need.append("minutes and decisions")
+    need = need[:3] or ["the status report"]
+    often = "weekly" if inter == "high" else \
+        "at each gate, plus a monthly summary" if infl == "high" else \
+        "fortnightly" if "medium" in (infl, inter) else "monthly"
+    if infl == "high" and inter == "high":
+        approach = "Manage closely"
+    elif infl == "high":
+        approach = "Keep satisfied"
+    elif inter == "high":
+        approach = "Keep informed"
+    else:
+        approach = "Monitor"
+    return {"influence": infl, "interest": inter, "raci": raci, "need": "; ".join(need),
+            "often": often, "approach": approach}
+
+
+HOW = {"Manage closely": "status report, decision meetings, a one-to-one before each gate",
+       "Keep satisfied": "leadership summary, reviews at each gate",
+       "Keep informed": "status report and minutes",
+       "Monitor": "status report on request"}
+
+
+def template_text():
+    m = re.search(r"`([^`]*stakeholder[^`]*template[^`]*\.md)`", kd.read(kd.CONTEXT / "status.md"))
+    cands = [pathlib.Path(os.path.expanduser(m.group(1)))] if m else []
+    cands += [kd.KIT / "templates/stakeholder-map-template.md",
+              BIN.parents[1] / "kit/templates/stakeholder-map-template.md",
+              BIN.parents[2] / "templates/stakeholder-map-template.md"]
+    for c in cands:
+        if c.is_file():
+            return kd.read(c), c
+    return ("# Stakeholder map: <project>\n\n| Field | Value |\n|---|---|\n| Project | |\n| Updated | |\n"
+            "| Classification | |\n\n## Stakeholders\n\n| Role | Group or team | Influence | Interest | Stance | RACI | "
+            "What they need from us | How often |\n|---|---|---|---|---|---|---|---|\n\n## Engagement plan\n\n"
+            "| Approach | Roles | How (status report, meeting, review, one-to-one) |\n|---|---|---|\n\n"
+            "## Decisions and sign-offs\n\n| Gate | Signs off (role) | Consulted |\n|---|---|---|\n\n"
+            "## Concerns to address\n\n| Role | Concern | Owner | Next step |\n|---|---|---|---|\n"), None
+
+
+def stake_row(h, role, e, a):
+    vals = []
+    for c in h:
+        k = c.lower()
+        vals.append(role if k == "role" else
+                    "" if "group" in k or "team" in k else
+                    f"{a['influence']} (inferred)" if "influence" in k else
+                    f"{a['interest']} (inferred)" if "interest" in k else
+                    "unknown" if "stance" in k else
+                    a["raci"] if "raci" in k else
+                    f"{a['need']} (inferred)" if "need" in k else
+                    f"{a['often']} (inferred)" if "often" in k else
+                    "; ".join(e["sources"][:4]) + (f"; +{len(e['sources']) - 4} more" if len(e["sources"]) > 4 else "")
+                    if "source" in k else "")
+    return "| " + " | ".join(vals) + " |"
+
+
+def render(project, m, tmpl):
+    ranked = sorted(m.r.items(), key=lambda kv: ({"high": 0, "medium": 1, "low": 2}[assess(kv[1], kv[0])["influence"]],
+                                                 {"high": 0, "medium": 1, "low": 2}[assess(kv[1], kv[0])["interest"]], kv[0]))
+    used = ", ".join(f"{k} ({v.name if isinstance(v, pathlib.Path) else v})" for k, v in m.used.items()) or "none found"
+    intro = [MARK, "",
+             f"Drafted {kd.fmt(kd.today())} by kit-stakeholders from the library. Sources read: {used}. People appear by "
+             f"role only; {m.dropped} entr{'y' if m.dropped == 1 else 'ies'} with no recognisable role "
+             f"{'was' if m.dropped == 1 else 'were'} left out. Influence, interest, needs, frequency, and RACI marked "
+             "(inferred) come from simple signals (sign-off, approver, decider, accountable, or a board = high "
+             "influence; escalation owner, responsible, or a managing role = medium; action owner twice or more, "
+             "or the requester = high interest). Stance is unknown until someone records it.", ""]
+    out, lines, i, head_done = [], tmpl.splitlines(), 0, False
+    while i < len(lines):
+        ln = lines[i]
+        if ln.startswith("# ") and not head_done:
+            head_done = True
+            out += [f"# Stakeholder map: {project}", ""] + intro
+            i += 1
+            while i < len(lines) and not lines[i].startswith(("|", "#")):
+                i += 1
+            continue
+        cs = cells(ln)
+        if cs and len(cs) >= 2 and cs[0].lower() in ("project", "updated", "classification"):
+            v = {"project": project, "updated": kd.fmt(kd.today()), "classification": "internal (to be confirmed)"}
+            out.append(f"| {cs[0]} | {v[cs[0].lower()]} |")
+            i += 1
+            continue
+        mo = re.match(r"^##\s+(.*)$", ln)
+        if not mo:
+            if not re.search(r"<[^>]*>", ln) or cs:
+                out.append(ln)
+            i += 1
+            continue
+        name = mo.group(1).strip().lower()
+        j = i + 1
+        while j < len(lines) and not lines[j].startswith("## "):
+            j += 1
+        tb = tables(lines[i + 1:j])
+        h = tb[0][0] if tb else []
+        out += [ln, ""]
+        i = j
+        if "stakeholder" in name:
+            h = h or ["Role", "Influence", "Interest", "RACI", "What they need from us", "How often"]
+            if not any("source" in c.lower() for c in h):
+                h = h + ["Sources"]
+            rows = [stake_row(h, r, e, assess(e, r)) for r, e in ranked]
+        elif "engagement" in name:
+            h = h or ["Approach", "Roles", "How"]
+            rows = []
+            for ap in HOW:
+                roles = [r for r, e in ranked if assess(e, r)["approach"] == ap]
+                vals = [ap if "approach" in c.lower() else ", ".join(roles) or "none" if "role" in c.lower()
+                        else HOW[ap] + " (inferred)" for c in h]
+                rows.append("| " + " | ".join(vals) + " |")
+        elif "sign" in name or "decision" in name:
+            h = h or ["Gate", "Signs off (role)", "Consulted"]
+            seen, rows = set(), []
+            for g, r, c, src in m.gates:
+                if (g, r) in seen:
+                    continue
+                seen.add((g, r))
+                vals = [g if "gate" in x.lower() else r if "sign" in x.lower() else c or "to be confirmed"
+                        if "consult" in x.lower() else src for x in h]
+                rows.append("| " + " | ".join(vals) + f" |")
+            rows = rows or ["| " + " | ".join(["to be confirmed"] + [""] * (len(h) - 1)) + " |"]
+        elif "concern" in name:
+            h = h or ["Role", "Concern", "Owner", "Next step"]
+            rows = []
+            for r, c, src in m.concerns:
+                vals = [r if x.lower() == "role" else f"{c} [{src}]" if "concern" in x.lower() else r
+                        if "owner" in x.lower() else "decision needed; see the status report" for x in h]
+                rows.append("| " + " | ".join(vals) + " |")
+            rows = rows or ["| " + " | ".join(["none recorded"] + [""] * (len(h) - 1)) + " |"]
+        else:
+            out += ["To be confirmed.", ""]
+            continue
+        out += ["| " + " | ".join(h) + " |", "|" + "---|" * len(h)] + rows + [""]
+    return "\n".join(out).rstrip() + "\n"
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-stakeholders", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("project", nargs="?")
+    ap.add_argument("--root")
+    ap.add_argument("--write", action="store_true")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--list", action="store_true")
+    args = ap.parse_args(argv)
+    root = pathlib.Path(os.path.expanduser(args.root)) if args.root else kd.library_root()
+    if not root or not root.is_dir():
+        sys.exit("kit-stakeholders: no library root; set it in memory/context/library.md or pass --root")
+    arts = root / "artifacts"
+    projects = sorted(p.name for p in arts.iterdir() if p.is_dir()) if arts.is_dir() else []
+    if args.list or not args.project:
+        if not args.list:
+            ap.error("give a PROJECT, or --list")
+        print(f"kit-stakeholders: {len(projects)} project(s)")
+        for p in projects:
+            print(f"  {p}{'  (has stakeholders.md)' if (arts / p / 'stakeholders.md').exists() else ''}")
+        return 0
+    pdir = arts / args.project
+    if not pdir.is_dir():
+        sys.exit(f"kit-stakeholders: no project folder {pdir}; projects: {', '.join(projects) or 'none'}")
+    m = Map()
+    read_register(root, args.project, m)
+    read_intake(pdir, m)
+    read_minutes(pdir, m)
+    read_status(pdir, m)
+    read_raci(pdir, m)
+    if args.json:
+        print(json.dumps({"project": args.project, "dropped_without_role": m.dropped,
+                          "sources": {k: str(v) for k, v in m.used.items()},
+                          "stakeholders": [dict(role=r, **assess(e, r), sources=e["sources"],
+                                                signals={k: (sorted(v) if isinstance(v, set) else v)
+                                                         for k, v in e.items() if k != "sources"})
+                                           for r, e in sorted(m.r.items())],
+                          "gates": [dict(gate=g, signs_off=r, consulted=c, source=s) for g, r, c, s in m.gates]},
+                         indent=2))
+        return 0
+    tmpl, _ = template_text()
+    text = render(args.project, m, tmpl)
+    if not m.r:
+        print("kit-stakeholders: no roles found in the register, minutes, status reports, intake note, or RACI",
+              file=sys.stderr)
+    if args.write:
+        path = pdir / "stakeholders.md"
+        if path.exists():
+            path = pdir / f"stakeholders-draft-{kd.today().isoformat()}.md"
+            if path.exists() and MARK not in kd.read(path):
+                sys.exit(f"kit-stakeholders: {path.name} exists and isn't a kit-stakeholders draft; nothing written")
+        kd.write(path, text)
+        note = "; stakeholders.md already exists, so merge the draft into it by hand" if path.name != "stakeholders.md" else ""
+        print(f"kit-stakeholders: wrote {path} ({len(m.r)} role(s)){note}")
+        return 0
+    print(text, end="")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

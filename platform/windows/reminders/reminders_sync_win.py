@@ -79,6 +79,7 @@ def main(backend=None):
     changed = reconcile(todo, backend, me, INBOX, f"Kit: {me}")
     if changed:
         log("; ".join(changed))
+    core.mark_ok(LOG)
     print("\n".join(changed) or "in sync")
 
 

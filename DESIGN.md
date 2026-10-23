@@ -38,7 +38,7 @@ trademarks of their owners; Kit isn't affiliated). The parallels are a handy way
 |        KIT.md --@import--> preferences, lessons, memory index,   |
 |                            STATUS.md                             |
 |   Kit (the main thread)                                          |
-|     |-- subagents (~/.claude/agents/*.md): the 30 staff          |
+|     |-- subagents (~/.claude/agents/*.md): the 32 staff          |
 |     |      gateway --MCP--> outside systems (guarded, read-only) |
 |     |-- skills (~/.claude/skills): docx, pptx, xlsx, pdf, ...    |
 |     `-- tools: Read/Edit/Bash, kit-* commands                    |
@@ -204,7 +204,7 @@ kit-team send ---------------> kits/B/inbox/A--message--<id>.json --> kit-team i
 
 - **Transport interface** (`shared/kit_transport.py`): publish, list, read, send to inbox, list
   inbox, acknowledge. `FolderTransport` serves any folder; `kit_sql_transport.SQLTransport` serves
-  PostgreSQL, SQL Server, and MySQL (MySQL tested; the others untested). `kit-team db-init` creates
+  PostgreSQL, SQL Server, and MySQL (MySQL and PostgreSQL tested; SQL Server untested). `kit-team db-init` creates
   the database and tables; MySQL sessions use READ COMMITTED so readers see other Kits' commits.
 - **Records** (`shared/records/`, `shared/kit_records.py`): JSON with a shared envelope; types are
   status-snapshot, decision, lesson, artifact-pointer, demand-rollup, handoff-pointer, and message.
@@ -236,7 +236,25 @@ every line, and writes only with `--write`. `kit-sizing` is arithmetic from stat
 overridable per-unit assumptions, with low, likely, and high ranges, handed to the cost estimator.
 `kit-diagram-diff` parses draw.io (including compressed pages) and Visio `.vsdx`, matches pages by
 name, compares components by id and connections by component id, so a rename doesn't look like
-rewiring.
+rewiring. `kit-diaglint` shares that parser (`shared/kit_diagram.py`) and checks each page against a
+JSON rules file named in `diagrams.md`, so the team's standard stays in the owner's setup, not the
+repo; it checks values set on the element itself (not defaults, masters, or style sheets) and exits 1
+only on errors. The diagrammer lints before reporting; the reviewer lints diagrams beside a document.
+
+`kit-onepager` extracts by heading and labelled field rather than with a model, so every line cites
+its section and gaps read "not stated"; it writes only with `--write` or `--docx`. `kit-decisions`
+classifies each minuted decision with explainable keyword rules and drafts proposed ADRs (numbers
+never reused, duplicates caught by minutes file and row, nothing accepted). `kit-stakeholders`
+matches entries against a fixed role list, so names can't get through, and marks influence and
+interest as inferred.
+
+`kit-viewpoints` extracts OV-1, SV-1, SV-4, and DIV-2 elements from headings, tables, and labelled
+fields (keyword inference only for gaps, marked "(inferred)"), never invents an element, and builds
+draw.io only through kit-drawio's JSON spec, so styles stay in one place. `kit-coverage` reads Kit's
+existing artifacts, reuses kit-csf's math, and leaves required-ness to the framework profile; its
+numbers are reading aids, not compliance scores. The TOGAF-style templates follow the structure of
+TOGAF deliverables with headings paraphrased (TOGAF is a trademark of The Open Group) and say which IA
+and GDS parts already supply each section.
 
 `kit-lifecycle` stays local: `--import` reads a file the gateway already produced. A version past
 standard support with an `extended` date still ahead is flagged `extended`, with its own urgency,
@@ -265,6 +283,65 @@ the reviewer and standards checker. Both new agents run on a tools allowlist (no
 agent tools) and write only to their own project folders (`red-team/`, `threat-model/`), outside
 `reviews/`, so kit-quality reads only the reviewer's notes. Threat-model controls go to the risk and
 compliance mapper and test cases to the implementation planner, through Kit.
+
+**Connector health.** The morning run calls `connector_health.py`, which runs `kit-connect test
+--json` (no `--read`, so no model cost) in the shell before the model and adds one PASS/FAIL line per
+connector to the top of the brief. It's time-limited (`CONNECTOR_CHECK_TIMEOUT`, default 120 s),
+never fails the run, and `CONNECTOR_CHECK="off"` skips it.
+
+**Connector outages.** `connector_health.py` records one result per server per morning in
+`briefs/connectors-history.jsonl` (nothing on a "not checked" morning). A streak at
+`CONNECTOR_FAIL_STREAK` opens one outage in `briefs/connectors-alerts.json`, adds one owner work item
+through `todo work` (de-duplicated by title), and `dashboard.py` shows a banner; a pass closes it. None
+of this can fail the run.
+
+**Run and cost alerts.** `run_alerts.py` runs at the end of every scheduled run and before the morning
+and weekly model runs, time-limited and never failing the run. It reads only kit-reliability's run
+outcomes and kit-cost's ledger, keeps open alerts in `briefs/alerts.json` (kinds `run` and `cost`),
+adds one owner work item per outage (cost: one per level per month), and `dashboard.py` shows banners.
+The sync writes `.install/logs/sync.ok` after a clean run, and kit-reliability reads run.ps1's
+timestamps.
+
+**Monitors.** `run_alerts.py` also hosts `monitor_drift.py`, `monitor_library.py`, and
+`monitor_waiting.py`, each returning problems that one shared function turns into alerts (a queue
+item per outage where the kind has one, a Recovered line, dry-run preview). Drift compares three
+copies of each agent: `.install/kit/agents` (shipped), `agents/` (live), and `~/.claude/agents`
+(installed, via `doctor.agent_drift`), after normalising the owner name and model line. Library
+compares folder listings with the indexes' file columns without opening documents. Waiting reuses
+`kit_queue`'s parser. All are read-only apart from follow-up drafts and queue items, time-limited,
+and never fail a run.
+
+**Guard integrity and least privilege.** `monitor_guard.py` checks every agent shipped with
+connector-guard hooks still has all three installed, the guard's settings are readable, its audit
+folder is writable, and calls have result records (reusing kit-audit's no-result check).
+`kit-audit privileges` compares each agent's reachable tools with the connector calls the audit log
+shows and suggests removals; it never edits an agent, and built-in tools show as "no usage data".
+Readiness figures come from `doctor.py --readiness --json`, never hand counts.
+
+**Compliance records.** `kit-exceptions`, `kit-pbc`, and `kit-audit-export --controls` share one
+Markdown table parser (`kit_compliance.py`); registers live in the library and are read-only unless
+`--write`. Evidence packs list each control's evidence for the period and name the gaps plainly; a
+mapping is never evidence that a control is in place. Nothing calls a connector, the network, or a
+model.
+
+**Control frameworks as data.** `kit-controls` reads three compact derived files: NIST SP 800-53
+Rev 5 (OSCAL 5.2.0; IDs, titles, one-line summaries, baselines; public domain), MITRE ATT&CK
+Enterprise v20.0 (techniques, mitigations, links; MITRE's licence and notice kept in the file and in
+outputs that show ATT&CK), and the Center for Threat-Informed Defense ATT&CK-to-800-53 mapping (Apache
+2.0). Each records its source, commit, version, and retrieval date. `map` suggestions are keyword
+matches labelled "(suggested)". CRI Profile content isn't bundled (different licence); it's cited by
+name, version, and statement ID. ATT&CK: © 2026 The MITRE Corporation. This work is reproduced and
+distributed with the permission of The MITRE Corporation.
+
+**Questions, templates, and skills.** `kit-questions` keeps a per-project tracker; drafting messages
+never marks questions asked (that happens after sending). `kit-templatecheck` compares a draft's heading
+outline with its template. Skills install only where a name is free; a `.kit-installed.json` hash lets
+a later install refresh Kit's own unedited copy.
+
+**Monthly regulatory watch.** `reg_watch.py`, like `demand_refresh.py`, makes no outside call: it
+decides due, skip, or on (first Monday, regimes set, budget below warn, enough time left) and adds
+WebSearch, WebFetch, and Agent only when on, so the web is otherwise never in the weekly run's allowed
+tools. The researcher searches with regime names only.
 
 **Weekly demand refresh.** With `DEMAND_REFRESH` on, the weekly review delegates a scoped refresh to
 the demand tracker after the audit: register rows only, one get per demand under its guard hooks,
@@ -360,12 +437,13 @@ or `kit-run`, never as Claude Code's own model. Precedence: organization ceiling
 
 - Windows support is built and logic-tested on macOS only; real Windows, Outlook COM, and Task
   Scheduler behavior is untested.
-- The SQL transport is tested on MySQL only; PostgreSQL and SQL Server are untested.
+- The SQL transport is tested on MySQL and PostgreSQL (password login over SCRAM tested; one shared
+  role, so row-level security policies untested); SQL Server is untested.
 - `kit-run` lacks MCP resources, prompts, sampling, OAuth sign-in, several hook types, web tools,
   and general shell access (see `shared/KIT-RUN.md`).
 - Small and local models call tools less reliably; agents stay on Claude until evals pass.
-- The connector guard only governs agents that carry its hooks (the gateway, status reporter, and
-  demand tracker); Kit's own session and other agents with connector tools can still call connectors
+- The connector guard only governs agents that carry its hooks (the gateway, demand tracker,
+  intake triager, dependency mapper, and status reporter); Kit's own session and other agents with connector tools can still call connectors
   unlogged (`kit-audit` reports this standing gap).
 - `kit-lifecycle` can't tell whether a paid extended-support subscription is held; `extended` items
   count as covered only once the owner confirms it.
