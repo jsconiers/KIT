@@ -9,7 +9,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 S="$(mktemp -d)"; trap 'pkill -f "$S/" 2>/dev/null; pkill -f "fake_mcp_server.py --http $S" 2>/dev/null; rm -rf "$S"' EXIT
 export KIT_PROVIDER_BACKOFF=0.05 KIT_PROVIDER_RETRIES=0 HERE S
 python3 - <<'PY'
-import importlib.machinery, json, os, pathlib, subprocess, sys, time
+import importlib.machinery, importlib.util, json, os, pathlib, subprocess, sys, time
 HERE = pathlib.Path(os.environ["HERE"]); S = pathlib.Path(os.environ["S"])
 home = S / "home"; kit = S / "kit"; lib = S / "lib"
 for d in ("agents", "briefs", "memory/context", ".install/logs", ".install/shared/bin"):
@@ -276,7 +276,9 @@ ok("no script" in last_result(reqs[1])["content"], "skills: a path out of the sk
 ok("skill_script" not in names(scenario("guarded", [done()], runcfg=sk)[1][0]), "skills: no skill_script when Bash is disallowed")
 
 # ---- @imports ------------------------------------------------------------------------------------
-kr = importlib.machinery.SourceFileLoader("kr", str(HERE / "shared/bin/kit-run")).load_module()
+_loader = importlib.machinery.SourceFileLoader("kr", str(HERE / "shared/bin/kit-run"))
+kr = importlib.util.module_from_spec(importlib.util.spec_from_loader("kr", _loader))
+_loader.exec_module(kr)  # load_module() was removed in Python 3.15
 txt = kr.expand_imports(kit / "KIT.md")
 ok("Prefs index." in txt and "Pref one: be brief." in txt, "imports: nested imports followed, relative to the importing file")
 ok("already included" in txt, "imports: a cycle back to KIT.md is reported, not followed", txt)
