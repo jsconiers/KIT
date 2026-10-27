@@ -20,6 +20,19 @@ in `memory/context/writing.md`; none ship here.
 | Design review | `threat-model-template.md` | threat modeler (feeds risk and compliance mapper, implementation planner) | `standards.md` |
 | Compliance | `csf-mapping-template.md` | risk and compliance mapper (when NIST CSF 2.0 applies; `kit-csf`) | `compliance.md` |
 | Traceability | `traceability-matrix-template.md` | implementation planner, GDS writer, Kit (`kit-trace`) | `writing.md` |
+| Projects | `executive-onepager-template.md` | deck builder, Kit (`kit-onepager`) | `writing.md` |
+| Diagrams | `diagram-lint-rules.example.json` | diagrammer, reviewer (`kit-diaglint`) | `diagrams.md` (Lint rules) |
+| TOGAF (on request) | `togaf-architecture-vision-template.md` | IA writer, GDS writer, implementation planner (on request) | `writing.md` |
+| TOGAF (on request) | `togaf-statement-of-architecture-work-template.md` | IA writer, GDS writer, implementation planner (on request) | `writing.md` |
+| TOGAF (on request) | `togaf-architecture-definition-document-template.md` | IA writer, GDS writer, implementation planner (on request) | `writing.md` |
+| TOGAF (on request) | `togaf-architecture-requirements-specification-template.md` | IA writer, GDS writer, implementation planner (on request) | `writing.md` |
+| TOGAF (on request) | `togaf-transition-architecture-template.md` | IA writer, GDS writer, implementation planner (on request) | `writing.md` |
+| TOGAF (on request) | `togaf-implementation-migration-plan-template.md` | IA writer, GDS writer, implementation planner (on request) | `writing.md` |
+| Diagrams | `viewpoints-template.md` | diagrammer (on request), Kit (`kit-viewpoints`) | `diagrams.md` |
+| Questions | `question-tracker-template.md` | IA writer, GDS writer, intake triager, Kit (`kit-questions`) | `writing.md` |
+| Compliance | `exception-register-template.md` | risk and compliance mapper, standards checker, Kit (`kit-exceptions`) | `compliance.md` |
+| Compliance | `pbc-tracker-template.md` | Kit (`kit-pbc`) | `compliance.md` |
+| Compliance | `control-map.example.json` | Kit (`kit-audit-export --controls`) | `compliance.md` |
 | Costs | `sizing-template.md` | cost estimator, Kit (`kit-sizing`) | `costs.md` |
 | POC | `poc-charter-template.md` | POC lead | `poc.md` |
 | POC | `poc-test-plan-template.md` | POC lead | `poc.md` |

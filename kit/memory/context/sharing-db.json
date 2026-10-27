@@ -1,5 +1,5 @@
 {
-  "_about": "Database settings for sharing between Kits through a SQL server, used when Transport in sharing.md is sql. MySQL with PyMySQL is tested; PostgreSQL and SQL Server are UNTESTED (see shared/sql/README.md). Create the database with kit-team db-init. The credential is named, never stored: an environment variable (credential_env) or a macOS Keychain entry (keychain_entry). tls is require by default.",
+  "_about": "Database settings for sharing between Kits through a SQL server, used when Transport in sharing.md is sql. MySQL with PyMySQL and PostgreSQL with psycopg are tested; SQL Server is UNTESTED (see shared/sql/README.md). Create the database with kit-team db-init. The credential is named, never stored: an environment variable (credential_env) or a macOS Keychain entry (keychain_entry). tls is require by default.",
   "dialect": "not set",
   "host": "not set",
   "port": null,

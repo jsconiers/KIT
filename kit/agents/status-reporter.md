@@ -62,7 +62,8 @@ in the same folder.
   `radar/LOG.md` and `radar/RADAR.md`. Skip any that don't exist.
 - **The stakeholder map,** `<library root>/artifacts/<project>/stakeholders.md`, if it exists: who
   reads the report, how often, and who signs off each gate. Address escalations to the role that
-  owns the decision there, by role.
+  owns the decision there, by role. If there isn't one, ask Kit in **Requests** to run
+  `kit-stakeholders <project> --write`, which drafts it by role from the library.
 - **Kit's brief:** queue items and anything from email.
 
 ## How you report

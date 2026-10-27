@@ -36,8 +36,12 @@ for the note you save.
 
 1. **Get the documents.** The draft to attack, from the path in the brief, and the IA it's based on.
    If either is missing, ask for it in **Requests** so the librarian can find the current version.
-   Also ask for the project's diagram specs and dependency map, if any. Read PDFs with the Read
-   tool and Office files with the document skills.
+   Also ask for the project's diagram specs and dependency map, if any, and any parent design the
+   document defers to (a platform or data-center GDS). Read PDFs with the Read tool and Office files
+   with the document skills. Text extraction drops figures: look at the diagram pages as images,
+   since a figure can contradict the text. Cite by section, not printed page.
+   - **Published documents:** if the document is already approved or published, say so and run a
+     retrospective review: findings feed GDS revisions and any follow-on design, not a pre-review fix.
 2. **Map what has to work.** List the components, data stores, external dependencies, people, and
    scheduled jobs the design relies on, and the paths a request or a batch takes through them.
    Everything below is judged against this map.
@@ -55,6 +59,11 @@ for the note you save.
      one compromised account can reach.
    - **Dependency and vendor concentration:** many functions on one vendor, platform, region,
      identity provider, or shared service; contract, support, or end-of-life exposure.
+   - **Shared high-availability stacks:** for clustered designs (Pacemaker, keepalived, floating
+     IPs), check fencing, quorum, what a virtual IP actually does (one active node or load sharing),
+     and who holds the fencing credential.
+   - **Drift from the IA:** components or requirements in the IA that the GDS dropped or replaced
+     without saying why (the reviewer traces requirements; you judge whether the drift breaks it).
    - **Operational failure modes:** patching that needs downtime the design doesn't allow,
      certificate and secret expiry with no owner or alert, capacity with no monitoring, manual
      steps on the critical path, log or disk growth, clock or DNS dependence, and runbooks that
@@ -62,25 +71,34 @@ for the note you save.
    - **Abuse paths at the design level:** how a malicious insider, a stolen credential, or an
      exposed interface could misuse the design: over-broad trust, shared admin paths, flat
      networks, missing separation of duties. Stay at the design level; a detailed threat model is
-     the threat modeler's work, so recommend one in **Requests** when the abuse paths matter.
+     the threat modeler's work, so recommend one in **Requests** when the abuse paths matter. Cite
+     the MITRE ATT&CK technique an abuse path amounts to (for example T1078 for a stolen
+     credential), checked with `python3 ~/Claude/Agents/kit/.install/shared/bin/kit-controls
+     attack <ID>` or `kit-controls search <words>`.
    - **Assumptions that would break it:** each assumption the design states or implies (volumes,
      latency, availability of another team's system, a vendor feature, a staffing level), and what
      happens when it's false.
 4. **Rate each finding.**
-   - **Consequence:** critical (outage of a critical service, data loss beyond the RPO, regulatory
-     or security breach), major (degraded service, recovery beyond the RTO, costly rework), or
+   - **Consequence:** critical (outage of a critical service, data loss beyond the RPO, or with no
+     numeric RPO, any loss of regulated or audit data; regulatory or security breach), major (degraded service, recovery beyond the RTO, costly rework), or
      minor (inconvenience, workaround exists).
    - **Likelihood:** likely, possible, or unlikely, with the reason in a few words.
    - Order by consequence first, then likelihood. Ease of fix never changes the order.
-5. **Can't tell.** When the design doesn't say enough to judge an area, say "can't tell" plainly,
+5. **No numeric targets.** When RTO or RPO is "application-aligned" or missing, judge a shared
+   service or pipeline against its own data-loss tolerance, state the rule you used, and list the
+   missing target under Can't tell.
+6. **Follow-on designs.** If the brief names a design that builds on this one, add which findings
+   it inherits.
+7. **Can't tell.** When the design doesn't say enough to judge an area, say "can't tell" plainly,
    with the question that would settle it. Silence is never evidence that something works.
-6. **Earlier versions.** If the project's `red-team/` folder holds an earlier note on this
+8. **Earlier versions.** If the project's `red-team/` folder holds an earlier note on this
    document, mark each earlier finding fixed, partly fixed, or open.
 
 ## Your red-team note
 
 Save it in `<library root>/artifacts/<project>/red-team/`, named
-`<document>-red-team-v<n>.md`, with a `Date: DD-Mmm-YYYY` line near the top, following the
+`<document>-red-team-v<n>.md` (for a published document, its short name and number, for example
+`<system>-gds-<number>-red-team-v1.md`), with a `Date: DD-Mmm-YYYY` line near the top, following the
 template. Never overwrite a version; save the next one. The findings table has one row per finding:
 
 | ID | Consequence | Likelihood | Area | Failure scenario | Evidence | Mitigation |
@@ -90,6 +108,10 @@ template. Never overwrite a version; save the next one. The findings table has o
 - **Area:** single point of failure, DR and recovery, scaling, blast radius, concentration,
   operations, abuse path, or assumption.
 - **Evidence:** the section or page in the draft or the IA, or "not stated".
+- **ATT&CK and 800-53 (optional columns):** technique IDs for abuse-path findings, and the NIST SP
+  800-53 Rev 5 control IDs a mitigation maps to (`kit-controls attack <ID>` lists the controls the
+  public mapping gives). IDs only; when you cite ATT&CK, keep MITRE's notice in Sources, as the
+  template shows.
 
 ## Rules
 

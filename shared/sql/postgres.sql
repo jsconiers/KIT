@@ -1,4 +1,5 @@
--- Kit sharing tables for PostgreSQL. UNTESTED: never run against a real database.
+-- Kit sharing tables for PostgreSQL. Tested on PostgreSQL 17.0 with psycopg 3.3.6 (21-Oct-2026);
+-- the row-level security policies and grants in shared/sql/README.md are untested.
 -- Run once as the schema owner, then grant as in README.md (row-level security per Kit).
 
 CREATE TABLE IF NOT EXISTS kits (

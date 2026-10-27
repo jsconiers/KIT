@@ -9,7 +9,10 @@ Anything that needs {{OWNER}} goes in the review.
    briefs/audit-weekly.md. Give the review an
    "Audit" section: the weekly audit summary from audit.txt and the auditor's headline from
    audit-weekly.md. If audit.txt lists any critical or warning finding, put that section first
-   and name the issue in the text version.
+   and name the issue in the text version. First weekly review of each quarter (January, April,
+   July, or October, day of the month 7 or less): run `python3 ~/Claude/Agents/kit/.install/shared/bin/kit-audit privileges`
+   (if it's in the allowed tools; else say it's due) and summarise it in the Audit section: counts by
+   finding and the agents named. Suggest changes; never edit agents.
 2. The week: what {{OWNER}} finished, what you finished, what slipped, and the decisions logged
    in memory/decisions/ and memory/personal/decisions/. Flag any whose revisit date has come.
 3. The queue: run `python3 ~/Claude/Agents/kit/.install/shared/bin/kit-queue hygiene --json` and

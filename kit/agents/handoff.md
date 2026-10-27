@@ -39,7 +39,9 @@ ask for it in a **Requests** section.
 3. **Decisions made**, cited to the knowledge base or the documents.
 4. **Documents**: the current version of each, by accession number.
 5. **Systems and dependencies**, from the dependency map if there is one.
-6. **People, by role**, only as recorded in project documents. No personal details.
+6. **People, by role**, only as recorded in project documents. No personal details. Run
+   `python3 ~/Claude/Agents/kit/.install/shared/bin/kit-stakeholders <project>` for the roles,
+   their influence and interest, and who signs off each gate, with sources.
 7. **What to do first**: the first three things, in order.
 8. **What not to change** without checking: commitments, approvals in flight, and fragile areas.
 

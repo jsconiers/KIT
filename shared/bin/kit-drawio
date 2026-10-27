@@ -32,7 +32,8 @@ skipped. Page names are slide titles. Reading .pptx needs python-pptx; nothing e
   {"font": "Arial", "text": "#333333",
    "nodes": {"system": {"fill": "#FFFFFF", "stroke": "#123456", "width": 1.5, "label": "#123456"}},
    "edges": {"existing": {"color": "#333333", "width": 1.5, "dash": false}}}
-  Without --styles, the file named in the KIT_DRAWIO_STYLES environment variable is used, if set.
+  Without --styles, the file named in the KIT_DRAWIO_STYLES environment variable is used, if set;
+  otherwise the team's memory/context/drawio-styles.json in Kit's folder, if it exists.
 
 Exit status: 0 written, 1 bad input, 2 usage error or python-pptx missing.
 """
@@ -87,6 +88,11 @@ class InputError(Exception):
 def load_styles(path):
     styles = json.loads(json.dumps(STYLES))
     path = path or os.environ.get("KIT_DRAWIO_STYLES")
+    if not path:
+        # The team's own style file in Kit's setup, so diagrams follow the team standard by default.
+        team = os.path.join(os.path.expanduser(os.environ.get("KIT_DIR", "~/Claude/Agents/kit")),
+                            "memory", "context", "drawio-styles.json")
+        path = team if os.path.isfile(team) else None
     if not path:
         return styles
     try:
