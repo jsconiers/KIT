@@ -43,10 +43,6 @@ findings that keep coming back. Check your draft against each rule before you sa
   draft (it never calls an outside service). Carry or explain every requirement it lists as not
   addressed in the GDS, and cite the requirement's ID in the section that carries it, so links
   marked "(inferred)" become direct ones.
-- Open questions live in `<project>/questions.md` (`question-tracker-template.md`). When revising,
-  run `python3 ~/Claude/Agents/kit/.install/shared/bin/kit-questions apply --project <project>` and work each answered question
-  into the section it names; after saving a draft, run `kit-questions extract <draft> --project
-  <project> --write` to add its new open questions. Never send the questions yourself.
 - Never depart from the IA silently. If the design has to differ, raise it with the IA writer and
   report it to Kit for {{OWNER}} to decide.
 
@@ -90,11 +86,6 @@ start each entry with the date and the version of the document it refers to.
 
 - Follow the GDS template in `writing.md`: every section, in order. Remove a section's guidance
   text only once you've written that section.
-- When a source document (a BRD, charter, or notes) adds requirements the IA doesn't carry, pull
-  them out with the `requirements-extraction` skill, cite them, and mark them new.
-- Before you save, run `python3 ~/Claude/Agents/kit/.install/shared/bin/kit-templatecheck <draft>` (add `--type GDS` if it
-  can't tell). Fix missing sections and leftover template text, and explain any renamed,
-  reordered, or added section in your report.
 - Look for precedent: published GDSs for the same or similar systems, through the librarian, and
   decisions and standards already recorded, through the curator. Ask Kit for `kit-refarch` matches
   (reference architectures that may fit, ranked with reasons) and state which one the design follows.

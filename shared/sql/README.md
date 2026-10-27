@@ -1,14 +1,12 @@
 # Sharing through a SQL server
 
-**MySQL and PostgreSQL are tested; SQL Server is not.** The MySQL adapter (with PyMySQL) and
+**MySQL is tested; PostgreSQL and SQL Server are not.** The MySQL adapter (with PyMySQL) and
 `mysql.sql` were tested against a real MySQL 8.0 server with PyMySQL 1.2.3 on 20-Oct-2026: `kit-team
 db-init` created the database and tables, and the live test (`tests/live/test_sql_live.py`) passed
 publishing, reading other Kits' records, refusing writes to another Kit's rows, the organization
 profile, messages and acks, and tamper detection. The first live run found and fixed a real bug:
 MySQL's default isolation level hid other Kits' newer commits from a reader, so the adapter now sets
-READ COMMITTED. The PostgreSQL adapter (psycopg 3.3.6) and `postgres.sql` passed the same live test
-against PostgreSQL 17.0 (Postgres.app) on 21-Oct-2026, with `kit-team db-init` creating the tables.
-The SQL Server adapter, its DDL, and the mysql-connector-python
+READ COMMITTED. The PostgreSQL and SQL Server adapters, their DDL, and the mysql-connector-python
 driver are still **UNTESTED**: syntax-checked only. Try them on a test database first.
 
 ## Setup
@@ -70,10 +68,8 @@ copy of the code can't.
 
 ## What's untested
 
-- SQL Server: every connection, query, and transaction, its DDL, and its grants.
-- PostgreSQL's row-level security policies and per-Kit grants above (the live test used one role
-  for both test Kits). Password login was tested: the server required SCRAM-SHA-256 for the Kit
-  role (a `pg_hba.conf` line for that role only) and refused it without the password. MySQL's per-Kit views (above) are untested too.
+- PostgreSQL and SQL Server: every connection, query, and transaction, their DDL, and the
+  row-level security policies and grants above. MySQL's per-Kit views (above) are untested too.
 - The mysql-connector-python driver (PyMySQL is the tested one).
 - The light hash-chain check (the SQL adapter checks each row's sha256 and keeps a per-Kit head
   and prev_hash, but doesn't replay the chain or detect history rewrites the way the folder

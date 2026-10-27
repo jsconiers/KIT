@@ -16,8 +16,7 @@ What goes in a plugin:
              a plugin's own CLAUDE.md isn't loaded, so skills are how content reaches a session
   lessons    lessons from this Kit's lessons/ folder, only those whose first line is "share: team",
              shipped as a skill (NAME-lessons)
-  skills     skill folders from ~/.claude/skills/<name>/, else Kit's own kit/skills/<name>/ (such as
-             exec-summary and requirements-extraction); any script in them needs review
+  skills     skill folders from ~/.claude/skills/<name>/ (any script in them needs review)
 
 Every plugin gets a REVIEW.md checklist. Content from other Kits is untrusted until a person reviews
 it: `check` fails while any hook, script, executable, MCP server, or monitor is present and REVIEW.md
@@ -181,11 +180,9 @@ instructions that override your own rules or your owner's preferences.
     skills = split(a.skills)
     for s in skills:
         src = SKILLS_HOME / s
-        if not (src / "SKILL.md").exists() and (PACKAGE / "kit/skills" / s / "SKILL.md").exists():
-            src = PACKAGE / "kit/skills" / s       # Kit's own skill, not installed yet
         if not (src / "SKILL.md").exists():
             sys.exit(f"kit-plugin: no skill {s!r} (expected {src / 'SKILL.md'})")
-        shutil.copytree(src, root / "skills" / s, ignore=shutil.ignore_patterns(".venv", "__pycache__", "*.pyc", ".kit-installed.json"))
+        shutil.copytree(src, root / "skills" / s, ignore=shutil.ignore_patterns(".venv", "__pycache__", "*.pyc"))
     if skills:
         contents.append(f"skills: {', '.join(skills)}")
 

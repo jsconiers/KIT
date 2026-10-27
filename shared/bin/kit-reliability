@@ -36,10 +36,7 @@ LOGS = KIT / ".install/logs"
 CONFIG = KIT / ".install/shared/morning/config"
 OUT = KIT / "briefs/reliability.json"
 MODES = ("morning", "weekly", "worklist", "eod", "open", "journal")
-# run.sh stamps lines with `date` ("Mon Oct 19 07:30:06 EDT 2026"); run.ps1 with Get-Date, which in
-# the en-US culture gives "10/19/2026 07:30:06" (or "10/19/2026 7:30:06 AM").
-STAMP = re.compile(r"^== (\w{3} \w{3} +\d+ \d\d:\d\d:\d\d \w+ \d{4}"
-                   r"|\d{1,2}/\d{1,2}/\d{4} \d{1,2}:\d\d:\d\d(?: [AP]M)?) (.*)$")
+STAMP = re.compile(r"^== (\w{3} \w{3} +\d+ \d\d:\d\d:\d\d \w+ \d{4}) (.*)$")
 
 
 def setting(key, default):
@@ -56,13 +53,7 @@ def parse_when(text):
     try:
         return dt.datetime.strptime(" ".join(parts[:4] + parts[5:6]), "%a %b %d %H:%M:%S %Y")
     except (ValueError, IndexError):
-        pass
-    for f in ("%m/%d/%Y %H:%M:%S", "%m/%d/%Y %I:%M:%S %p"):   # run.ps1's Get-Date (en-US)
-        try:
-            return dt.datetime.strptime(text.strip(), f)
-        except ValueError:
-            continue
-    return None
+        return None
 
 
 def scheduled_runs(since):

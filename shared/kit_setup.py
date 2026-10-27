@@ -2,10 +2,7 @@
 """kit_setup.py: install Kit's files, and add Kit to (or remove it from) Claude Code.
 
   check        confirm ~/.claude/settings.json and ~/.claude/CLAUDE.md can be updated; changes nothing
-  scaffold     copy Kit's starter files into ~/Claude/Agents/kit, never overwriting existing ones,
-               then install Kit's skills (as "skills" does)
-  skills       copy kit/skills/<name> into ~/.claude/skills/<name> when no skill of that name is
-               there; a skill Kit installed earlier is refreshed only if it hasn't been edited since
+  scaffold     copy Kit's starter files into ~/Claude/Agents/kit, never overwriting existing ones
   activate     add Kit's import line to ~/.claude/CLAUDE.md and Kit's rules to ~/.claude/settings.json
                (Claude Code's auto memory is left alone)
   deactivate   remove exactly what activate added, as recorded in .install/manifest.json
@@ -15,7 +12,6 @@ Standard library only; Python 3.8 or newer.
 """
 import argparse
 import datetime as dt
-import hashlib
 import json
 import os
 import shutil
@@ -32,8 +28,6 @@ MANIFEST = INSTALL_DIR / "manifest.json"
 CLAUDE_DIR = HOME / ".claude"
 CLAUDE_MD = CLAUDE_DIR / "CLAUDE.md"
 SETTINGS = CLAUDE_DIR / "settings.json"
-SKILLS_HOME = Path(os.path.expanduser(os.environ.get("KIT_SKILLS_DIR", str(CLAUDE_DIR / "skills"))))
-SKILL_MARK = ".kit-installed.json"           # written into each skill folder Kit installs
 PACKAGE = Path(__file__).resolve().parent   # this file lives in shared/
 REPO = PACKAGE.parent                        # repo root: holds kit/, shared/, platform/, README.md
 
@@ -240,62 +234,6 @@ def cmd_scaffold(args):
         print(f"Kit version {cur['version']} ({cur['commit'][:7]}).")
     if newer:
         print("Kept your KIT.md; the packaged version is KIT.md.new, so compare and merge if you like.")
-    report_skills(install_skills())
-    return 0
-
-
-def _skill_hash(folder):
-    """sha256 over a skill folder's files (not Kit's marker), so edits since install show up."""
-    h = hashlib.sha256()
-    for f in sorted(p for p in folder.rglob("*") if p.is_file() and p.name != SKILL_MARK):
-        h.update(f.relative_to(folder).as_posix().encode() + b"\0" + f.read_bytes() + b"\0")
-    return h.hexdigest()
-
-
-def install_skills(src=None, dest_root=None):
-    """Copy each kit/skills/<name> into ~/.claude/skills/<name>. Never overwrites a skill the
-    owner has: a folder of that name that Kit didn't install, or that changed since Kit installed
-    it, is skipped and reported. Returns (installed, updated, current, skipped) name lists."""
-    src = src or REPO / "kit" / "skills"
-    dest_root = dest_root or SKILLS_HOME
-    installed, updated, current, skipped = [], [], [], []
-    if not src.is_dir():
-        return installed, updated, current, skipped
-    for folder in sorted(p for p in src.iterdir() if (p / "SKILL.md").is_file()):
-        dest = dest_root / folder.name
-        want = _skill_hash(folder)
-        if dest.exists():
-            try:
-                mark = json.loads((dest / SKILL_MARK).read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                mark = None
-            if not isinstance(mark, dict) or mark.get("sha256") != _skill_hash(dest):
-                skipped.append(folder.name)          # the owner's own skill, or edited since
-                continue
-            if mark["sha256"] == want:
-                current.append(folder.name)
-                continue
-            shutil.rmtree(str(dest))                 # Kit's own, unedited copy: refresh it
-            updated.append(folder.name)
-        else:
-            installed.append(folder.name)
-        shutil.copytree(str(folder), str(dest), ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-        write_text_atomic(dest / SKILL_MARK, json.dumps(
-            {"installed_by": "kit", "date": today(), "sha256": want}, indent=2) + "\n")
-    return installed, updated, current, skipped
-
-
-def report_skills(result):
-    installed, updated, current, skipped = result
-    parts = [f"{len(installed)} installed", f"{len(updated)} updated", f"{len(current)} already current"]
-    print(f"Kit's skills in {SKILLS_HOME}: " + ", ".join(parts) + ".")
-    for name in skipped:
-        print(f"Skipped skill {name}: {SKILLS_HOME / name} is yours (or was edited), so it was left "
-              f"as it is. Kit's version is in {REPO / 'kit' / 'skills' / name}.")
-
-
-def cmd_skills(args):
-    report_skills(install_skills())
     return 0
 
 
@@ -421,11 +359,10 @@ def main(argv=None):
     sub.required = True
     sub.add_parser("check")
     sub.add_parser("scaffold")
-    sub.add_parser("skills")
     sub.add_parser("activate")
     sub.add_parser("deactivate")
     args = parser.parse_args(argv)
-    handlers = {"check": cmd_check, "scaffold": cmd_scaffold, "skills": cmd_skills, "activate": cmd_activate,
+    handlers = {"check": cmd_check, "scaffold": cmd_scaffold, "activate": cmd_activate,
                 "deactivate": cmd_deactivate}
     try:
         return handlers[args.cmd](args) or 0

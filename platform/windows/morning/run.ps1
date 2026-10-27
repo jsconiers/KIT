@@ -28,10 +28,7 @@
 #
 # Settings live in .install\shared\morning\config (shared with the Mac, KEY="value" lines):
 #   OWNER_NAME, SKIP_DAYS, BLOCK_TOOLS, ALLOW_TOOLS, ALLOW_TOOLS_WEEKLY, the weekly demand refresh
-#   (DEMAND_REFRESH, DEMAND_SERVER, DEMAND_TOOLS, DEMAND_REGISTER_DIR), the monthly regulatory watch
-#   (REG_WATCH, REG_WATCH_WHEN, REG_WATCH_MIN_LEFT), the connector outage alert
-#   (CONNECTOR_FAIL_STREAK), the run and cost alerts (RUN_ALERTS, RUN_ALERTS_TIMEOUT, RUN_FAIL_STREAK,
-#   RUN_WINDOW_<MODE>, COST_ALERT_PROJECTION, COST_SPIKE_FACTOR; read by run_alerts.py), the time limits
+#   (DEMAND_REFRESH, DEMAND_SERVER, DEMAND_TOOLS, DEMAND_REGISTER_DIR), the time limits
 #   RUN_TIMEOUT (1200 s), RUN_TIMEOUT_WEEKLY (3000), RUN_TIMEOUT_WORKLIST (900), RUN_LOCK_WAIT
 #   (1800), the budget keys COST_BUDGET_MONTHLY, COST_STOP_PCT, COST_ESSENTIAL_MODES, and the
 #   delivery keys:
@@ -230,37 +227,6 @@ foreach ($side in @("work", "personal")) {   # the split texts, so an old one is
     Remove-Item -LiteralPath ($Text -replace '\.txt$', "-$side.txt") -Force -ErrorAction SilentlyContinue
 }
 
-# Run and cost alerts (run_alerts.py): from kit-reliability's run outcomes and kit-cost's ledger, a
-# run type failing RUN_FAIL_STREAK times running (default 2) or overdue past its RUN_WINDOW_<MODE>,
-# a month projected over the warning level, spend over the stop level, or (with no budget) a cost
-# spike over COST_SPIKE_FACTOR x the 14-day median each get one [work] queue item for the owner and a
-# red dashboard banner (briefs\alerts.json); the next success, or the month's end, clears them. It
-# runs at the end of every run and before the morning and weekly model runs, is stopped after
-# RUN_ALERTS_TIMEOUT seconds (default 60), never fails the run, and RUN_ALERTS="off" skips it.
-function Invoke-RunAlerts([string[]]$extra = @()) {
-    if ((Cfg "RUN_ALERTS" "on") -eq "off") { return }
-    $raPy = Join-Path $ShareDir "run_alerts.py"
-    $py = Resolve-Python
-    if ($null -eq $py -or -not (Test-Path -LiteralPath $raPy)) { return }
-    try {
-        $limit = [int](Cfg "RUN_ALERTS_TIMEOUT" "60")
-        $argList = @($py.Args + @("`"$raPy`"", "--kit", "`"$KitHome`"", "--no-dashboard") + $extra)
-        $errFile = Join-Path $LogDir ".run-alerts-$PID.err"
-        $p = Start-Process -FilePath $py.Exe -ArgumentList $argList -NoNewWindow -PassThru `
-            -RedirectStandardOutput (Join-Path $LogDir ".run-alerts-$PID.out") -RedirectStandardError $errFile
-        if (-not $p.WaitForExit($limit * 1000)) {
-            try { $p.Kill() } catch {}
-            Write-Log "== $(Get-Date) run alerts stopped after $limit s"
-        }
-        if (Test-Path -LiteralPath $errFile) {
-            Get-Content -LiteralPath $errFile -ErrorAction SilentlyContinue | ForEach-Object { Write-Log "$_" }
-        }
-        Remove-Item -LiteralPath $errFile, (Join-Path $LogDir ".run-alerts-$PID.out") -Force -ErrorAction SilentlyContinue
-    } catch {
-        Write-Log "== run alerts skipped: $($_.Exception.Message)"
-    }
-}
-
 # Budget guard (kit-cost): at the stop level only the essential runs go ahead; the others skip, with
 # one notice a day. Without a budget, or without kit-cost, every run goes ahead.
 $CostLevel = "ok"; $CostPct = ""
@@ -282,7 +248,6 @@ if ($null -ne $pyc -and (Test-Path -LiteralPath $kitCost)) {
             Set-Content -LiteralPath $notice -Encoding UTF8 -Value "Kit budget: $CostPct of this month's budget is used, so Kit skipped its $Mode run. The morning brief still runs. See: kit-cost"
             if (Send-Brief $notice $false) { New-Item -ItemType File -Force -Path $noticeMark | Out-Null }
         }
-        Invoke-RunAlerts @("--only", "cost")
         exit 0
     }
 }
@@ -313,9 +278,6 @@ if ($Mode -eq "morning" -or $Mode -eq "weekly") {
 # Connector health (morning only): kit-connect test, with no read call and so no model cost, gives
 # one PASS/FAIL line per server for the top of the brief. connector_health.py stops it after
 # CONNECTOR_CHECK_TIMEOUT seconds (default 120) and never fails the run; CONNECTOR_CHECK="off" skips it.
-# It keeps a history (briefs\connectors-history.jsonl), and when a server fails CONNECTOR_FAIL_STREAK
-# mornings running (default 2) it adds one [work] queue item for the owner and raises the dashboard's
-# connector-outage banner (briefs\connectors-alerts.json); a passing check clears it.
 $ConnectLine = ""
 $connHealth = Join-Path $ShareDir "connector_health.py"
 if ($Mode -eq "morning" -and (Cfg "CONNECTOR_CHECK" "on") -ne "off" -and (Test-Path -LiteralPath $connHealth)) {
@@ -324,8 +286,7 @@ if ($Mode -eq "morning" -and (Cfg "CONNECTOR_CHECK" "on") -ne "off" -and (Test-P
         Remove-Item -LiteralPath $connOut -Force -ErrorAction SilentlyContinue
         $connPy = Resolve-Python
         if ($null -ne $connPy) {
-            & $connPy.Exe @($connPy.Args + @($connHealth, "--timeout", (Cfg "CONNECTOR_CHECK_TIMEOUT" "120"),
-                "--streak", (Cfg "CONNECTOR_FAIL_STREAK" "2"), "--kit", $KitHome, "--out", $connOut)) *> $null
+            & $connPy.Exe @($connPy.Args + @($connHealth, "--timeout", (Cfg "CONNECTOR_CHECK_TIMEOUT" "120"), "--out", $connOut)) *> $null
         }
         if (Test-Path -LiteralPath $connOut) {
             $ConnectLine = ((Get-Content -LiteralPath $connOut -TotalCount 1) -join "").Trim()
@@ -334,16 +295,6 @@ if ($Mode -eq "morning" -and (Cfg "CONNECTOR_CHECK" "on") -ne "off" -and (Test-P
         $ConnectLine = ""
     }
     if ($ConnectLine -ne "") { Write-Log "== $(Get-Date) $ConnectLine" }
-}
-# Open run and cost alerts for the top of the morning brief and the weekly review (recomputed now).
-$AlertLines = ""
-if ($Mode -eq "morning" -or $Mode -eq "weekly") {
-    $alertsOut = Join-Path $KitHome "briefs\alerts.txt"
-    Remove-Item -LiteralPath $alertsOut -Force -ErrorAction SilentlyContinue
-    Invoke-RunAlerts @("--out", "`"$alertsOut`"")
-    if (Test-Path -LiteralPath $alertsOut) {
-        $AlertLines = ((Get-Content -LiteralPath $alertsOut -Encoding UTF8 -ErrorAction SilentlyContinue) -join "`n").Trim()
-    }
 }
 
 # Build the prompt (substitute {{OWNER}}) and the claude argument list.
@@ -356,9 +307,6 @@ if ($Mode -eq "morning" -or $Mode -eq "weekly") {
         if ($holds -ne "") {
             $promptText += "`n`nActive legal holds (nothing in these projects may be deleted, moved, or rewritten; list them in a `"Legal holds`" section near the top of the brief, by project name only): $holds"
         }
-    }
-    if ($AlertLines -ne "") {
-        $promptText += "`n`nOpen alerts (kit-alerts): put each of these lines, as written, near the top of the brief (below the connector line, if there is one), and add `"Alerts: `" plus the number open to the health problems at the top of the text:`n$AlertLines"
     }
     if ($ConnectLine -ne "") {
         $promptText += "`n`nConnector check before this run (kit-connect test): put this line, as written, at the top of the brief (below the Audit issue section, if there is one), and if any server says FAIL, add `"Connectors: `" plus the failing server names to the health problems at the top of the text: $ConnectLine"
@@ -413,35 +361,6 @@ if ($Mode -eq "weekly" -and (Cfg "DEMAND_REFRESH" "off") -eq "on") {
     }
     Remove-Item -LiteralPath $demandOut -Force -ErrorAction SilentlyContinue
 }
-# Monthly regulatory watch (REG_WATCH="on" in the config; off by default): on the first weekly review
-# of each month (first Monday; REG_WATCH_WHEN="every-run" for every weekly review), the researcher
-# writes a cited brief on last month's public changes to the regimes in compliance.md's "Regulatory
-# watch" field, saved in the library, with three lines in the review. reg_watch.py (no web, connector,
-# or model call) checks the date, the setup, the budget (skipped at warn or stop), and the time left
-# (REG_WATCH_MIN_LEFT minutes), and gives the prompt text plus the tools it needs: Agent, WebSearch,
-# and WebFetch, which are allowed only when the watch is on and due, and Edit on its folder.
-$regWatchRules = @()
-$regWatchPy = Join-Path $ShareDir "reg_watch.py"
-if ($Mode -eq "weekly" -and (Cfg "REG_WATCH" "off") -eq "on" -and $null -ne $pyc -and (Test-Path -LiteralPath $regWatchPy)) {
-    $regWatchOut = Join-Path $LogDir ".reg-watch-$PID.txt"
-    # --key=value keeps an empty setting from being dropped as an argument.
-    $regWatchLines = @(& $pyc.Exe @($pyc.Args + @($regWatchPy,
-        "--when=$(Cfg 'REG_WATCH_WHEN' 'first-monday')", "--cost-level=$CostLevel", "--timeout=$Timeout",
-        "--min-left=$(Cfg 'REG_WATCH_MIN_LEFT' '15')", "--owner=$OwnerName", "--home=$($env:USERPROFILE)",
-        "--prompt=$(Join-Path $ShareDir 'prompt-reg-watch.md')", "--out=$regWatchOut")) 2>$null)
-    $first = if ($regWatchLines.Count -gt 0) { "$($regWatchLines[0])".Trim() } else { "skip (reg_watch.py failed)" }
-    if ($first -eq "on") {
-        $regWatchRules = @($regWatchLines | Select-Object -Skip 1 | ForEach-Object { "$_".Trim() } | Where-Object { $_ -ne "" })
-        Write-Log "== $(Get-Date) weekly: regulatory watch on ($($regWatchRules.Count) allowed-tool rules added)"
-    } elseif ($first -ne "not-due") {
-        Write-Log "== $(Get-Date) weekly: regulatory watch $first"
-    }
-    if (Test-Path -LiteralPath $regWatchOut) {
-        $regWatchText = "$(Get-Content -LiteralPath $regWatchOut -Raw)".TrimEnd()
-        if ($regWatchText -ne "") { $promptText += "`n`n" + $regWatchText }
-    }
-    Remove-Item -LiteralPath $regWatchOut -Force -ErrorAction SilentlyContinue
-}
 # claude tool-permission globs use forward slashes; build them from the real kit home.
 $kitFwd      = $KitHome -replace '\\', '/'
 $briefGlob   = "Edit($kitFwd/briefs/**)"
@@ -454,7 +373,7 @@ $allowed = @("Bash(date:*)", $briefGlob, $journalGlob,
 # Rules are separated by semicolons, since a rule can contain spaces.
 $allowed += @($AllowTools -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
 if ($Mode -eq "weekly") { $allowed += @($AllowToolsWeekly -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }) }
-foreach ($r in @($demandRules + $regWatchRules)) { if ($allowed -notcontains $r) { $allowed += $r } }
+foreach ($r in $demandRules) { if ($allowed -notcontains $r) { $allowed += $r } }
 # A run id tags this run's claude process, so a run that hits its time limit can be found and
 # stopped (stopping the PowerShell job alone leaves the claude process running).
 $RunId = "kit-$Mode-" + [guid]::NewGuid().ToString("N")
@@ -635,9 +554,6 @@ if ($quietTrim -eq "MARKET CLOSED" -or $quietTrim -eq "NO TEXT") {
     $null = Send-Brief $failFile $false
     Write-Log "== sent failure notice"
 }
-
-# Recompute the run and cost alerts with this run's outcome (the dashboard is rebuilt just below).
-Invoke-RunAlerts
 
 # --- Save the day's changes to Kit's private local history, then refresh the dashboard --------
 if (Test-Path -LiteralPath (Join-Path $KitHome ".git")) {

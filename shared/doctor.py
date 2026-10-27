@@ -4,10 +4,6 @@
   python3 ~/Claude/Agents/kit/.install/shared/doctor.py             full report
   python3 ~/Claude/Agents/kit/.install/shared/doctor.py --brief     problems only, one per line
   python3 ~/Claude/Agents/kit/.install/shared/doctor.py --servers   also start each MCP server (slow)
-  python3 ~/Claude/Agents/kit/.install/shared/doctor.py --readiness [--json]
-                                     agent readiness: no known limit, limits, blocked, and why by cause
-                                     (the source for readiness figures in documents; KIT_DIR overrides
-                                     the Kit folder). Read-only.
 
 Exits 1 when anything fails. Warnings don't fail the check.
 """
@@ -185,24 +181,15 @@ def check_permissions():
           f"permissions are {oct(mode)}; run: chmod 700 ~/Claude/Agents/kit", "warn")
 
 
-def agent_drift(kit=None, home=None):
-    """Live agents (kit/agents) missing from or different in ~/.claude/agents, sorted. None when
-    Kit has no agents folder. Shared with the drift monitor (shared/morning/monitor_drift.py)."""
-    src = pathlib.Path(kit or KIT) / "agents"
+def check_agents():
+    src = KIT / "agents"
     if not src.exists():
-        return None
+        return
     drift = []
     for f in src.glob("*.md"):
-        dest = pathlib.Path(home or HOME) / ".claude/agents" / f.name
+        dest = HOME / ".claude/agents" / f.name
         if not dest.exists() or dest.read_text() != f.read_text():
             drift.append(f.stem)
-    return sorted(drift)
-
-
-def check_agents():
-    drift = agent_drift()
-    if drift is None:
-        return
     check(not drift, "Kit's staff installed", "all subagents current",
           "out of date in ~/.claude/agents: " + ", ".join(drift)
           + " (run: python3 ~/Claude/Agents/kit/.install/shared/doctor.py --fix-agents)", "warn")
@@ -516,198 +503,15 @@ def check_guard():
             add("warn", "Trail guard errors", f"{fails} in {last.name}; run: trail-guard log {last.stem[6:]}")
 
 
-# ---- agent readiness (doctor.py --readiness) ------------------------------------------------------
-# The source of Kit's agent-readiness figures: how many agents have no known limit, have limits, or are
-# blocked, and why, by cause. Computed from what each agent reads and needs, never from notes:
-#   setup      fields in the setup files the agent names (memory/context/<file>) whose value is "not set"
-#              ("- **Field:** not set"); a limit. A named setup file that's missing blocks the agent.
-#   library    agents that name library.md need the library root it names to exist; blocks.
-#   connector  agents with connector-guard hooks, or that name connectors.md and can reach a connector or the
-#              gateway (no explicit tools list, or one with mcp__ tools or Agent), need connector-guard.json and
-#              working connectors. A server fails when the morning check has an open outage for it
-#              (briefs/connectors-alerts.json), else when its latest result in connectors-history.jsonl
-#              failed, else when a credential variable it names (credential_env) isn't set (by name
-#              only; values are never read). Some failing: a limit; all failing, none configured, or
-#              settings unreadable: blocked.
-#   tool       a kit-* tool the agent names that isn't in .install/shared/bin; a limit.
-#   command    an outside command the agent names in backticks, alone or with arguments (`drawio`,
-#              `soffice --headless ...`; drawio, soffice, pdftotext, java), that isn't on the PATH; a limit.
-READINESS_COMMANDS = ("drawio", "soffice", "pdftotext", "java")
-NOT_SET = re.compile(r"^\s*[-*]\s+\*\*([^*\n]+?)\*\*\s*:?\s*[`_]*not set\b", re.M | re.I)
-CAUSES = {"setup": "setup fields not set", "setup-missing": "setup file missing", "library": "library root missing",
-          "connector": "connectors not working", "tool": "Kit tool missing", "command": "outside command missing"}
-
-
-def _read(path):
-    try:
-        return pathlib.Path(path).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return None
-
-
-def not_set_fields(text):
-    return [m.group(1).strip().rstrip(":") for m in NOT_SET.finditer(text or "")]
-
-
-def _connector_state(kit, env):
-    """(problem blocking everything or None, {server: reason failing}, [servers])."""
-    path = env.get("KIT_CONNECTOR_GUARD_CONFIG") or str(kit / "memory/context/connector-guard.json")
-    if not os.path.exists(path):
-        return "connector-guard.json missing", {}, []
-    try:
-        cfg = json.loads(_read(path) or "")
-        servers = list(cfg.get("allowed_servers") or [])
-    except (ValueError, AttributeError):
-        return "connector-guard.json unreadable", {}, []
-    if not servers:
-        return "no connectors configured (allowed_servers is empty)", {}, []
-    alerts = {}
-    try:
-        alerts = json.loads(_read(kit / "briefs/connectors-alerts.json") or "{}")
-    except ValueError:
-        pass
-    latest = {}
-    for line in (_read(kit / "briefs/connectors-history.jsonl") or "").splitlines():
-        try:
-            rec = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(rec, dict) and rec.get("server") and str(rec.get("date", "")) >= str(latest.get(rec["server"], {}).get("date", "")):
-            latest[rec["server"]] = rec
-    failing = {}
-    for s in servers:
-        if isinstance(alerts, dict) and s in alerts:
-            failing[s] = "outage since " + str((alerts[s] or {}).get("since", "?"))
-        elif s in latest:
-            if not latest[s].get("pass"):
-                failing[s] = f"failed the check on {latest[s].get('date', '?')}"
-        else:
-            miss = [v for v in (cfg.get("credential_env") or {}).get(s, []) if not env.get(v)]
-            if miss:
-                failing[s] = "credential not set: " + ", ".join(miss)
-    return None, failing, servers
-
-
-def readiness(kit=None, env=None):
-    """{"total", "counts", "by_cause", "agents", ...} for the live agents (kit/agents)."""
-    import shutil
-    kit = pathlib.Path(kit or os.environ.get("KIT_DIR") or KIT).expanduser()
-    env = os.environ if env is None else env
-    ctx = kit / "memory/context"
-    names = {p.name for p in ctx.glob("*") if p.is_file()} if ctx.is_dir() else set()
-    names |= {p.name for p in (kit / ".install/kit/memory/context").glob("*") if p.is_file()}
-    names.discard("INDEX.md")
-    bindir = kit / ".install/shared/bin"
-    lib_text = _read(ctx / "library.md") or ""
-    m = re.search(r"\*\*Library root:\*\*\s*`([^`]+)`", lib_text)
-    lib_root = pathlib.Path(os.path.expanduser(m.group(1))) if m else None
-    conn = None
-    agents = {}
-    for path in sorted((kit / "agents").glob("*.md")):
-        text = _read(path) or ""
-        fm = re.match(r"---\s*\n(.*?)\n---", text, re.S)
-        front = fm.group(1) if fm else ""
-        name = (re.search(r"^name:\s*(\S+)", front, re.M) or [None, path.stem])[1]
-        body = text[fm.end():] if fm else text
-        files = sorted(n for n in names if re.search(rf"(?<![\w.-]){re.escape(n)}(?![\w-])", body))
-        limits = []
-        for f in files:
-            t = _read(ctx / f)
-            if t is None:
-                limits.append({"cause": "setup-missing", "blocking": True, "detail": f"{f} missing"})
-                continue
-            unset = not_set_fields(t) if f.endswith(".md") else []
-            if unset:
-                limits.append({"cause": "setup", "blocking": False,
-                               "detail": f"{f}: " + ", ".join(unset) + " not set"})
-        if "library.md" in files and (ctx / "library.md").exists() and (lib_root is None or not lib_root.is_dir()):
-            limits.append({"cause": "library", "blocking": True,
-                           "detail": "library root not set" if lib_root is None else f"library root {lib_root} missing"})
-        guarded = bool(re.search(r"connector-guard\S*\"?\s+pre\b", front))
-        tl = re.search(r"^tools:[ \t]*(.+)$", front, re.M)
-        can_reach = tl is None or bool(re.search(r"mcp__|\bAgent\b", tl.group(1)))
-        if guarded or ("connectors.md" in files and can_reach):
-            if conn is None:
-                conn = _connector_state(kit, env)
-            whole, failing, servers = conn
-            if whole:
-                limits.append({"cause": "connector", "blocking": True, "detail": whole})
-            elif failing:
-                detail = "; ".join(f"{s} ({why})" for s, why in sorted(failing.items()))
-                limits.append({"cause": "connector", "blocking": len(failing) == len(servers),
-                               "detail": ("all connectors failing: " if len(failing) == len(servers) else "") + detail})
-        if bindir.is_dir():
-            missing = sorted({t for t in re.findall(r"\bkit-[a-z][a-z-]*[a-z]\b", body) if not (bindir / t).exists()})
-            if missing:
-                limits.append({"cause": "tool", "blocking": False, "detail": ", ".join(missing) + " not installed"})
-        cmds = sorted({c for c in READINESS_COMMANDS if re.search(rf"`{c}(?:`|\s[^`\n]*`)", body) and not shutil.which(c, path=env.get("PATH", os.defpath))})
-        if cmds:
-            limits.append({"cause": "command", "blocking": False, "detail": ", ".join(cmds) + " not on the PATH"})
-        status = "blocked" if any(x["blocking"] for x in limits) else ("limited" if limits else "ready")
-        agents[name] = {"status": status, "setup_files": files, "limits": limits}
-    counts = {k: sum(a["status"] == k for a in agents.values()) for k in ("ready", "limited", "blocked")}
-    by_cause = {}
-    for name, a in agents.items():
-        for x in a["limits"]:
-            c = by_cause.setdefault(x["cause"], {"label": CAUSES[x["cause"]], "agents": [], "blocking": []})
-            if name not in c["agents"]:
-                c["agents"].append(name)
-            if x["blocking"] and name not in c["blocking"]:
-                c["blocking"].append(name)
-    for c in by_cause.values():
-        c["count"] = len(c["agents"])
-    return {"generated": dt.datetime.now().isoformat(timespec="minutes"), "kit": str(kit), "total": len(agents),
-            "counts": counts, "by_cause": dict(sorted(by_cause.items(), key=lambda kv: -kv[1]["count"])),
-            "agents": agents,
-            "summary": readiness_line(len(agents), counts),
-            "method": "doctor.py --readiness: setup fields marked 'not set' in the setup files each agent names, "
-                      "missing setup files, the library root, connector state (outages, last check, credential "
-                      "names), and named Kit tools and commands. A limit the files don't record isn't seen."}
-
-
-def readiness_line(total, counts):
-    return (f"{total} agents: {counts['ready']} with no known limit, {counts['limited']} with limits, "
-            f"{counts['blocked']} blocked")
-
-
-def render_readiness(r):
-    out = [f"Agent readiness, {dt.date.today():%d-%b-%Y}: {r['summary']}.", "",
-           "By cause (agents affected; an agent can have more than one):"]
-    for cause, c in r["by_cause"].items():
-        blk = f", blocking {len(c['blocking'])}" if c["blocking"] else ""
-        out.append(f"  {c['label']}: {c['count']}{blk} ({', '.join(c['agents'])})")
-    if not r["by_cause"]:
-        out.append("  none")
-    out += ["", "By agent:"]
-    label = {"ready": "no known limit", "limited": "limited", "blocked": "BLOCKED"}
-    for name, a in r["agents"].items():
-        out.append(f"  {name:<24} {label[a['status']]}")
-        for x in a["limits"]:
-            out.append(f"      {x['cause']}{' (blocks)' if x['blocking'] else ''}: {x['detail']}")
-    out += ["", r["method"]]
-    return "\n".join(out)
-
-
-def check_readiness():
-    r = readiness(KIT)
-    if r["total"]:
-        causes = ", ".join(f"{c['label']} {c['count']}" for c in r["by_cause"].values())
-        add("ok", "Agent readiness", r["summary"] + (f" (by cause: {causes}; doctor.py --readiness)" if causes else ""))
-
-
 def main(argv):
     if "--fix-agents" in argv:
         fix_agents()
-        return 0
-    if "--readiness" in argv:
-        r = readiness()
-        print(json.dumps(r, indent=1) if "--json" in argv else render_readiness(r))
         return 0
     for fn in (check_import, check_settings, check_index, check_jobs, check_runs, check_tokens,
                check_secrets, check_permissions, check_agents, check_git, check_calendar, check_mail,
                check_guard, check_grammar, check_delivery, check_paused, check_outlook, check_holds,
                check_cost, check_version, check_models, check_direct_models, check_sharing_policy,
-               check_connectors_quick, check_phone, check_reliability, check_readiness):
+               check_connectors_quick, check_phone, check_reliability):
         try:
             fn()
         except Exception as e:  # noqa: BLE001

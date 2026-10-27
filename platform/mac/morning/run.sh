@@ -6,8 +6,6 @@
 #   run.sh eod      end-of-day wrap-up (weekdays 17:30; EOD="off" in the config skips it)
 # With DEMAND_REFRESH="on", the weekly review also has the demand tracker re-check the demands in
 # its register (demand_refresh.py, prompt-demand-refresh.md); off by default.
-# With REG_WATCH="on", the first weekly review of each month also has the researcher write a
-# monthly regulatory watch (reg_watch.py, prompt-reg-watch.md); off by default.
 # Nothing runs while Kit is paused (kit-pause). Before the morning and weekly runs, kit-outlook
 # checks that Outlook answers (set OUTLOOK_CHECK="off" in the config to skip it).
 # Every run records its estimated cost in .install/logs/cost.jsonl (kit-cost). With
@@ -25,8 +23,6 @@
 # with kit-settings. Delivery itself is shared/deliver.py; it never sends mail.
 # Auto-retry (RETRY_ON, default on; RETRY_DELAY seconds, default 120): one retry after a failure that
 # looks transient (overload, rate limit, network, an API 5xx or 529); never after a timeout or refusal.
-# Run and cost alerts (RUN_ALERTS, default on): run_alerts.py, at the end of every run, raises and
-# clears alerts for failing or overdue scheduled runs and for cost (see its header and kit-alerts).
 # Degraded mode (DEGRADED_MODE, default on): at the budget's stop level, and whenever the morning
 # model run fails or times out, kit-degraded writes the brief from Kit's files with no model call.
 MODE="${1:-morning}"
@@ -98,20 +94,6 @@ deliver() {
 cd "$KIT" || exit 1
 rm -f "$TEXT" "${TEXT%.txt}-work.txt" "${TEXT%.txt}-personal.txt"   # never resend an old text
 
-# Run and cost alerts (run_alerts.py): from kit-reliability's run outcomes and kit-cost's ledger, a
-# run type failing RUN_FAIL_STREAK times running (default 2) or overdue past its RUN_WINDOW_<MODE>,
-# a month projected over the warning level, spend over the stop level, or (with no budget) a cost
-# spike over COST_SPIKE_FACTOR x the 14-day median each get one [work] queue item for the owner and a
-# red dashboard banner (briefs/alerts.json); the next success, or the month's end, clears them. It
-# runs at the end of every run and before the morning and weekly model runs, is time-limited
-# (RUN_ALERTS_TIMEOUT, default 60 s), never fails the run, and RUN_ALERTS="off" skips it.
-run_alerts() {
-  [ "${RUN_ALERTS:-on}" = "off" ] && return 0
-  [ -f "$SHAREDIR/run_alerts.py" ] || return 0
-  perl -e 'alarm shift; exec @ARGV' "${RUN_ALERTS_TIMEOUT:-60}" \
-    python3 "$SHAREDIR/run_alerts.py" --kit "$KIT" --no-dashboard "$@" >/dev/null 2>> "$LOG" || true
-}
-
 # Budget guard (kit-cost): at the stop level only the essential runs go ahead; the others skip, with
 # one notice a day. Without a budget, or without kit-cost, every run goes ahead.
 COST_LEVEL="ok"; COST_PCT=""
@@ -126,7 +108,6 @@ if [ -f "$KIT/.install/shared/bin/kit-cost" ]; then
       echo "Kit budget: $COST_PCT of this month's budget is used, so Kit skipped its $MODE run. The morning brief still runs. See: kit-cost" > "$LOGDIR/cost-notice.txt"
       deliver "$LOGDIR/cost-notice.txt" nobrief >> "$LOG" 2>&1 && touch "$LOGDIR/$TODAY.cost-notice"
     fi
-    run_alerts --only cost
     exit 0
   fi
 fi
@@ -150,25 +131,14 @@ if [ "$MODE" = "morning" ] || [ "$MODE" = "weekly" ]; then
 fi
 # Connector health (morning only): kit-connect test, with no read call and so no model cost, gives
 # one PASS/FAIL line per server for the top of the brief. It's time-limited (CONNECTOR_CHECK_TIMEOUT,
-# default 120 s) and never fails the run; CONNECTOR_CHECK="off" skips it. It keeps a history
-# (briefs/connectors-history.jsonl), and when a server fails CONNECTOR_FAIL_STREAK mornings running
-# (default 2) it adds one [work] queue item for the owner and raises the dashboard's connector-outage
-# banner (briefs/connectors-alerts.json); a passing check clears it.
+# default 120 s) and never fails the run; CONNECTOR_CHECK="off" skips it.
 CONNECT_LINE=""
 if [ "$MODE" = "morning" ] && [ "${CONNECTOR_CHECK:-on}" != "off" ] && [ -f "$SHAREDIR/connector_health.py" ]; then
   rm -f briefs/connectors.txt
   perl -e 'alarm shift; exec @ARGV' $(( ${CONNECTOR_CHECK_TIMEOUT:-120} + 30 )) \
-    python3 "$SHAREDIR/connector_health.py" --timeout "${CONNECTOR_CHECK_TIMEOUT:-120}" \
-    --streak "${CONNECTOR_FAIL_STREAK:-2}" --out briefs/connectors.txt >/dev/null 2>> "$LOG"
+    python3 "$SHAREDIR/connector_health.py" --timeout "${CONNECTOR_CHECK_TIMEOUT:-120}" --out briefs/connectors.txt >/dev/null 2>> "$LOG"
   CONNECT_LINE=$(head -1 briefs/connectors.txt 2>/dev/null)
   [ -n "$CONNECT_LINE" ] && echo "== $(date) $CONNECT_LINE" >> "$LOG"
-fi
-# Open run and cost alerts for the top of the morning brief and the weekly review (recomputed now).
-ALERT_LINES=""
-if [ "$MODE" = "morning" ] || [ "$MODE" = "weekly" ]; then
-  rm -f briefs/alerts.txt
-  run_alerts --out briefs/alerts.txt
-  ALERT_LINES=$(cat briefs/alerts.txt 2>/dev/null)
 fi
 PROMPT_TEXT=$(sed "s/{{OWNER}}/${OWNER_NAME:-the owner}/g" "$PROMPT")
 if [ "$MODE" = "morning" ] || [ "$MODE" = "weekly" ]; then
@@ -181,7 +151,6 @@ if [ "$MODE" = "morning" ] || [ "$MODE" = "weekly" ]; then
     HOLDS=$(python3 "$KIT/.install/shared/bin/kit-retention" holds --brief 2>/dev/null)
     [ -n "$HOLDS" ] && PROMPT_TEXT+=$'\n\n'"Active legal holds (nothing in these projects may be deleted, moved, or rewritten; list them in a \"Legal holds\" section near the top of the brief, by project name only): $HOLDS"
   fi
-  [ -n "$ALERT_LINES" ] && PROMPT_TEXT+=$'\n\n'"Open alerts (kit-alerts): put each of these lines, as written, near the top of the brief (below the connector line, if there is one), and add \"Alerts: \" plus the number open to the health problems at the top of the text:"$'\n'"$ALERT_LINES"
   [ -n "$CONNECT_LINE" ] && PROMPT_TEXT+=$'\n\n'"Connector check before this run (kit-connect test): put this line, as written, at the top of the brief (below the Audit issue section, if there is one), and if any server says FAIL, add \"Connectors: \" plus the failing server names to the health problems at the top of the text: $CONNECT_LINE"
 fi
 case "$COST_LEVEL" in
@@ -227,30 +196,6 @@ if [ "$MODE" = "weekly" ] && [ "${DEMAND_REFRESH:-off}" = "on" ]; then
   fi
   rm -f "$DEMAND_OUT"
 fi
-# Monthly regulatory watch (REG_WATCH="on" in the config; off by default): on the first weekly review
-# of each month (first Monday; REG_WATCH_WHEN="every-run" for every weekly review), the researcher
-# writes a cited brief on last month's public changes to the regimes in compliance.md's "Regulatory
-# watch" field, saved in the library, with three lines in the review. reg_watch.py (no web, connector,
-# or model call) checks the date, the setup, the budget (skipped at warn or stop), and the time left
-# (REG_WATCH_MIN_LEFT minutes), and gives the prompt text plus the tools it needs: Agent, WebSearch,
-# and WebFetch, which are allowed only when the watch is on and due, and Edit on its folder.
-REGWATCH_RULES=()
-if [ "$MODE" = "weekly" ] && [ "${REG_WATCH:-off}" = "on" ] && [ -f "$SHAREDIR/reg_watch.py" ]; then
-  REGWATCH_OUT="$LOGDIR/.reg-watch-$$.txt"
-  REGWATCH_LINES=("${(@f)$(python3 "$SHAREDIR/reg_watch.py" --when "${REG_WATCH_WHEN:-first-monday}" \
-      --cost-level "$COST_LEVEL" --timeout "$TIMEOUT" --min-left "${REG_WATCH_MIN_LEFT:-15}" \
-      --owner "${OWNER_NAME:-the owner}" --home "$HOME" --prompt "$SHAREDIR/prompt-reg-watch.md" \
-      --out "$REGWATCH_OUT" 2>> "$LOG")}")
-  case "${REGWATCH_LINES[1]:-}" in
-    on)
-      REGWATCH_RULES=("${(@)REGWATCH_LINES[2,-1]}")
-      echo "== $(date) weekly: regulatory watch on (${#REGWATCH_RULES} allowed-tool rules added)" >> "$LOG" ;;
-    not-due) ;;
-    *) echo "== $(date) weekly: regulatory watch ${REGWATCH_LINES[1]:-skip (reg_watch.py failed)}" >> "$LOG" ;;
-  esac
-  [ -s "$REGWATCH_OUT" ] && PROMPT_TEXT+=$'\n\n'"$(cat "$REGWATCH_OUT")"
-  rm -f "$REGWATCH_OUT"
-fi
 # Tools the unattended run may use: the basics, plus extras from config (permission rules separated
 # by semicolons, since rules can contain spaces), for example the mail and calendar commands the
 # setup files name. ALLOW_TOOLS_WEEKLY adds more for the weekly review, such as the Agent tool for
@@ -261,7 +206,7 @@ ALLOWED=("Bash(date:*)" "Edit(~/Claude/Agents/kit/briefs/**)" "Edit(~/Claude/Age
 for r in "${(@s:;:)ALLOW_TOOLS:-}"; do r="${r## }"; r="${r%% }"; [ -n "$r" ] && ALLOWED+=("$r"); done
 if [ "$MODE" = "weekly" ]; then
   for r in "${(@s:;:)ALLOW_TOOLS_WEEKLY:-}"; do r="${r## }"; r="${r%% }"; [ -n "$r" ] && ALLOWED+=("$r"); done
-  for r in "${DEMAND_RULES[@]}" "${REGWATCH_RULES[@]}"; do [ -n "$r" ] && ! (( ${ALLOWED[(Ie)$r]} )) && ALLOWED+=("$r"); done
+  for r in "${DEMAND_RULES[@]}"; do [ -n "$r" ] && ! (( ${ALLOWED[(Ie)$r]} )) && ALLOWED+=("$r"); done
 fi
 # A rule written with ~/ doesn't match a command the run spells with the full home path, so each
 # Bash rule with ~/ also gets a twin with $HOME spelled out.
@@ -391,9 +336,6 @@ else
   deliver "$LOGDIR/failure-$MODE.txt" nobrief >> "$LOG" 2>&1
   echo "== sent failure notice" >> "$LOG"
 fi
-
-# Recompute the run and cost alerts with this run's outcome (the dashboard is rebuilt just below).
-run_alerts
 
 # Save the day's changes to Kit's private local history (never pushed), then refresh the dashboard.
 if [ -d "$KIT/.git" ]; then

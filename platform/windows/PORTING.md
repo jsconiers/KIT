@@ -35,16 +35,14 @@ Windows reimplementation** — the integration layer below (the hardest 30%).
 - `doctor.py` — launchd / `~/.local/bin` / plist checks remain macOS checks; off-Mac they simply
   report "not found", which is expected until the Windows equivalents exist.
 
-## Windows counterparts under `platform/windows/`
+## Files still needing a Windows counterpart under `platform/windows/`
 
-All are drafted and parse-checked on macOS; none has run on a real Windows machine yet.
-
-1. `install.ps1`: installer over the shared `kit_setup.py`, with NTFS-ACL folder privacy.
-2. Mail: Outlook COM backend, equivalent to `platform/mac/mail/kitmail.swift`.
-3. Calendar: Outlook COM backend, equivalent to `platform/mac/calendar/kitcal.swift`.
-4. To-do sync: Outlook Tasks backend for `shared/reminders_sync.py` (shared `kit_sync_core.reconcile()`).
-5. `run.ps1` and Task Scheduler tasks, replacing `platform/mac/morning/run.sh` and the eight launchd
-   `.plist.template` files, with toast or file delivery instead of iMessage.
+1. `install.ps1` — real installer (currently a stub) + NTFS-ACL folder privacy.
+2. A mail backend (Outlook COM / Graph) equivalent to `platform/mac/mail/kitmail.swift`.
+3. A calendar backend equivalent to `platform/mac/calendar/kitcal.swift`.
+4. A reminders/to-do backend for `shared/reminders_sync.py` (Microsoft To Do / Outlook Tasks).
+5. `run.ps1` + Task Scheduler task definitions to replace `platform/mac/morning/run.sh`
+   and the four launchd `.plist.template` files, plus a non-iMessage delivery channel.
 
 ## Status (first-draft adapters — UNTESTED on Windows)
 

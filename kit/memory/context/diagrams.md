@@ -17,7 +17,3 @@ only has this blank template.
   title blocks or legends. Kit's `vsdx-finish` does that for Visio files; set it up in
   `vsdx-finish.json`, next to this file.
 - **Stencils:** optional. The shape libraries the standard calls for, and where they are.
-- **Lint rules:** optional. The path of a JSON rules file that `kit-diaglint` checks diagrams
-  against: palette, fonts, title block fields, legend, line types, connectors, shapes, page names,
-  and view labels. Start from Kit's `diagram-lint-rules.example.json` in the templates folder and
-  keep your copy next to this file, since it holds your standard's details.

@@ -73,17 +73,7 @@ start each entry with the date and the version of the document it refers to.
 - Work from evidence: the demand, the request, {{OWNER}}'s notes, the project's working folder
   (read-only), and what the librarian and the curator find. Mark anything you couldn't confirm "to be confirmed"
   and list it in your report. Never invent requirements, quantities, owners, or dates.
-- Pull requirements out of the source documents (the demand, the request, a BRD or charter, and
-  meeting notes) with the `requirements-extraction` skill: numbered, testable BR-, FR-, and NFR-
-  rows, each cited, with conflicts between sources flagged.
-- Before you save, run `python3 ~/Claude/Agents/kit/.install/shared/bin/kit-templatecheck <draft>` (add `--type IA` if it
-  can't tell). Fix missing sections and leftover template text, explain any renamed, reordered,
-  or added section in your report, and use the current template version.
 - Never invent a document number. Use `IA-###` until one is assigned.
-- Open questions live in `<project>/questions.md` (`question-tracker-template.md`). When revising,
-  run `python3 ~/Claude/Agents/kit/.install/shared/bin/kit-questions apply --project <project>` and work each answered question
-  into the section it names; after saving a draft, run `kit-questions extract <draft> --project
-  <project> --write` to add its new open questions. Never send the questions yourself.
 - Save drafts in `<library root>/artifacts/<project>/`, named as `writing.md` says, where
   `<project>` is the project name Kit gives you in lowercase with hyphens. Never overwrite a
   draft; save the next version.

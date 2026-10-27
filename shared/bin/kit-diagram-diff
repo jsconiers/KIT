@@ -11,27 +11,67 @@ and an added component with the same label count as the same component, so a red
 reported as all new. Compressed draw.io pages (base64 plus deflate) are read too. Read-only.
 """
 import argparse
+import base64
+import html
 import json
 import pathlib
 import re
 import sys
+import urllib.parse
 import xml.etree.ElementTree as ET
 import zipfile
+import zlib
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
-from kit_diagram import (VNS, clean, drawio_pages, shape_kind, vsdx_page_root,  # noqa: E402
-                         vsdx_pages)                                           # (shared/kit_diagram.py)
+VNS = "{http://schemas.microsoft.com/office/visio/2012/main}"
+RNS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+
+
+def clean(label):
+    text = html.unescape(re.sub(r"<br\s*/?>", " ", label or "", flags=re.I))
+    text = re.sub(r"<[^>]+>", "", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def shape_kind(style):
+    style = style or ""
+    first = style.split(";")[0]
+    if "=" not in first and first:
+        return first
+    m = re.search(r"shape=([^;]+)", style)
+    return m.group(1) if m else ("ellipse" if "ellipse" in style else "rectangle")
 
 
 # ---------------------------------------------------------------- draw.io
+def drawio_page_model(diagram):
+    model = diagram.find("mxGraphModel")
+    if model is not None:
+        return model
+    text = (diagram.text or "").strip()
+    if not text:
+        return None
+    raw = base64.b64decode(text)
+    try:
+        xml_text = urllib.parse.unquote(zlib.decompress(raw, -15).decode("utf-8"))
+    except zlib.error:
+        xml_text = urllib.parse.unquote(raw.decode("utf-8", "ignore"))
+    return ET.fromstring(xml_text)
+
+
 def read_drawio(path):
+    root = ET.parse(path).getroot()
+    diagrams = root.findall("diagram") if root.tag == "mxfile" else []
+    if root.tag == "mxGraphModel":
+        diagrams = [None]
     pages = {}
-    for name, model in drawio_pages(path):
+    for i, d in enumerate(diagrams, 1):
+        model = root if d is None else drawio_page_model(d)
+        name = (d.get("name") if d is not None else None) or f"Page-{i}"
         comps, edges = {}, []
         if model is None:
             pages[name] = (comps, edges)
             continue
-        cell_list = list(model.iter("mxCell"))
+        cells = model.iter("mxCell")
+        cell_list = list(cells)
         for c in cell_list:
             if c.get("vertex") == "1":
                 comps[c.get("id")] = {"label": clean(c.get("value")), "kind": shape_kind(c.get("style"))}
@@ -50,9 +90,25 @@ def read_drawio(path):
 # ---------------------------------------------------------------- Visio
 def read_vsdx(path):
     z = zipfile.ZipFile(path)
+    names = set(z.namelist())
+    order = []
+    if "visio/pages/pages.xml" in names:
+        rels = {}
+        if "visio/pages/_rels/pages.xml.rels" in names:
+            for r in ET.fromstring(z.read("visio/pages/_rels/pages.xml.rels")):
+                rels[r.get("Id")] = r.get("Target")
+        for i, p in enumerate(ET.fromstring(z.read("visio/pages/pages.xml")).iter(VNS + "Page"), 1):
+            rel = p.find(VNS + "Rel")
+            target = rels.get(rel.get(RNS + "id")) if rel is not None else None
+            order.append((p.get("NameU") or p.get("Name") or f"Page-{i}",
+                          f"visio/pages/{target}" if target else f"visio/pages/page{i}.xml"))
+    else:
+        order = [(f"Page-{i}", n) for i, n in enumerate(sorted(n for n in names if re.match(r"visio/pages/page\d+\.xml$", n)), 1)]
     pages = {}
-    for name, member, _sheet in vsdx_pages(z):
-        root = vsdx_page_root(z, member)
+    for name, member in order:
+        if member not in names:
+            continue
+        root = ET.fromstring(z.read(member))
         shapes = {}
         for s in root.iter(VNS + "Shape"):
             t = s.find(VNS + "Text")

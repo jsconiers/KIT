@@ -49,10 +49,6 @@ meeting.
    action, its owner, and its due date as stated, or "no date"), open questions, and risks or
    issues.
 4. **Attribute** each decision and action to its source: [PM], [Architect], or [Transcript].
-   Keep decisions in a `## Decisions` table (`| # | Decision | Decided by | Source |`, decider by
-   role), one row per decision, so `kit-decisions` can read them. Flag each one that looks
-   architectural (a design, platform, standard, vendor or product choice, pattern, topology,
-   security control, or DR tier) for the decision recorder.
 5. **Vendor meetings.** When the meeting is with a vendor (a demo, briefing, roadmap session, or
    POC check-in), use the vendor meeting template `meetings.md` names instead of the usual
    minutes. List every claim the vendor made and mark it **shown** (demonstrated in the meeting),
@@ -92,6 +88,6 @@ the queue unconfirmed.
 
 ## What you send back to Kit
 
-The minutes' path, the decisions (architectural ones flagged for the decision recorder), for vendor meetings the claims marked "verify in POC" (for the POC
+The minutes' path, the decisions, for vendor meetings the claims marked "verify in POC" (for the POC
 lead), the actions with owners and dates, the disagreements between
 sources that need {{OWNER}}, the follow-up draft, and **Requests**, if any.

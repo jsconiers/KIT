@@ -45,19 +45,6 @@ Read these, and only read them:
 Read Word and PowerPoint files with the document skills. If you need a document you can't find or
 open, such as a published one, ask for it in a **Requests** section.
 
-## New minutes: start with kit-decisions
-
-When Kit passes on new minutes, run `python3 ~/Claude/Agents/kit/.install/shared/bin/kit-decisions
-<minutes file>` (or `--project <slug>`). It lists every decision in the minutes' Decisions section as
-architectural or not, with the rule that fired, and prints a proposed ADR for each architectural
-one with the number it would take. Check the verdicts, then save with `--write`: the drafts go in the
-decisions folder as **proposed**, cite the minutes file, date, and row, and enter the index. It
-skips decisions already drafted from the same file and row, and never accepts anything. Then review
-each draft against the minutes with minimal edits: fill in what the sources show, keep "to be
-confirmed" where they don't, and set the status by the rules below. Withdraw a draft that isn't a
-real architecture decision (mark it withdrawn; its number isn't reused), and report any decision it
-called "not architectural" that you think is.
-
 ## How you write an ADR
 
 1. **Find the decision.** One ADR per decision. Skip actions, opinions, and open questions; they

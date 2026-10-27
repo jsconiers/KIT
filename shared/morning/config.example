@@ -64,18 +64,6 @@ DEMAND_TOOLS=""
 DEMAND_REGISTER_DIR=""
 DEMAND_REFRESH_MAX="25"
 DEMAND_REFRESH_MIN_LEFT="10"
-# Monthly regulatory watch: on the first weekly review of each month (the first Monday), the
-# researcher writes a brief on last month's public changes to the regimes and topics in
-# compliance.md's "Regulatory watch" field (for example "SEC Reg SCI, CFTC, DORA, NYDFS 500, NIST"),
-# from public sources only, each cited, from regulatory-watch-template.md. It's saved in the
-# "Regulatory watch folder" from compliance.md (default regulatory-watch/ in the library root), and
-# the review gets a three-line summary. Only when it's on and due does the run allow the Agent,
-# WebSearch, and WebFetch tools for it. It's skipped, with a line in the review, when the regimes
-# aren't set, at the budget's warning or stop level, or when the run has less than REG_WATCH_MIN_LEFT
-# minutes left. REG_WATCH_WHEN="every-run" runs it on every weekly review (for a test).
-REG_WATCH="off"
-REG_WATCH_WHEN="first-monday"
-REG_WATCH_MIN_LEFT="15"
 # Optional: a command that prints today's events as a JSON list, for the dashboard's Today panel
 # (fields start, end, all_day, title or subject, calendar). Empty uses the macOS kitcal tool.
 CALENDAR_JSON_CMD=""
@@ -102,11 +90,6 @@ OUTLOOK_CHECK="on"
 # to skip it. It never fails the run.
 CONNECTOR_CHECK="on"
 CONNECTOR_CHECK_TIMEOUT="120"
-# Outage alert: when a connector fails this many mornings running, Kit adds one [work] item to your
-# list ("Fix connector <name>, failing since ...") and the dashboard shows a red Connector outage
-# banner. Both are raised once per outage; when the check passes again the item gets a "Recovered"
-# line (you check it off) and the banner clears. History: briefs/connectors-history.jsonl.
-CONNECTOR_FAIL_STREAK="2"
 
 # Cost (kit-cost): every scheduled run records its estimated cost in .install/logs/cost.jsonl.
 # COST_BUDGET_MONTHLY is the monthly budget for scheduled runs in US dollars (empty: no budget, no
@@ -116,14 +99,6 @@ COST_BUDGET_MONTHLY=""
 COST_WARN_PCT="80"
 COST_STOP_PCT="95"
 COST_ESSENTIAL_MODES="morning"
-# Cost alerts (run_alerts.py, at the end of every scheduled run; kit-alerts shows them). With a budget:
-# one [work] item for you and a red Cost banner when the month's projection reaches
-# COST_ALERT_PROJECTION x the budget (a fraction such as 0.9; empty: COST_WARN_PCT of it), cleared
-# when it falls back under, and another when spend reaches COST_STOP_PCT (runs are being skipped),
-# cleared when the month ends. With no budget: an alert when one day costs more than
-# COST_SPIKE_FACTOR times the median day of the 14 before it. Each at most once a month.
-COST_ALERT_PROJECTION=""
-COST_SPIKE_FACTOR="3"
 
 # Degraded mode: at the budget's stop level, and when the morning model run fails or times out,
 # kit-degraded writes the brief from Kit's files with no model call, so a brief still arrives.
@@ -159,58 +134,3 @@ RETRY_DELAY="120"
 # Reliability alerts (kit-reliability): warn when a run type's success rate over 30 days drops below
 # this percentage.
 RELIABILITY_MIN_PCT="90"
-
-# Failed-run alerts (run_alerts.py, at the end of every scheduled run and before the morning brief
-# and weekly review; kit-alerts shows and recomputes them). When a run type (morning, weekly,
-# worklist, eod, open, journal, backup, sync) fails RUN_FAIL_STREAK times in a row, or hasn't
-# succeeded within its window, Kit adds one [work] item to your list ("Fix Kit's <run> run, failing
-# since ..."), the dashboard shows a red Scheduled run banner, and the brief names it; the next
-# success clears it with a "Recovered" line on the item. Windows: RUN_WINDOW_MORNING in weekdays
-# (SKIP_DAYS don't count), RUN_WINDOW_SYNC in hours, the others in days; "off" (or empty, for
-# worklist, eod, open, and journal) means no window. RUN_ALERTS="off" turns all of this, and the cost
-# alerts, off; RUN_ALERTS_TIMEOUT is the seconds it may take before it's stopped.
-RUN_ALERTS="on"
-RUN_ALERTS_TIMEOUT="60"
-RUN_FAIL_STREAK="2"
-RUN_WINDOW_MORNING="2"
-RUN_WINDOW_WEEKLY="8"
-RUN_WINDOW_SYNC="2"
-RUN_WINDOW_BACKUP="2"
-RUN_WINDOW_WORKLIST=""
-RUN_WINDOW_EOD=""
-
-# Monitors (run_alerts.py, with the run and cost alerts; kit-alerts shows them, --only drift|library|
-# waiting|guard). Each is "on" or "off" ("off" clears what it had open); MONITOR_TIMEOUT is the seconds each
-# may take (a check that runs out of time leaves its alerts as they were). Read-only; never fails a run.
-# Drift: an agent whose live copy (agents/) differs from the shipped one (.install/kit/agents/) once the
-# owner name and the model line are set aside, or a live agent out of date in ~/.claude/agents: one
-# [work] item per kind of drift; compare with kit-alerts drift --diff <agent> (nothing is overwritten).
-MONITOR_DRIFT="on"
-# Library: the published folders named in memory/context/library.md against their indexes. An alert,
-# and one [work] item asking the librarian to reindex, when more than LIBRARY_UNINDEXED_MAX files aren't
-# in the index (0: any), an indexed file is gone, or the index is older than LIBRARY_INDEX_MAX_DAYS
-# while files changed after it. When the library root is in a cloud-synced folder: an inferred "sync
-# may be stalled" alert (brief and banner only) when the published folders haven't changed in
-# LIBRARY_SYNC_MAX_DAYS while Kit wrote to the library in that time ("0": off).
-MONITOR_LIBRARY="on"
-LIBRARY_UNINDEXED_MAX="0"
-LIBRARY_INDEX_MAX_DAYS="30"
-LIBRARY_SYNC_MAX_DAYS="14"
-# Waiting: "Waiting on others" items, and your own Approve/Decide/"decide by" items, whose latest date
-# (added, updated, or since) is more than WAITING_MAX_DAYS old. Waiting-on-others items get a follow-up
-# draft in briefs/followups/ (never sent); no queue item. Clears when the item is checked off or updated.
-MONITOR_WAITING="on"
-WAITING_MAX_DAYS="7"
-# Guard: connector-guard integrity. The installed copies (~/.claude/agents) of the agents shipped with
-# guard hooks still run pre, post, and fail against an existing connector-guard script; connector-guard.json
-# is readable; with connectors configured, its audit_dir exists and is writable (a probe file is created
-# and removed); and allowed calls older than GUARD_NORESULT_HOURS (empty: open_session_hours in audit.md,
-# else 2) in the last GUARD_WINDOW_DAYS have a result record. One alert and one [work] item per outage.
-MONITOR_GUARD="on"
-# Policy exception register (kit-exceptions): alert on expired, soon-expiring (EXCEPTIONS_WARN_DAYS), and
-# overdue reviews. Needs compliance.md's Exception register field (or the default location).
-MONITOR_EXCEPTIONS="on"
-EXCEPTIONS_WARN_DAYS="30"
-GUARD_NORESULT_HOURS=""
-GUARD_WINDOW_DAYS="2"
-MONITOR_TIMEOUT="20"

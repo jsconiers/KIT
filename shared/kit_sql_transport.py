@@ -4,8 +4,7 @@
 MySQL with PyMySQL is tested against a real server (MySQL 8.0, PyMySQL 1.2.3, 20-Oct-2026): creating
 the database and tables (db-init), publishing, reading other Kits' records, refusing writes to
 another Kit's rows, the organization profile, messages and acks, and detecting a tampered row.
-PostgreSQL with psycopg passed the same live test (PostgreSQL 17.0, psycopg 3.3.6, 21-Oct-2026).
-Microsoft SQL Server and the mysql-connector-python driver are still UNTESTED:
+PostgreSQL, Microsoft SQL Server, and the mysql-connector-python driver are still UNTESTED:
 syntax-checked only. Try them on a test database first. Folder sharing is the other tested path.
 
   SQLTransport.from_settings(kit, kit_id)   reads memory/context/sharing-db.json
@@ -48,8 +47,7 @@ import kit_records as kr
 import kit_transport as kt
 
 UNTESTED = "UNTESTED: never run against a real database"
-TESTED = {("mysql", "pymysql"): "tested on MySQL 8.0 with PyMySQL",
-          ("postgres", "psycopg"): "tested on PostgreSQL 17 with psycopg 3"}
+TESTED = {("mysql", "pymysql"): "tested on MySQL 8.0 with PyMySQL"}
 DIALECTS = ("postgres", "mssql", "mysql")
 DEFAULT_PORTS = {"postgres": 5432, "mssql": 1433, "mysql": 3306}
 DEFAULT_DRIVERS = {"postgres": "psycopg", "mssql": "pyodbc", "mysql": "pymysql"}
@@ -83,8 +81,7 @@ def load_settings(kit=None):
 
 
 class SQLTransport:
-    """Share records through a SQL server. MySQL with PyMySQL and PostgreSQL with psycopg are tested;
-    the rest is UNTESTED."""
+    """Share records through a SQL server. MySQL with PyMySQL is tested; the rest is UNTESTED."""
 
     kind = "sql"
     layout = "sql"
@@ -155,7 +152,7 @@ class SQLTransport:
             finally:
                 cur.close()
                 conn.close()
-        # PostgreSQL: CREATE DATABASE can't run in a transaction, so use autocommit.
+        # PostgreSQL (UNTESTED): CREATE DATABASE can't run in a transaction, so use autocommit.
         mod = self._import("psycopg")
         conn = mod.connect(host=self.s["host"], port=port, dbname="postgres", user=self.s["user"], password=cred,
                            sslmode="disable" if tls == "off" else self.s.get("sslmode", "verify-full"),

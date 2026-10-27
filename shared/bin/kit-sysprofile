@@ -14,11 +14,6 @@ vendors.md), the demand register, and a configuration-management export (invento
 inventory.json in the radar folder) when there is one. Every line it reports is cited by file and
 line, and sections with nothing found are listed as unknowns. Read-only unless --write; it never
 overwrites a profile without --force. The layout follows templates/system-profile-template.md.
-
-The optional FEAF reference models row comes from FEAF tags in catalog notes that mention the system
-(the librarian's "[FEAF: Data, Application]") and the FEAF reference models line on the curator's
-system page (knowledge/systems/<system>.md). A value only the curator inferred is marked
-"(inferred)"; with no tag anywhere the row is left blank, marked "(optional)".
 """
 import argparse
 import csv
@@ -86,72 +81,6 @@ def inventory_hits(path, rx, root):
     return out
 
 
-FEAF_MODELS = ["Performance", "Business", "Data", "Application", "Infrastructure", "Security"]
-FEAF_TAG = re.compile(r"\[\s*FEAF\s*:\s*([^\]]+)\]", re.I)
-FEAF_LINE = re.compile(r"FEAF reference models\W*?[:|]\s*(.*)", re.I)
-
-
-def feaf_models(text):
-    """The FEAF reference models named in text, in the framework's order."""
-    words = {w.lower() for w in re.findall(r"[A-Za-z]+", text)}
-    return [m for m in FEAF_MODELS if m.lower() in words]
-
-
-def collect_feaf(root, names):
-    """FEAF reference models for the system: (models, inferred, sources)."""
-    rx = matcher(names)
-    tagged, sources = [], []
-    cat = root / "CATALOG.md"
-    for n, line in enumerate(ka.read_lines(cat) if cat.exists() else [], 1):
-        m = FEAF_TAG.search(line)
-        if m and rx.search(FEAF_TAG.sub("", line)):
-            got = feaf_models(m.group(1))
-            if got:
-                tagged += got
-                sources.append(ka.cite(cat, n, root))
-    curated, inferred_only, cur_src, inf_src = [], [], [], []
-    sysdir = root / "knowledge" / "systems"
-    pages = []
-    if sysdir.is_dir():
-        wanted = {slug(n) for n in names if n.strip()}
-        for p in sorted(sysdir.glob("*.md")):
-            if p.stem.lower() in wanted:
-                pages.append(p)
-            else:
-                head = next((l for l in ka.read_lines(p) if l.strip()), "")
-                if head.startswith("#") and rx.search(head):
-                    pages.append(p)
-    for p in pages:
-        for n, line in enumerate(ka.read_lines(p), 1):
-            m = FEAF_LINE.search(line)
-            if not m:
-                continue
-            value = m.group(1).strip().strip("|*").strip()
-            got = feaf_models(re.sub(r"\(?inferred\)?", "", value, flags=re.I))
-            if not got:
-                continue
-            if re.search(r"\binferred\b", value, re.I):
-                inferred_only += got
-                inf_src.append(ka.cite(p, n, root))
-            else:
-                curated += got
-                cur_src.append(ka.cite(p, n, root))
-    explicit = set(tagged) | set(curated)
-    if explicit:
-        models = [m for m in FEAF_MODELS if m in explicit]
-        return models, False, sources + cur_src
-    if inferred_only:
-        return [m for m in FEAF_MODELS if m in set(inferred_only)], True, inf_src
-    return [], False, []
-
-
-def feaf_cell(feaf):
-    models, inferred, sources = feaf
-    if not models:
-        return "(optional)"
-    return ", ".join(models) + (" (inferred)" if inferred else "") + " [" + "; ".join(sources) + "]"
-
-
 def collect(root, names):
     rx = matcher(names)
     rd = radar_dir(root)
@@ -178,13 +107,12 @@ def collect(root, names):
     return found, missing
 
 
-def render(name, aliases, found, missing, root, feaf=([], False, [])):
+def render(name, aliases, found, missing, root):
     today = dt.date.today().strftime("%d-%b-%Y")
     out = [f"# System profile: {name}", "",
            "| Field | Value |", "|---|---|",
            f"| System | {name} |",
            f"| Also known as | {', '.join(aliases) or 'none given'} |",
-           f"| FEAF reference models | {feaf_cell(feaf)} |",
            f"| Generated | {today}, by kit-sysprofile from the library's records |",
            f"| Library root | {root} |",
            "| Classification | internal (raise it if any source is confidential) |", ""]
@@ -229,14 +157,12 @@ def main(argv):
     if not root or not root.is_dir():
         sys.exit("kit-sysprofile: no library root (set it in memory/context/library.md, or use --root)")
     found, missing = collect(root, [a.name] + a.alias)
-    feaf = collect_feaf(root, [a.name] + a.alias)
     if a.json:
         print(json.dumps({"system": a.name, "aliases": a.alias, "root": str(root),
                           "sections": {k: [{"text": t, "source": w} for t, w in v] for k, v in found.items()},
-                          "feaf": {"models": feaf[0], "inferred": feaf[1], "sources": feaf[2]},
                           "missing_sources": sorted(set(missing))}, indent=2))
         return 0
-    text = render(a.name, a.alias, found, missing, root, feaf)
+    text = render(a.name, a.alias, found, missing, root)
     if not a.write:
         print(text, end="")
         return 0

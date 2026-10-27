@@ -74,10 +74,7 @@ and how), and `library.md` (the library root and working folders), all in the sa
 5. **The call.** Say whether an impact assessment is needed (yes, no, or unclear) and why, using
    the rules in `intake.md`. Recommend; never decide approvals.
 6. **Questions.** Draft clarifying questions for the requester: only what the checklist leaves
-   open, numbered, plain, and specific. They're a draft for {{OWNER}} to send. Put them under a
-   "Clarifying questions" heading in the triage note, then run
-   `python3 ~/Claude/Agents/kit/.install/shared/bin/kit-questions extract <note> --project <project> --write` so they
-   go into `<project>/questions.md` (`question-tracker-template.md`) for tracking.
+   open, numbered, plain, and specific. They're a draft for {{OWNER}} to send.
 7. **The folder.** Save the triage note in `<library root>/artifacts/<project>/intake/`, and
    propose a name for the project's working folder, which {{OWNER}} creates.
 

@@ -37,14 +37,12 @@ on, and the main paths through them. Every finding below refers back to this lis
 
 ## Findings, most consequential first
 
-| ID | Consequence | Likelihood | Area | Failure scenario | Evidence | Mitigation | ATT&CK (optional) | 800-53 (optional) |
-|---|---|---|---|---|---|---|---|---|
-| RT-01 | <critical, major, or minor> | <likely, possible, or unlikely: reason> | <area> | <what breaks, what happens next, who notices, how long until service is back> | <section or page, or "not stated"> | <suggested mitigation> | <technique IDs for an abuse path, or blank> | <control IDs the mitigation maps to, or blank> |
+| ID | Consequence | Likelihood | Area | Failure scenario | Evidence | Mitigation |
+|---|---|---|---|---|---|---|
+| RT-01 | <critical, major, or minor> | <likely, possible, or unlikely: reason> | <area> | <what breaks, what happens next, who notices, how long until service is back> | <section or page, or "not stated"> | <suggested mitigation> |
 
 <Area is one of: single point of failure, DR and recovery, scaling, blast radius, concentration,
-operations, abuse path, or assumption. ATT&CK and 800-53 are optional: MITRE ATT&CK technique IDs
-for abuse-path findings and NIST SP 800-53 Rev 5 control IDs for mitigations, checked with
-`kit-controls`; delete the two columns if no finding uses them.>
+operations, abuse path, or assumption.>
 
 ## RTO and RPO
 
@@ -52,10 +50,6 @@ for abuse-path findings and NIST SP 800-53 Rev 5 control IDs for mitigations, ch
 |---|---|---|---|---|
 | RTO | <target, or "not stated"> | <what the restore or failover steps can achieve, or "can't tell"> | | |
 | RPO | | | | |
-
-## Implications for follow-on designs
-
-<Optional. Designs that build on this one, and which findings each inherits.>
 
 ## Assumptions that would break it
 
@@ -80,8 +74,4 @@ checker or the risk and compliance mapper, through Kit.>
 
 ## Sources
 
-<The document and its version, the IA, diagram specs, and dependency maps used. When the note cites
-ATT&CK, keep MITRE's notice:>
-
-MITRE ATT&CK®: © 2026 The MITRE Corporation. This work is reproduced and distributed with the
-permission of The MITRE Corporation.
+<The document and its version, the IA, diagram specs, and dependency maps used.>

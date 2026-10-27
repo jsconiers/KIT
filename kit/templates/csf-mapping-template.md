@@ -44,10 +44,6 @@ full text.
 - **Tier or target note:** optional. Where this category needs to reach, if the team sets targets.
 - These statuses describe the document, not a compliance decision; that's the framework owner's.
 - Keep the Category IDs as they are. `kit-csf` checks them against `shared/data/csf2.json`.
-- **CRI Profile:** if the framework profile marks the CRI Profile v2.x (Cyber Risk Institute) as
-  applying, its diagnostic statements extend these CSF 2.0 categories: cite the statement IDs in the
-  evidence or gap column of the category they extend. Kit doesn't bundle CRI content; use your
-  licensed copy.
 
 ## Mapping
 
