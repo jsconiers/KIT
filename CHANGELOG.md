@@ -185,6 +185,11 @@ versions follow [semantic versioning](https://semver.org).
   behaviour is unchanged (checked against a frozen copy of the old code).
 
 ### Changed
+- Kit is now marked all rights reserved. `LICENSE` says it isn't open source and that using,
+  copying, changing, or sharing it takes the copyright holder's written permission; the README says
+  so up front, and GOVERNANCE.md separates the Owner role (releases and changes) from ownership of
+  the code. The personal-details check skips the copyright line in `LICENSE`, which names the
+  copyright holder on purpose.
 - `kit-drawio` uses the team style file (`memory/context/drawio-styles.json`) by default when present.
 - `kit-sysprofile` fills the optional FEAF reference models row from catalog tags or the curator's
   system page.

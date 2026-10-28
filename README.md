@@ -2,7 +2,7 @@
 
 Kit is an AI personal assistant that lives in Claude Code, with a staff of specialist subagents. It's
 one agent working for one person. It keeps your to-do list and its own, a one-page status, notes on your work,
-lessons from its own mistakes, and your preferences, and it directs a staff of 32 specialist
+lessons from its own mistakes, and your preferences, and it directs a staff of 33 specialist
 agents (Claude Code subagents) for you.
 
 **Why Kit?** Kit is named after KITT, the AI car in the 1980s TV series *Knight Rider* that helped its
@@ -12,6 +12,8 @@ affiliated with them.)
 
 - **New here?** Read this page, then [INSTALL.md](INSTALL.md) and [ONBOARDING.md](ONBOARDING.md).
 - **Changing Kit?** Read [DESIGN.md](DESIGN.md) and [GOVERNANCE.md](GOVERNANCE.md).
+- **Using Kit?** It isn't open source. All rights are reserved, and installing or using Kit takes
+  the copyright holder's written permission. See [LICENSE](LICENSE).
 
 ## What Kit does
 
@@ -282,7 +284,7 @@ yourself." INSTALL.md covers Windows, scheduled runs, connectors, and the rest.
 | [INSTALL.md](INSTALL.md) | Installing, configuring, updating, troubleshooting |
 | [ONBOARDING.md](ONBOARDING.md) | Your first day and first week with Kit |
 | [DESIGN.md](DESIGN.md) | How Kit is built and how to extend it |
-| [GOVERNANCE.md](GOVERNANCE.md) | Who owns Kit and how changes are made (draft) |
+| [GOVERNANCE.md](GOVERNANCE.md) | Roles and how changes are made (draft) |
 | [CHANGELOG.md](CHANGELOG.md) | What each release changed |
 | [DEPENDENCIES.md](DEPENDENCIES.md) | What each agent and tool needs, and what happens without it |
 | [shared/KIT-RUN.md](shared/KIT-RUN.md) | Running agents outside Claude Code, and its limits |
@@ -295,3 +297,10 @@ Kit's notes stay on your computer in a folder only you can read (`chmod 700` on 
 NTFS permissions on Windows). Personal notes live in `memory/personal/` and don't load on their
 own, and `protect_folder.py` keeps them out of work folders. Your settings stay in
 `.install/shared/morning/config`, which git ignores.
+
+## License
+
+Copyright in Kit is held by its author, and all rights are reserved. Kit isn't open source: no
+license is granted to use, copy, change, or share it, and installing or using it takes the
+copyright holder's written permission. [LICENSE](LICENSE) has the full terms. Third-party data
+files keep their own licenses; see [DEPENDENCIES.md](DEPENDENCIES.md).

@@ -1,0 +1,18 @@
+Copyright © 2026 John R. Sconiers II. All rights reserved.
+
+Kit, including its code, agents, prompts, skills, templates, and documentation, is not open
+source. No license is granted. You may not use, copy, modify, merge, publish, distribute,
+sublicense, or sell any part of it, or create works based on it, without the prior written
+permission of the copyright holder.
+
+This repository is public on GitHub, and GitHub's Terms of Service let GitHub users view it and
+fork it on GitHub. This notice grants no other rights.
+
+Third-party material in this repository, such as the data files in shared/data, remains under its
+own license and notice. DEPENDENCIES.md lists them.
+
+To ask for permission, contact the owner of this repository on GitHub.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED. IN NO EVENT
+WILL THE COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM, OUT
+OF, OR IN CONNECTION WITH THE SOFTWARE OR ITS USE.

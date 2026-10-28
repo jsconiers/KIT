@@ -3,6 +3,10 @@
 **Status: draft for review.** Nothing here is in force until the owner approves it. Roles are named,
 never people; your organization fills them in.
 
+**Copyright.** Kit's copyright stays with its author, and all rights are reserved (see
+[LICENSE](LICENSE)). The Owner role below is accountability for releases and changes, not ownership
+of the code.
+
 ## Roles
 
 | Role | Does |
@@ -40,6 +44,7 @@ The leak check blocks these, but it's a safety net, not a substitute for care.
 
 ## Before anyone new installs Kit
 
+- The copyright holder has given written permission (see [LICENSE](LICENSE)).
 - The security reviewer has reviewed the current release: the guardrails, the connector guard and
   audit log, credentials handling, model providers in use, and sharing settings.
 - The adopter's organization has approved Claude Code (or the runtime in use) and the connectors

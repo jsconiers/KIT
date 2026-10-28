@@ -11,7 +11,8 @@
 6. Personal details: when SCAN_PATTERNS is set (a repository secret, one regular expression per
    line), no tracked file matches any of them. Matches are reported by file, line, and pattern
    number, never by the pattern itself. A match ending in ".md" is a Claude Code @-import of a
-   file, not an address, and isn't counted.
+   file, not an address, and isn't counted. The copyright line in LICENSE names the copyright
+   holder on purpose and isn't scanned; the rest of LICENSE is.
 
 Exits 1 if anything fails.
 """
@@ -127,6 +128,8 @@ if patterns:
             continue
         scanned += 1
         for n, line in enumerate([rel(p)] + lines):
+            if rel(p) == "LICENSE" and line.startswith("Copyright "):
+                continue   # names the copyright holder on purpose
             for i, rx in enumerate(rxs, 1):
                 if any(not m.group(0).endswith(".md") for m in rx.finditer(line)):
                     fails.append(f"{rel(p)}:{n}: matches personal-details pattern #{i}")
