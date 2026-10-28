@@ -214,3 +214,11 @@ EXCEPTIONS_WARN_DAYS="30"
 GUARD_NORESULT_HOURS=""
 GUARD_WINDOW_DAYS="2"
 MONITOR_TIMEOUT="20"
+# Login check (platform/mac/morning/preflight.sh; Windows preflight.ps1), daily 06:45 and 15:45: checks
+# that Claude Code can run and that these connectors (space-separated `claude mcp` names, for servers that
+# sign in with OAuth) are signed in, and tells you once per lapse.
+PREFLIGHT_CONNECTORS=""
+# Connection check before each run's model call ("on"/"off"), and how many seconds to wait for the
+# network before skipping the model run.
+CONNECTION_CHECK="on"
+CONNECTION_WAIT="300"

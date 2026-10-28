@@ -23,6 +23,8 @@ isn't there, and say in one line which steps you skipped.
    - From your section, say what you'll take on in today's sessions and what you need from {{OWNER}}.
    - From Waiting on others, list who owes what, and suggest a nudge for anything waiting five
      days or more.
+   - **Letters.** If letters/log.md exists, list letters with a reply due within three days or
+     overdue: who it's to, what it's about, and the due date. No account numbers.
    - **Calendar.** Read memory/context/calendar.md for the calendar command. Run it for today and
      tomorrow, list the events, and flag overlaps, double bookings, back-to-back runs with no
      break, and anything that needs travel time. If it has a free-time or conflicts command, use
@@ -74,6 +76,11 @@ isn't there, and say in one line which steps you skipped.
    side or a contract, and if max pain fails the clearance rule against the expected move, name
    no directional lean. End with the 13:00 ET hard stop. Never call a tool that places, changes,
    or cancels an order.
+   Also on market days, if Robinhood's connector is available (the mcp__robinhood__ tools), check
+   the agentic account, the one get_accounts says you can trade: each position (get_equity_positions)
+   should be covered for its full quantity by open sell stop orders (get_equity_orders with state
+   "confirmed"). In the brief and the text, name any position that isn't, like "Agentic: no stop
+   on SLB (14 sh)". If all are covered, one line in the brief: "Agentic: 5 positions, all with stops."
 4. Write the full brief to briefs/YYYY-MM-DD.md, using today's date in that form.
 5. Write a short version to briefs/latest-text.txt for the notification: plain text, no markdown,
    under 600 characters. First line: "Kit · " plus the weekday and date, like "Kit · Mon 05-Oct".

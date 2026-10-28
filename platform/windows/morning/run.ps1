@@ -569,6 +569,29 @@ $RunErr = Join-Path $LogDir ".run-$Mode-$PID.err"
 $rc = 0
 $TimedOut = $false
 $Degraded = $false
+# Connection check (CONNECTION_CHECK, default on; CONNECTION_WAIT seconds, default 300): when the API
+# can't be reached, check every 30 seconds, then skip the model run instead of letting it retry for an
+# hour. The morning run still writes its degraded brief, and the run is logged as failed.
+$Offline = $false
+if ($DegradedReason -eq "" -and (Cfg "CONNECTION_CHECK" "on") -ne "off") {
+    $netWait = 0
+    $netLimit = [int](Cfg "CONNECTION_WAIT" "300")
+    $netUrl = Cfg "CONNECTION_URL" "https://api.anthropic.com"
+    while ($true) {
+        $reached = $false
+        try { Invoke-WebRequest -Uri $netUrl -Method Head -TimeoutSec 10 -UseBasicParsing | Out-Null; $reached = $true }
+        catch { if ($_.Exception.Response) { $reached = $true } }   # any HTTP answer means the network is up
+        if ($reached) { break }
+        if ($netWait -ge $netLimit) {
+            Write-Log "== $(Get-Date) ${Mode}: no internet connection after ${netWait}s; skipping the model run"
+            $DegradedReason = "the computer had no internet connection"
+            $Offline = $true
+            break
+        }
+        Start-Sleep -Seconds 30
+        $netWait += 30
+    }
+}
 if ($DegradedReason -ne "") {
     Write-Log "== $(Get-Date) ${Mode}: no model run ($DegradedReason); writing a degraded brief"
 } else {
@@ -584,6 +607,7 @@ if (-not $script:TimedOut -and -not $hasText1 -and (Cfg "RETRY_ON" "on") -ne "of
 }
 }
 Remove-Item -LiteralPath $RunOut, $RunErr -Force -ErrorAction SilentlyContinue
+if ($Offline) { $rc = 1 }
 
 Write-Log "== $(Get-Date) end $Mode rc=$rc"
 

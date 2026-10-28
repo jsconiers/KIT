@@ -71,3 +71,15 @@ classic desktop Outlook before relying on them. Each file carries an "UNTESTED" 
   backend. `tests/test_sync_core.sh` runs the Windows backend over a fake COM layer; it still needs a
   run against real Outlook on Windows.
 - Everything needs an end-to-end run on Windows; recurrence-delete off-by-one is the top risk.
+
+## Login check and connection check
+
+- `morning/preflight.ps1` ports the Mac `preflight.sh`: at 06:45 and 15:45 ("Kit Login Check" in
+  `register-tasks.ps1`) it makes one tiny `claude -p` call and checks each connector in
+  `PREFLIGHT_CONNECTORS`, and tells the owner once per lapse through `deliver.py`. Untested.
+- `run.ps1` checks that the API is reachable before the model run (`CONNECTION_CHECK`,
+  `CONNECTION_WAIT`): when it isn't, it waits up to 5 minutes, then skips the model run and logs the
+  run as failed, as `run.sh` does. Untested.
+- Long-lived login: the Mac reads a `claude setup-token` token from the Keychain. On Windows, set the
+  user environment variable instead (`setx CLAUDE_CODE_OAUTH_TOKEN "<token>"`); scheduled tasks
+  inherit it. Treat it like a password.

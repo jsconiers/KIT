@@ -15,6 +15,7 @@
 #   Kit Backup            Daily               12:30   -> kit-backup
 #   Kit Reminders Sync    every 15 min + at logon     -> reminders_sync_win.py
 #   Kit Trade Journal     weekdays (Mon-Fri)  16:20   -> run.ps1 journal   (optional; see note)
+#   Kit Login Check       daily               06:45, 15:45 -> preflight.ps1
 #
 # The post-open read and the trade journal are optional extras for a trading setup. If you don't
 # trade, set $RegisterOpen and $RegisterJournal to $false below. (The journal has no launchd plist
@@ -119,6 +120,13 @@ if ($RegisterJournal) {
         -Trigger (New-ScheduledTaskTrigger -Weekly -DaysOfWeek $weekdays -At "4:20pm") `
         -ActionArgs @("-ExecutionPolicy", "Bypass", "-NoProfile", "-WindowStyle", "Hidden", "-File", "`"$RunPs1`"", "journal")
 }
+
+# --- Kit Login Check: daily 06:45 and 15:45, before the morning and afternoon runs -----------
+$Preflight = Join-Path $KitHome ".install\platform\windows\morning\preflight.ps1"
+Register-KitTask -Name "Kit Login Check" `
+    -Description "Checks that Claude Code and Kit's connectors are signed in before the scheduled runs (port of com.USER.kit.preflight)." `
+    -Trigger @((New-ScheduledTaskTrigger -Daily -At "6:45am"), (New-ScheduledTaskTrigger -Daily -At "3:45pm")) `
+    -ActionArgs @("-ExecutionPolicy", "Bypass", "-NoProfile", "-WindowStyle", "Hidden", "-File", "`"$Preflight`"")
 
 Write-Host ""
 Write-Host "Kit's scheduled tasks are registered under Task Scheduler folder '$TaskPath'."

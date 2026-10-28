@@ -23,7 +23,7 @@ HOME = pathlib.Path.home()
 KIT = HOME / "Claude/Agents/kit"
 MEM = KIT / "memory"
 LOGS = KIT / ".install/logs"
-LABELS = ["morning", "open", "weekly", "worklist", "eod", "meetprep", "backup", "sync", "scalper", "guard", "journal"]
+LABELS = ["morning", "open", "weekly", "worklist", "eod", "meetprep", "backup", "sync", "scalper", "guard", "journal", "preflight", "catchup"]
 ORDER_TOOLS = [
     "mcp__robinhood-local__rh_place_order", "mcp__tastytrade__place_order",
     "mcp__tastytrade__place_complex_order", "mcp__tastytrade__replace_order",

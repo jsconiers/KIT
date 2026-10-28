@@ -29,6 +29,9 @@
 # clears alerts for failing or overdue scheduled runs and for cost (see its header and kit-alerts).
 # Degraded mode (DEGRADED_MODE, default on): at the budget's stop level, and whenever the morning
 # model run fails or times out, kit-degraded writes the brief from Kit's files with no model call.
+# Connection check (CONNECTION_CHECK, default on; CONNECTION_WAIT seconds, default 300): when the
+# API can't be reached, wait for the network, then skip the model run instead of retrying for an
+# hour. The morning run still writes its degraded brief, and the run is logged as failed.
 MODE="${1:-morning}"
 KIT="$HOME/Claude/Agents/kit"
 MACDIR="$KIT/.install/platform/mac/morning"   # mac runner assets (test-run marker)
@@ -39,6 +42,14 @@ LOG="$LOGDIR/$TODAY.log"
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 mkdir -p "$LOGDIR" "$KIT/briefs" "$KIT/journal"
 [ -f "$SHAREDIR/config" ] && source "$SHAREDIR/config"
+# Long-lived login (optional): a token from `claude setup-token`, stored in the login Keychain as
+# "kit-claude-token" (security add-generic-password -U -s kit-claude-token -a "$USER" -w), keeps
+# scheduled runs working when the interactive login lapses. preflight.sh uses it too.
+if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+  KIT_TOKEN=$(security find-generic-password -s kit-claude-token -w 2>/dev/null) \
+    && [ -n "$KIT_TOKEN" ] && export CLAUDE_CODE_OAUTH_TOKEN="$KIT_TOKEN"
+  unset KIT_TOKEN
+fi
 
 # Kill switch: while kit-pause is on, no scheduled run starts (the test-run marker is left alone).
 if [ -f "$KIT/.install/PAUSED" ]; then
@@ -334,6 +345,20 @@ transient_reason() {
   done
   return 1
 }
+# Connection check: when the API can't be reached, check every 30 seconds for up to CONNECTION_WAIT
+# seconds, then skip the model run rather than let it retry for an hour.
+OFFLINE=""
+if [ -z "$DEGRADED_REASON" ] && [ "${CONNECTION_CHECK:-on}" != "off" ]; then
+  netwait=0
+  until curl -s -o /dev/null --max-time 10 "${CONNECTION_URL:-https://api.anthropic.com}"; do
+    if [ "$netwait" -ge "${CONNECTION_WAIT:-300}" ]; then
+      echo "== $(date) $MODE: no internet connection after ${netwait}s; skipping the model run" >> "$LOG"
+      DEGRADED_REASON="the Mac had no internet connection"; OFFLINE=1
+      break
+    fi
+    sleep 30; netwait=$((netwait + 30))
+  done
+fi
 if [ -n "$DEGRADED_REASON" ]; then
   echo "== $(date) $MODE: no model run ($DEGRADED_REASON); writing a degraded brief" >> "$LOG"
   : > "$RUNOUT"
@@ -349,6 +374,7 @@ else
   fi
 fi
 rm -f "$RUNOUT" "$RUNERR"
+[ -n "$OFFLINE" ] && rc=1
 echo "== $(date) end $MODE rc=$rc" >> "$LOG"
 
 # Degraded fallback: if the morning run wrote no short text (it failed, timed out, or the budget

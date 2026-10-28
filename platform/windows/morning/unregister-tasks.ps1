@@ -16,7 +16,8 @@ $Names = @(
     "Kit Weekly Review",
     "Kit Work List", "Kit Backup",
     "Kit Reminders Sync",
-    "Kit Trade Journal"
+    "Kit Trade Journal",
+    "Kit Login Check"
 )
 
 foreach ($name in $Names) {

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!-- Login check before the scheduled runs (daily 06:45 and 15:45): preflight.sh checks that
+     Claude Code can run and that the connectors in PREFLIGHT_CONNECTORS are signed in. -->
+<dict>
+  <key>Label</key>
+  <string>com.{{USER}}.kit.preflight</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>{{HOME}}/Claude/Agents/kit/.install/platform/mac/morning/preflight.sh</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Hour</key><integer>6</integer><key>Minute</key><integer>45</integer></dict>
+    <dict><key>Hour</key><integer>15</integer><key>Minute</key><integer>45</integer></dict>
+  </array>
+  <key>StandardOutPath</key>
+  <string>{{HOME}}/Claude/Agents/kit/.install/logs/launchd.out</string>
+  <key>StandardErrorPath</key>
+  <string>{{HOME}}/Claude/Agents/kit/.install/logs/launchd.err</string>
+</dict>
+</plist>
