@@ -1,6 +1,7 @@
 # Kit's automated checks.
 #   checks:          syntax for the shell, Python, and PowerShell, job templates and JSON, a scan for
-#                    personal details (patterns in the SCAN_PATTERNS secret), and the owner-name test.
+#                    personal details (patterns in the SCAN_PATTERNS secret), the owner-name test, and
+#                    the letter builder test.
 #                    See .github/scripts/checks.py.
 #   windows-install: the Windows installer, run for real on GitHub's Windows runners under Windows
 #                    PowerShell 5.1 and PowerShell 7: install, reinstall, and the repair of an install
@@ -28,6 +29,13 @@ jobs:
         run: python3 .github/scripts/checks.py
       - name: Owner name test
         run: python3 tests/test_owner_name.py
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Letter builder test
+        run: |
+          python -m pip install --quiet python-docx
+          python tests/test_kit_letter.py
 
   windows-install:
     runs-on: windows-latest
@@ -45,6 +53,10 @@ jobs:
           python-version: "3.12"
       - name: Owner name test
         run: python tests/test_owner_name.py
+      - name: Letter builder test
+        run: |
+          python -m pip install --quiet python-docx
+          python tests/test_kit_letter.py
       - name: Install, reinstall, and repair
         env:
           KIT_OWNER: Testy

@@ -57,7 +57,7 @@ affiliated with them.)
 
 ## Kit's staff
 
-Thirty-two agents in five groups. Each reads its own setup file in `memory/context/`, and
+Thirty-three agents in five groups. Each reads its own setup file in `memory/context/`, and
 `memory/context/agents.md` describes them all.
 
 | Group | Agents |
@@ -65,7 +65,7 @@ Thirty-two agents in five groups. Each reads its own setup file in `memory/conte
 | Knowledge and documents | researcher, librarian, curator, precedent finder, onboarding guide, handoff |
 | Writing and review | IA writer, GDS writer, reviewer, red team, threat modeler, standards checker, risk and compliance mapper, diagrammer, deck builder |
 | Delivery and planning | intake triager, dependency mapper, implementation planner, change board prep, cost estimator, PMO estimator, decision recorder, status reporter, meeting scribe |
-| Outside systems and oversight | gateway, demand tracker, auditor, scheduler |
+| Outside systems and oversight | gateway, demand tracker, auditor, scheduler, letters desk |
 | Exploration | POC lead, lab planner, training lead, future tech planner |
 
 Work goes through Kit, apart from a few direct pairs listed in `agents.md`. The gateway is the
@@ -108,6 +108,7 @@ The installer links these into `~/.local/bin` (all in `shared/bin/`):
 | `kit-holds` | Draft calendar holds as .ics files you open and save; Kit never writes to the calendar |
 | `kit-oneonone` | One-page prep for your 1:1 with your manager (by role); `--done` records the date |
 | `kit-wins` | Accomplishments log for reviews and 1:1s: collect, this month, report by theme |
+| `kit-letter` | A Word letter from plain text: `build` leaves room for a pen signature; `sign` adds your saved signature, and Claude Code asks you each time |
 | `kit-settings` | How briefs reach you and which app your to-dos sync with, work and personal |
 
 **Architecture work**
@@ -169,6 +170,7 @@ The installer links these into `~/.local/bin` (all in `shared/bin/`):
 | `kit-degraded` | The morning brief from Kit's files with no model call (budget stop, failed or timed-out run) |
 | `kit-reliability` | How reliably the scheduled runs work: success rate, duration, cost, and alerts, by run type |
 | `kit-cost` | What scheduled runs cost, by run and model, against an optional monthly budget |
+| `kit-expiry` | Everything that expires (tokens, logins, domains, certificates), soonest first, from `expiry.json`; the health check warns before each is due |
 | `kit-metrics` | One-page metrics view: spend, runs, queue trend, work lists, sprints, health |
 | `kit-update` | Shows what's new on GitHub; `--apply` moves your clone and reinstalls |
 | `kit-version` | Installed version and commit, and whether GitHub is ahead |

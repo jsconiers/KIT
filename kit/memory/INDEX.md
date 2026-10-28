@@ -10,6 +10,7 @@ when its line is relevant. Keep this under 100 lines and put detail in the files
 - `context/writing.md`: templates, examples, skills, and output rules for the IA writer, GDS writer, and reviewer
 - `context/diagrams.md`: the diagramming standard, stencils, and formats the diagrammer uses
 - `context/calendar.md`: the scheduler's calendar tool, working hours, and habits
+- `context/letters.md`: the letters desk's return address, letter style, saved signature, and where incoming letters arrive
 - `context/demands.md`: where the demand tracker finds demands and tickets, and where it keeps its register
 - `context/knowledge.md`: where the curator keeps the knowledge base, what it covers first, and who it's shared with
 - `context/connectors.md`: the outside systems the gateway may reach, its direct callers, and the audit log (guard settings in `connector-guard.json`)

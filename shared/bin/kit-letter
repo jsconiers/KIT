@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+"""kit-letter: turn a letter written as plain text (letter.md) into a Word file, signed or not.
+
+  kit-letter build letters/<folder>/letter.md           letter.docx, with room for a pen signature
+  kit-letter sign letters/<folder>/letter.md            letter-signed.docx, with your saved signature
+  kit-letter sign letters/<folder>/letter.md --short    the same, with the shorter form of it
+
+The letter file: blocks separated by a blank line, each block one paragraph. Lines inside a block stay
+on separate lines (for addresses and the closing), **text** is bold, and a line that is exactly
+{{SIGNATURE}} marks where the signature goes. Georgia 11 pt on US Letter, 1-inch margins. Standard
+library only, on macOS, Windows, and Linux.
+
+Your saved signature is a transparent PNG at ~/Claude/Agents/kit/letters/signature/signature.png, with
+an optional shorter form (say, without a title) at signature-short.png. To make one, photograph your
+signature on plain white paper and ask Kit to turn it into a transparent PNG there. Signing is its own
+command so Claude Code can ask you every time: Kit's settings allow "kit-letter build" and ask for
+"kit-letter sign". The letters desk signs a letter only when you ask it to sign that letter.
+"""
+import argparse
+import datetime as dt
+import pathlib
+import re
+import struct
+import sys
+import zipfile
+from xml.sax.saxutils import escape
+
+SIG_DIR = pathlib.Path.home() / "Claude/Agents/kit/letters/signature"
+SIGS = {"full": "signature.png", "short": "signature-short.png"}
+SIG_WIDTH_IN = 2.2
+EMU_PER_IN = 914400
+NS = ('xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+      'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
+      'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" '
+      'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+      'xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"')
+
+
+def png_size(data):
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("not a PNG file")
+    return struct.unpack(">II", data[16:24])
+
+
+def runs(line):
+    """A line of text as Word runs; **text** is bold."""
+    out = []
+    for i, part in enumerate(re.split(r"\*\*", line)):
+        if part:
+            bold = "<w:rPr><w:b/><w:bCs/></w:rPr>" if i % 2 else ""
+            out.append(f'<w:r>{bold}<w:t xml:space="preserve">{escape(part)}</w:t></w:r>')
+    return "".join(out)
+
+
+def picture(cx, cy):
+    return ('<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">'
+            f'<wp:extent cx="{cx}" cy="{cy}"/><wp:docPr id="1" name="Signature"/>'
+            '<wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>'
+            '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">'
+            '<pic:pic><pic:nvPicPr><pic:cNvPr id="0" name="signature.png"/><pic:cNvPicPr/></pic:nvPicPr>'
+            '<pic:blipFill><a:blip r:embed="rIdSig"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>'
+            f'<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm>'
+            '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic>'
+            '</a:graphicData></a:graphic></wp:inline></w:drawing></w:r>')
+
+
+def build(text, sig_png):
+    """document.xml for the letter; the signature picture goes where {{SIGNATURE}} is."""
+    blocks = [b.strip("\n") for b in re.split(r"\n\s*\n", text.replace("\r\n", "\n").strip()) if b.strip()]
+    if sig_png:
+        w, h = png_size(sig_png)
+        cx = int(SIG_WIDTH_IN * EMU_PER_IN)
+        cy = int(cx * h / w)
+    paras, marks = [], 0
+    for block in blocks:
+        parts = []
+        for line in block.split("\n"):
+            if line.strip() == "{{SIGNATURE}}":
+                marks += 1
+                parts.append(picture(cx, cy) if sig_png else "<w:r><w:br/><w:br/><w:br/></w:r>")
+            else:
+                parts.append(runs(line))
+        body = "<w:r><w:br/></w:r>".join(parts)
+        paras.append(f'<w:p><w:pPr><w:spacing w:after="240"/></w:pPr>{body}</w:p>')
+    if sig_png and marks != 1:
+        raise ValueError(f"the letter needs exactly one {{{{SIGNATURE}}}} line to sign it; found {marks}")
+    return (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document {NS}><w:body>'
+            + "".join(paras)
+            + '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>'
+              '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>'
+              '</w:sectPr></w:body></w:document>'), marks
+
+
+STYLES = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+          '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults>'
+          '<w:rPrDefault><w:rPr><w:rFonts w:ascii="Georgia" w:hAnsi="Georgia" w:eastAsia="Georgia" w:cs="Georgia"/>'
+          '<w:sz w:val="22"/><w:szCs w:val="22"/><w:lang w:val="en-US"/></w:rPr></w:rPrDefault>'
+          '<w:pPrDefault><w:pPr><w:spacing w:after="0" w:line="264" w:lineRule="auto"/></w:pPr></w:pPrDefault>'
+          '</w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/>'
+          '<w:qFormat/></w:style></w:styles>')
+
+
+def write_docx(path, document_xml, sig_png):
+    ct = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+          '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+          '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+          '<Default Extension="xml" ContentType="application/xml"/>'
+          '<Default Extension="png" ContentType="image/png"/>'
+          '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+          '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>'
+          '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>'
+          '<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>'
+          '</Types>')
+    rels = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
+            '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>'
+            '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>'
+            '</Relationships>')
+    doc_rels = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                '<Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+                + ('<Relationship Id="rIdSig" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/signature.png"/>' if sig_png else "")
+                + '</Relationships>')
+    now = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    core = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" '
+            'xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" '
+            'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><dc:title>Letter</dc:title>'
+            f'<dcterms:created xsi:type="dcterms:W3CDTF">{now}</dcterms:created>'
+            f'<dcterms:modified xsi:type="dcterms:W3CDTF">{now}</dcterms:modified></cp:coreProperties>')
+    app = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+           '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties">'
+           '<Application>Kit</Application></Properties>')
+    tmp = path.with_suffix(".tmp")
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", ct)
+        z.writestr("_rels/.rels", rels)
+        z.writestr("word/document.xml", document_xml)
+        z.writestr("word/styles.xml", STYLES)
+        z.writestr("word/_rels/document.xml.rels", doc_rels)
+        z.writestr("docProps/core.xml", core)
+        z.writestr("docProps/app.xml", app)
+        if sig_png:
+            z.writestr("word/media/signature.png", sig_png)
+    tmp.replace(path)
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-letter", description=__doc__.splitlines()[0])
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    b = sub.add_parser("build", help="letter.docx with room for a pen signature")
+    b.add_argument("letter")
+    b.add_argument("--out", help="output file (default: letter.docx next to the letter)")
+    s_ = sub.add_parser("sign", help="letter-signed.docx with your saved signature")
+    s_.add_argument("letter")
+    s_.add_argument("--short", action="store_true", help="the shorter form of the signature (signature-short.png)")
+    s_.add_argument("--out", help="output file (default: letter-signed.docx next to the letter)")
+    a = ap.parse_args(argv)
+    src = pathlib.Path(a.letter).expanduser()
+    sig, which = None, None
+    if a.cmd == "sign":
+        which = "short" if a.short else "full"
+        sig_path = SIG_DIR / SIGS[which]
+        if not sig_path.exists():
+            print(f"kit-letter: no saved signature at {sig_path}", file=sys.stderr)
+            return 1
+        sig = sig_path.read_bytes()
+    try:
+        document_xml, marks = build(src.read_text(encoding="utf-8"), sig)
+    except (OSError, ValueError) as e:
+        print(f"kit-letter: {e}", file=sys.stderr)
+        return 1
+    out = pathlib.Path(a.out).expanduser() if a.out else src.with_name(src.stem + ("-signed" if sig else "") + ".docx")
+    write_docx(out, document_xml, sig)
+    note = f"signed with the {which} signature" if sig else ("room left for a pen signature" if marks else "no signature line")
+    print(f"{out} ({note})")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

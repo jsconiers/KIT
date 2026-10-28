@@ -44,7 +44,8 @@ MONTHS = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()
 
 K = "~/Claude/Agents/kit"
 # Kit keeps its own notes without prompting (the owner chose "save facts itself").
-ALLOW = [f"Read({K}/**)", f"Edit({K}/memory/**)", f"Edit({K}/QUEUE.md)", f"Edit({K}/STATUS.md)"]
+ALLOW = [f"Read({K}/**)", f"Edit({K}/memory/**)", f"Edit({K}/QUEUE.md)", f"Edit({K}/STATUS.md)",
+         "Bash(kit-letter build *)"]
 # Always prompt, even if a broader allow rule exists: Kit's rules, Claude Code's own settings,
 # and commands that delete, push or post, install, or change system settings.
 ASK = [
@@ -57,6 +58,8 @@ ASK = [
     "Bash(pip install *)", "Bash(pip3 install *)", "Bash(python3 -m pip install *)",
     "Bash(npm install -g *)", "Bash(npm i -g *)",
     "Bash(defaults write *)", "Bash(launchctl *)", "Bash(softwareupdate *)", "Bash(osascript *)",
+    # Signing a letter with the saved signature asks every time (kit-letter build is allowed).
+    "Bash(kit-letter sign *)",
 ]
 
 

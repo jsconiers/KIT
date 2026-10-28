@@ -69,6 +69,11 @@ function Test-Kit([string]$label) {
     if ($kitmd -match "\{\{") { Fail "${label}: KIT.md still has a {{placeholder}}" } else { Pass "${label}: KIT.md has no placeholders left" }
     if ($kitmd -cmatch "Testy's PC") { Pass "${label}: KIT.md says Testy's PC" } else { Fail "${label}: KIT.md doesn't say Testy's PC" }
     if ($kitmd -cmatch "'s Mac\b") { Fail "${label}: KIT.md says Mac on Windows" }
+
+    $bin = Join-Path $kitHome ".install\platform\windows\bin"
+    $missing = @("todo", "kit-letter", "kit-expiry") | Where-Object { -not (Test-Path -LiteralPath (Join-Path $bin "$_.cmd")) }
+    if ($missing) { Fail "${label}: no command shim for $($missing -join ', ')" } else { Pass "${label}: the todo, kit-letter, and kit-expiry commands are installed" }
+    if (Test-Path -LiteralPath (Join-Path $kitHome "agents\letters-desk.md")) { Pass "${label}: the letters desk is installed" } else { Fail "${label}: the letters desk agent is missing" }
 }
 
 if ($env:KIT_OWNER -ne "Testy") { Write-Host "Set KIT_OWNER=Testy first."; exit 2 }

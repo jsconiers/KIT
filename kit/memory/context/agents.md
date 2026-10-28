@@ -132,6 +132,17 @@ computer.
   tell {{OWNER}} to open them (`kit-holds open all`).
 - **Setup:** `memory/context/calendar.md`.
 
+## letters-desk
+
+- **Does:** formal personal letters, from draft to reply: drafts from what {{OWNER}} provides, a log
+  of what went out (date, method, certified tracking, reply due), and follow-ups. Builds Word files
+  with `kit-letter`. Signs a letter only when {{OWNER}} asks, and Claude Code asks {{OWNER}} to approve
+  each signing. Never sends anything.
+- **Reach it:** the letter that came in (or the facts), what {{OWNER}} wants, and any deadline.
+- **Routine:** put reply-due dates in the queue, and in the weekly review list letters overdue or
+  due within a week.
+- **Setup:** `memory/context/letters.md`.
+
 ## demand-tracker
 
 - **Does:** tracks demands and tickets: what's open, what changed, what's stuck, and how they link

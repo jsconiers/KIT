@@ -8,6 +8,14 @@ versions follow [semantic versioning](https://semver.org).
 ## [Unreleased]
 
 ### Added
+- Letters desk (`kit/agents/letters-desk.md`, setup in `memory/context/letters.md`, log in
+  `letters/log.md`): formal personal letters from draft to reply, a log of what went out (date,
+  method, certified tracking, reply due), and follow-ups. Never sends anything.
+- `kit-letter`: a Word letter from plain text, standard library only. `kit-letter build` leaves room
+  for a pen signature; `kit-letter sign` adds your saved signature (a transparent PNG in
+  `letters/signature/`), and Kit's settings ask you to approve every signing. The letters desk signs
+  only a letter you ask it to sign, and logs it. Tested on Linux and Windows in CI.
+- The installers now link `kit-letter` and `kit-expiry` (`kit-expiry` was missing from both lists).
 - `kit-controls`: NIST SP 800-53 Rev 5 (OSCAL 5.2.0), MITRE ATT&CK Enterprise v20.0, and the CTID
   ATT&CK-to-800-53 mapping as compact data; lookups, search, and suggestions for a threat model. Threat
   models get ATT&CK and 800-53 columns; red-team notes optional ones. The framework profile lists the
