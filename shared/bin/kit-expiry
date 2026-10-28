@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""kit-expiry: everything of yours that expires (tokens, logins, keys, domains, certificates), and when.
+
+  kit-expiry            the whole list, soonest first, with days left
+  kit-expiry --check    only what's expired or due inside its warning window (the health check uses this)
+
+The list is ~/Claude/Agents/kit/expiry.json, which stays on this computer:
+
+  {"warn_days": 30,
+   "items": [
+     {"name": "Claude token for scheduled runs", "expires": "2027-10-28",
+      "renew": "claude setup-token, then store it in the Keychain as kit-claude-token"},
+     {"name": "example.org certificate", "check": "cert", "host": "example.org"},
+     {"name": "example.org domain", "check": "domain", "domain": "example.org", "warn_days": 60}
+   ]}
+
+An item has a fixed "expires" date (YYYY-MM-DD) or a "check" that looks it up live: "cert" (the HTTPS
+certificate on "host") or "domain" (the registry's expiry date for "domain", over RDAP). A live lookup
+that fails falls back to the last date it found, and says so. Cross-platform.
+"""
+import datetime as dt
+import json
+import pathlib
+import re
+import shutil
+import socket
+import ssl
+import subprocess
+import sys
+
+HOME = pathlib.Path.home()
+LIST = HOME / "Claude/Agents/kit/expiry.json"
+CACHE = HOME / "Claude/Agents/kit/.install/logs/expiry-cache.json"
+
+
+def cert_expiry(host):
+    if shutil.which("openssl"):
+        pem = subprocess.run(["openssl", "s_client", "-servername", host, "-connect", f"{host}:443"],
+                             input="", capture_output=True, text=True, timeout=25).stdout
+        end = subprocess.run(["openssl", "x509", "-noout", "-enddate"], input=pem,
+                             capture_output=True, text=True, timeout=10).stdout
+        m = re.search(r"notAfter=(.+)", end)
+        if not m:
+            raise RuntimeError("no certificate found")
+        return dt.datetime.strptime(" ".join(m.group(1).split()), "%b %d %H:%M:%S %Y %Z").date()
+    ctx = ssl.create_default_context()
+    with socket.create_connection((host, 443), timeout=10) as sock:
+        with ctx.wrap_socket(sock, server_hostname=host) as s:
+            return dt.datetime.strptime(s.getpeercert()["notAfter"], "%b %d %H:%M:%S %Y %Z").date()
+
+
+def domain_expiry(domain):
+    """The registry's expiry date, from RDAP over HTTPS (rdap.org finds the right registry)."""
+    url = f"https://rdap.org/domain/{domain}"
+    if shutil.which("curl"):
+        r = subprocess.run(["curl", "-sL", "--max-time", "25", url], capture_output=True, text=True, timeout=35)
+        body = r.stdout
+    else:
+        import urllib.request
+        with urllib.request.urlopen(url, timeout=25) as resp:
+            body = resp.read().decode(errors="ignore")
+    try:
+        data = json.loads(body)
+    except ValueError:
+        raise RuntimeError("no RDAP record (is the domain registered?)")
+    for ev in data.get("events", []):
+        if ev.get("eventAction") == "expiration":
+            return dt.date.fromisoformat(ev["eventDate"][:10])
+    raise RuntimeError("RDAP record has no expiry date")
+
+
+def resolve(item, cache):
+    """(date or None, note) for one item."""
+    key = item["name"]
+    try:
+        if item.get("expires"):
+            return dt.date.fromisoformat(item["expires"]), ""
+        if item.get("check") == "cert":
+            d = cert_expiry(item["host"])
+        elif item.get("check") == "domain":
+            d = domain_expiry(item["domain"])
+        else:
+            return None, "no date and no check"
+        cache[key] = d.isoformat()
+        return d, ""
+    except Exception as e:  # noqa: BLE001
+        if key in cache:
+            return dt.date.fromisoformat(cache[key]), f"last known; lookup failed ({str(e)[:60]})"
+        return None, f"lookup failed ({str(e)[:80]})"
+
+
+def main(argv):
+    if not LIST.exists():
+        print(f"No expiry list yet: {LIST}")
+        return 0
+    cfg = json.loads(LIST.read_text())
+    cache = json.loads(CACHE.read_text()) if CACHE.exists() else {}
+    today = dt.date.today()
+    rows = []
+    for item in cfg.get("items", []):
+        d, note = resolve(item, cache)
+        warn = int(item.get("warn_days", cfg.get("warn_days", 30)))
+        left = (d - today).days if d else None
+        rows.append((left if left is not None else 10 ** 6, item, d, left, warn, note))
+    CACHE.parent.mkdir(parents=True, exist_ok=True)
+    CACHE.write_text(json.dumps(cache, indent=2) + "\n")
+    rows.sort(key=lambda r: r[0])
+    check = "--check" in argv
+    problems = 0
+    for _, item, d, left, warn, note in rows:
+        if left is None:
+            state = "UNKNOWN"
+        elif left < 0:
+            state = "EXPIRED"
+        elif left <= warn:
+            state = "SOON"
+        else:
+            state = "ok"
+        if check and state == "ok":
+            continue
+        if state in ("EXPIRED", "SOON", "UNKNOWN"):
+            problems += 1
+        when = f"{d:%d-%b-%Y} ({left} days)" if d else "date unknown"
+        renew = f"  renew: {item['renew']}" if item.get("renew") and state != "ok" else ""
+        extra = f"  [{note}]" if note else ""
+        print(f"{state:8} {when:24} {item['name']}{extra}{renew}")
+    if check and not problems:
+        print("nothing expiring soon")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

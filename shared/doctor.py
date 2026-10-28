@@ -23,7 +23,7 @@ HOME = pathlib.Path.home()
 KIT = HOME / "Claude/Agents/kit"
 MEM = KIT / "memory"
 LOGS = KIT / ".install/logs"
-LABELS = ["morning", "open", "weekly", "worklist", "eod", "meetprep", "backup", "sync", "scalper", "guard", "journal", "preflight", "catchup"]
+LABELS = ["morning", "open", "weekly", "worklist", "eod", "meetprep", "backup", "sync", "scalper", "guard", "journal", "preflight", "catchup", "scorecard", "letters"]
 ORDER_TOOLS = [
     "mcp__robinhood-local__rh_place_order", "mcp__tastytrade__place_order",
     "mcp__tastytrade__place_complex_order", "mcp__tastytrade__replace_order",
@@ -164,6 +164,29 @@ def check_tokens():
         check(fresh, "E*TRADE login", "renewed today",
               "token is from before midnight, so the SPX print stays down until you renew it",
               "warn")
+
+
+def check_expiry():
+    """kit-expiry --check: anything in ~/Claude/Agents/kit/expiry.json that has expired or is close."""
+    import subprocess, sys as _sys
+    tool = KIT / ".install/shared/bin/kit-expiry"
+    if not tool.exists() or not (KIT / "expiry.json").exists():
+        return
+    try:
+        out = subprocess.run([_sys.executable, str(tool), "--check"], capture_output=True, text=True, timeout=180).stdout
+    except subprocess.TimeoutExpired:
+        add("warn", "Expiry list", "lookups timed out")
+        return
+    rows = [l for l in out.splitlines() if l.split() and l.split()[0] in ("EXPIRED", "SOON", "UNKNOWN")]
+    short = lambda l: " ".join(l.split()[1:]).split("  renew:")[0][:110]
+    expired = [short(l) for l in rows if l.startswith("EXPIRED")]
+    soon = [short(l) for l in rows if not l.startswith("EXPIRED")]
+    if expired:
+        add("FAIL", "Expired", "; ".join(expired[:3]) + " (see: kit-expiry)")
+    if soon:
+        add("warn", "Expiring soon", "; ".join(soon[:3]) + " (see: kit-expiry)")
+    if not rows:
+        add("ok", "Expiry list", "nothing expiring soon")
 
 
 def check_secrets():
@@ -703,7 +726,7 @@ def main(argv):
         r = readiness()
         print(json.dumps(r, indent=1) if "--json" in argv else render_readiness(r))
         return 0
-    for fn in (check_import, check_settings, check_index, check_jobs, check_runs, check_tokens,
+    for fn in (check_import, check_settings, check_index, check_jobs, check_runs, check_tokens, check_expiry,
                check_secrets, check_permissions, check_agents, check_git, check_calendar, check_mail,
                check_guard, check_grammar, check_delivery, check_paused, check_outlook, check_holds,
                check_cost, check_version, check_models, check_direct_models, check_sharing_policy,
