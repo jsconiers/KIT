@@ -1,6 +1,6 @@
 # Kit's setup
 
-Installed on {{DATE}} on {{OWNER}}'s Mac.
+Installed on {{DATE}} on {{OWNER}}'s {{COMPUTER}}.
 
 - Kit's files are in `~/Claude/Agents/kit`, which only {{OWNER}}'s account can open.
 - Kit loads in every Claude Code session through one import line in `~/.claude/CLAUDE.md`.

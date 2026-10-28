@@ -18,6 +18,7 @@ import datetime as dt
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -63,25 +64,115 @@ class Fail(Exception):
     """A problem to report; the command exits with status 1 and nothing further is changed."""
 
 
+def _first_name(full):
+    """The first name in a display name: "Alex Rivera" and "Rivera, Alex" give "Alex", and
+    "Dr. Maria L. Chen Jr." gives "Maria". Empty when nothing in it looks like a name."""
+    full = re.sub(r"\([^)]*\)|\[[^\]]*\]", " ", full or "")   # "(Contractor)", "[EXT]"
+    if "," in full:                                             # directory style: "Last, First"
+        full = full.split(",", 1)[1]
+    for part in full.split():
+        if not part.endswith(".") and any(c.isalpha() for c in part):
+            return part
+    return ""
+
+
+def _windows_full_name():
+    """The Windows account's display name: the directory's for a domain or work account, else the
+    local account's full name. Empty when neither is set or reachable."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        get = ctypes.windll.secur32.GetUserNameExW
+        get.argtypes = [ctypes.c_int, ctypes.c_wchar_p, ctypes.POINTER(wintypes.ULONG)]
+        get.restype = wintypes.BOOLEAN
+        size = wintypes.ULONG(512)
+        buf = ctypes.create_unicode_buffer(size.value)
+        if get(3, buf, ctypes.byref(size)) and buf.value.strip():   # 3 = NameDisplay
+            return buf.value.strip()
+    except Exception:
+        pass
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class USER_INFO_10(ctypes.Structure):
+            _fields_ = [("name", ctypes.c_wchar_p), ("comment", ctypes.c_wchar_p),
+                        ("usr_comment", ctypes.c_wchar_p), ("full_name", ctypes.c_wchar_p)]
+        netapi = ctypes.windll.netapi32
+        netapi.NetUserGetInfo.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, wintypes.DWORD,
+                                          ctypes.POINTER(ctypes.c_void_p)]
+        netapi.NetUserGetInfo.restype = wintypes.DWORD
+        ptr = ctypes.c_void_p()
+        if netapi.NetUserGetInfo(None, os.environ.get("USERNAME", ""), 10, ctypes.byref(ptr)) == 0 and ptr.value:
+            try:
+                return (ctypes.cast(ptr, ctypes.POINTER(USER_INFO_10)).contents.full_name or "").strip()
+            finally:
+                netapi.NetApiBufferFree(ptr)
+    except Exception:
+        pass
+    return ""
+
+
+def _interactive():
+    """Someone at the keyboard: input and output are both a terminal. On Windows the NUL device
+    also claims to be one, so there it must be a real console as well."""
+    try:
+        if not (sys.stdin and sys.stdin.isatty() and sys.stdout and sys.stdout.isatty()):
+            return False
+        if os.name == "nt":
+            import ctypes
+            import msvcrt
+            mode = ctypes.c_ulong()
+            handle = msvcrt.get_osfhandle(sys.stdin.fileno())
+            return bool(ctypes.windll.kernel32.GetConsoleMode(ctypes.c_void_p(handle), ctypes.byref(mode)))
+        return True
+    except Exception:
+        return False
+
 
 def _owner_name():
-    """First name for {{OWNER}} in templates: KIT_OWNER, else this machine's account name."""
+    """First name for {{OWNER}} in templates: KIT_OWNER; else the first name in the account's full
+    name (the macOS or Linux account's real name; on Windows the directory's display name, or the
+    local account's full name); else, with someone at the keyboard, ask. Never the bare login (a
+    name like "arivera" or "jsmith"), which isn't what anyone wants to be called."""
     name = os.environ.get("KIT_OWNER", "").strip()
-    if not name:
+    if name:
+        return name
+    login = (os.environ.get("USER") or os.environ.get("USERNAME") or "").strip()
+    full = ""
+    if os.name == "nt":
+        full = _windows_full_name()
+    else:
         try:
             import pwd  # POSIX only
-            parts = pwd.getpwuid(os.getuid()).pw_gecos.split(",")[0].split()
-            name = next((p for p in parts if not p.endswith(".")), "")
+            full = pwd.getpwuid(os.getuid()).pw_gecos.split(",")[0]
         except Exception:
-            try:
-                import getpass
-                name = getpass.getuser()
-            except Exception:
-                name = ""
+            full = ""
+    if full.strip().lower() == login.lower():   # the "full name" is just the login again
+        full = ""
+    name = _first_name(full)
+    if not name and _interactive():
+        try:
+            name = input("What first name should Kit call you? ").strip()
+        except EOFError:
+            name = ""
     return name or "your owner"
 
 
-OWNER = _owner_name()
+_OWNER = None
+
+
+def owner():
+    """The owner's name for the templates, worked out once, when a template first needs it."""
+    global _OWNER
+    if _OWNER is None:
+        _OWNER = _owner_name()
+    return _OWNER
+
+
+# What the templates call this computer ("on Alex's PC").
+COMPUTER = "Mac" if sys.platform == "darwin" else ("PC" if os.name == "nt" else "computer")
+
 
 def today():
     d = dt.date.today()
@@ -199,7 +290,9 @@ def cmd_scaffold(args):
     for path in sorted(p for p in src.rglob("*") if p.is_file()):
         rel = path.relative_to(src)
         dest = KIT / rel
-        text = path.read_text(encoding="utf-8").replace("{{DATE}}", date).replace("{{OWNER}}", OWNER)
+        text = path.read_text(encoding="utf-8").replace("{{DATE}}", date).replace("{{COMPUTER}}", COMPUTER)
+        if "{{OWNER}}" in text:
+            text = text.replace("{{OWNER}}", owner())
         if not dest.exists():
             write_text_atomic(dest, text)
             created.append(str(rel))

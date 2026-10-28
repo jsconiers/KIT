@@ -207,6 +207,19 @@ versions follow [semantic versioning](https://semver.org).
   `--allow-plain` (or encryption).
 
 ### Fixed
+- Windows installer: Kit 1.4.0 left every file in `%USERPROFILE%\Claude\Agents\kit` with no access
+  entries, so Kit couldn't read its own files and stopped loading, while the installer reported
+  success. It applied the kit home's `(OI)(CI)` grant to each file with `/T`, where it can't apply.
+  Now the kit home alone gets one entry, full control for your account (by SID), inherited by
+  everything inside, and the files are reset to inherit it. Each `icacls` result is checked, a rerun
+  first repairs an install with this problem, and the installer opens every file before it reports
+  success. A real Windows install, reinstall, and repair now run in CI under Windows PowerShell 5.1
+  and PowerShell 7. To repair an existing install by hand:
+  `icacls "$env:USERPROFILE\Claude\Agents\kit\*" /reset /T /C /Q`.
+- Owner name on Windows: the templates used the login (a name like `arivera`) where the owner's first
+  name belongs. Kit now uses `KIT_OWNER`, then the account's display name (`Rivera, Alex` gives
+  `Alex`), then asks when someone's at the keyboard; never the login. The templates also say "PC" on
+  Windows instead of "Mac" (new placeholder `{{COMPUTER}}`).
 - `kit-coverage` read the CRI Profile row as NIST CSF; its CSF pattern is anchored now.
 - kit-reliability now reads Windows (run.ps1) log timestamps; the to-do sync records clean runs in
   `sync.ok`, so a quiet working sync isn't mistaken for a stalled one.

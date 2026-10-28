@@ -1,5 +1,10 @@
-# Kit's automated checks: syntax for the shell, Python, and PowerShell, job templates and JSON,
-# and a scan for personal details (patterns in the SCAN_PATTERNS secret). See .github/scripts/checks.py.
+# Kit's automated checks.
+#   checks:          syntax for the shell, Python, and PowerShell, job templates and JSON, a scan for
+#                    personal details (patterns in the SCAN_PATTERNS secret), and the owner-name test.
+#                    See .github/scripts/checks.py.
+#   windows-install: the Windows installer, run for real on GitHub's Windows runners under Windows
+#                    PowerShell 5.1 and PowerShell 7: install, reinstall, and the repair of an install
+#                    whose files lost their permissions. See .github/scripts/windows-install-test.ps1.
 name: Checks
 
 on:
@@ -21,3 +26,26 @@ jobs:
         env:
           SCAN_PATTERNS: ${{ secrets.SCAN_PATTERNS }}
         run: python3 .github/scripts/checks.py
+      - name: Owner name test
+        run: python3 tests/test_owner_name.py
+
+  windows-install:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [powershell, pwsh]
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Owner name test
+        run: python tests/test_owner_name.py
+      - name: Install, reinstall, and repair
+        env:
+          KIT_OWNER: Testy
+        run: .\.github\scripts\windows-install-test.ps1

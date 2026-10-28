@@ -2,7 +2,9 @@
 #
 #   powershell -ExecutionPolicy Bypass -File install.ps1
 #
-# UNTESTED on Windows -- validate on a real Windows box before relying on it.
+# Tested on Windows by .github/workflows/checks.yml on GitHub's Windows runners, under Windows
+# PowerShell 5.1 and PowerShell 7: a fresh install, a reinstall, and the repair of an install whose
+# files lost their access entries. The mail, calendar, and scheduled-task parts aren't tested there.
 #
 # Mirror of platform/mac/install.sh. Everything Kit needs is copied into
 # %USERPROFILE%\Claude\Agents\kit, including this installer, so the downloaded copy can be
@@ -17,10 +19,12 @@
 #   2. Confirm the import line was added:
 #        Select-String -Path "$env:USERPROFILE\.claude\CLAUDE.md" -Pattern '@~/Claude/Agents/kit/KIT.md'
 #      - expect one match, preceded by a "<!-- Kit, installed ... -->" comment line.
-#   3. Confirm owner-only ACLs on the kit home:
+#   3. Confirm owner-only access on the kit home and its files:
 #        icacls "$env:USERPROFILE\Claude\Agents\kit"
-#      - expect only the current user listed with (F); no "Users" or "Everyone" entries, and
-#        no "(I)" inherited entries.
+#      - expect only the current user, with (OI)(CI)(F), and no "(I)" inherited entries.
+#        icacls "$env:USERPROFILE\Claude\Agents\kit\KIT.md"
+#      - expect only the current user, with (I)(F): inherited from the kit home.
+#      The installer checks this itself and stops with an error if Kit can't read a file.
 #   4. Confirm the scaffold landed:
 #        Test-Path "$env:USERPROFILE\Claude\Agents\kit\KIT.md"   # expect True
 #   5. Remove again:
@@ -39,6 +43,84 @@ $kitHome  = Join-Path $env:USERPROFILE "Claude\Agents\kit"
 function Die([string]$msg) {
     Write-Host "install: $msg"
     exit 1
+}
+
+# --- Folder privacy (NTFS-ACL equivalent of `chmod -R go-rwx`) --------------------------------
+# The kit home gets exactly one access entry: full control for your account, inherited by
+# everything inside it, and nothing inherited from above. Every file and folder inside is reset to
+# take its access from the kit home and nothing else. Your account is named by its SID, so a
+# local account with the same user name can't be picked by mistake.
+# (Kit 1.4.0 applied the folder's grant to every file with /T. On a file an (OI)(CI) grant can't
+# apply, so the files were left with no access entries at all: even their owner got "Access
+# denied", and Kit stopped loading.)
+$userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+
+function Invoke-Icacls([string[]]$IcaclsArgs) {
+    # Run icacls and return its exit code and output, so each call is checked right away. Native
+    # stderr would throw under "Stop" in Windows PowerShell 5.1, so relax that for the call.
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $out = & icacls @IcaclsArgs 2>&1 | ForEach-Object { "$_" }
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prev
+    }
+    [pscustomobject]@{ Code = $code; Output = (@($out) | Where-Object { $_ } | Select-Object -Last 3) -join " " }
+}
+
+function Protect-KitFolder([string]$dir) {
+    # Lock $dir to your account and make everything inside inherit from it. Returns $null when it
+    # worked, or what went wrong.
+    $r = Invoke-Icacls @($dir, "/inheritance:r", "/grant:r", "*$($userSid.Value):(OI)(CI)F", "/C")
+    if ($r.Code -ne 0) { return "locking $dir failed (icacls exit $($r.Code)): $($r.Output)" }
+    $acl = Get-Acl -LiteralPath $dir
+    foreach ($rule in $acl.GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier])) {
+        $who = $rule.IdentityReference.Value
+        if ($who -ne $userSid.Value) {     # any other entry set directly on the folder
+            $r = Invoke-Icacls @($dir, "/remove", "*$who", "/C")
+            if ($r.Code -ne 0) { return "removing $who from $dir failed (icacls exit $($r.Code)): $($r.Output)" }
+        }
+    }
+    if (Get-ChildItem -LiteralPath $dir -Force | Select-Object -First 1) {
+        # Not /T on the folder itself: reset only what's inside, so it all inherits from $dir.
+        $r = Invoke-Icacls @((Join-Path $dir "*"), "/reset", "/T", "/C", "/Q")
+        if ($r.Code -ne 0) { return "resetting the files in $dir failed (icacls exit $($r.Code)): $($r.Output)" }
+    }
+    return $null
+}
+
+function Test-KitAccess([string]$dir) {
+    # Open every file under $dir for reading, and check the folder's own entry. Returns the number
+    # of files checked and a list of problems (empty when all is well).
+    $problems = New-Object System.Collections.Generic.List[string]
+    $listErrors = $null
+    $files = @(Get-ChildItem -LiteralPath $dir -Recurse -Force -File -ErrorAction SilentlyContinue -ErrorVariable listErrors)
+    foreach ($e in @($listErrors)) { if ($e) { $problems.Add("can't list $($e.TargetObject)") } }
+    foreach ($f in $files) {
+        try {
+            [System.IO.File]::OpenRead($f.FullName).Dispose()
+        } catch {
+            $denied = $false
+            for ($ex = $_.Exception; $ex; $ex = $ex.InnerException) {
+                if ($ex -is [System.UnauthorizedAccessException]) { $denied = $true }
+            }
+            if ($denied) { $problems.Add("can't read $($f.FullName)") }   # (in use elsewhere isn't a problem)
+        }
+    }
+    $acl = Get-Acl -LiteralPath $dir
+    if (-not $acl.AreAccessRulesProtected) { $problems.Add("$dir still takes access from the folder above it") }
+    $full = [System.Security.AccessControl.FileSystemRights]::FullControl
+    $mine = $false
+    foreach ($rule in $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
+        if ($rule.IdentityReference.Value -ne $userSid.Value) {
+            $problems.Add("$dir also gives access to $($rule.IdentityReference.Value)")
+        } elseif ($rule.AccessControlType -eq "Allow" -and ($rule.FileSystemRights -band $full) -eq $full) {
+            $mine = $true
+        }
+    }
+    if (-not $mine) { $problems.Add("$dir doesn't give your account full control") }
+    [pscustomobject]@{ Files = $files.Count; Problems = $problems }
 }
 
 # --- Locate Python ---------------------------------------------------------------------------
@@ -73,6 +155,16 @@ if (-not (Get-Command claude -ErrorAction SilentlyContinue)) {
     Write-Host "install: note: Claude Code (claude) is not on your PATH yet. Kit will be ready once it is."
 }
 
+# --- Repair an earlier install whose files Kit can't read ------------------------------------
+# The setup steps below read the existing files, so first give an earlier install's files back to
+# your account. This also repairs an install made by Kit 1.4.0's installer (see the note above).
+if (Test-Path -LiteralPath $kitHome -PathType Container) {
+    $problem = Protect-KitFolder $kitHome
+    if ($problem) {
+        Die "couldn't make Kit's existing files readable: $problem"
+    }
+}
+
 # --- Run the cross-platform setup steps ------------------------------------------------------
 # These edit %USERPROFILE%\.claude\CLAUDE.md and settings.json; kit_setup.py handles that and
 # backs both up first. POSIX permission bits are skipped on Windows (os.name == "nt").
@@ -87,19 +179,13 @@ foreach ($step in @("check", "scaffold", "activate")) {
 & $pyExe @pyArgs (Join-Path $root "shared\bin\kit-settings") setup
 if ($LASTEXITCODE -ne 0) { Write-Host "install: note: settings skipped; run kit-settings setup later." }
 
-# --- Folder privacy (NTFS-ACL equivalent of `chmod -R go-rwx`) --------------------------------
-# Strip inherited ACEs and grant full control to ONLY the current user, then drop the common
-# broad groups so no one else on the machine can read Kit's files. /T applies to the existing
-# tree, /C keeps going past any single-file error, /Q stays quiet.
-if (Test-Path -LiteralPath $kitHome -PathType Container) {
-    & icacls "$kitHome" /inheritance:r /grant:r "$($env:USERNAME):(OI)(CI)F" /T /C /Q | Out-Null
-    # Best-effort removal of inherited broad principals (ignore "not found" style failures).
-    & icacls "$kitHome" /remove:g "Users" "Everyone" "Authenticated Users" /T /C /Q | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "install: note: couldn't fully lock down $kitHome with icacls. Check its permissions by hand."
-    }
-} else {
-    Write-Host "install: note: expected $kitHome after scaffold but didn't find it; skipping the permission lock-down."
+# --- Make the kit home private (see Protect-KitFolder above) ---------------------------------
+if (-not (Test-Path -LiteralPath $kitHome -PathType Container)) {
+    Die "expected $kitHome after setup but didn't find it."
+}
+$problem = Protect-KitFolder $kitHome
+if ($problem) {
+    Die "couldn't make $kitHome private: $problem"
 }
 
 # --- Tool shims (kitmail, kitcal, and the shared commands) on PATH ---------------------------
@@ -145,6 +231,23 @@ if (-not (Test-Path "Registry::HKEY_CLASSES_ROOT\Outlook.Application")) {
     Write-Host "install: note: classic desktop Outlook was not detected. kitmail/kitcal need the"
     Write-Host "         classic Outlook client (COM); the new Outlook and web versions won't work."
 }
+
+# --- Check that Kit can read every file, and that only your account can open the kit home ------
+# A Kit that can't read its own files doesn't load, and nothing else says so, so check before
+# reporting success. One more repair pass if anything's wrong, then stop with the details.
+$check = Test-KitAccess $kitHome
+if ($check.Problems.Count -gt 0) {
+    $null = Protect-KitFolder $kitHome
+    $check = Test-KitAccess $kitHome
+}
+if ($check.Problems.Count -gt 0) {
+    Write-Host "install: Kit's files aren't set up right, so Kit wouldn't load. $($check.Problems.Count) problem(s), first ones:"
+    $check.Problems | Select-Object -First 10 | ForEach-Object { Write-Host "  $_" }
+    Write-Host "To fix by hand:  icacls `"$kitHome\*`" /reset /T /C /Q"
+    Write-Host "then run this installer again."
+    exit 1
+}
+Write-Host "install: checked $($check.Files) files: Kit can read them all, and only your account can open $kitHome."
 
 # --- Done ------------------------------------------------------------------------------------
 $uninstall = Join-Path $kitHome ".install\platform\windows\uninstall.ps1"
