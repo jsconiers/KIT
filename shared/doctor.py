@@ -23,7 +23,7 @@ HOME = pathlib.Path.home()
 KIT = HOME / "Claude/Agents/kit"
 MEM = KIT / "memory"
 LOGS = KIT / ".install/logs"
-LABELS = ["morning", "open", "weekly", "worklist", "eod", "meetprep", "backup", "sync", "scalper", "guard", "journal", "preflight", "catchup", "scorecard", "letters"]
+LABELS = ["morning", "open", "weekly", "worklist", "eod", "meetprep", "backup", "sync", "scalper", "guard", "journal", "preflight", "catchup", "scorecard", "letters", "offsite"]
 ORDER_TOOLS = [
     "mcp__robinhood-local__rh_place_order", "mcp__tastytrade__place_order",
     "mcp__tastytrade__place_complex_order", "mcp__tastytrade__replace_order",
@@ -187,6 +187,24 @@ def check_expiry():
         add("warn", "Expiring soon", "; ".join(soon[:3]) + " (see: kit-expiry)")
     if not rows:
         add("ok", "Expiry list", "nothing expiring soon")
+
+
+def check_offsite():
+    """When off-computer backup copies are set up, the last good copy should be recent."""
+    import json as _json
+    st = LOGS / "backup-offsite.json"
+    if not st.exists():
+        return
+    try:
+        data = _json.loads(st.read_text())
+        last = dt.datetime.fromisoformat(data["last_ok"])
+    except Exception:  # noqa: BLE001
+        add("warn", "Off-computer backup", "its status file can't be read")
+        return
+    age = (dt.datetime.now() - last).days
+    check(age <= 2, "Off-computer backup",
+          f"{data.get('copies', '?')} copies, newest {data.get('newest', '?')}",
+          f"no good copy for {age} days (see .install/logs/backup-offsite.log)", "warn")
 
 
 def check_secrets():
@@ -726,7 +744,7 @@ def main(argv):
         r = readiness()
         print(json.dumps(r, indent=1) if "--json" in argv else render_readiness(r))
         return 0
-    for fn in (check_import, check_settings, check_index, check_jobs, check_runs, check_tokens, check_expiry,
+    for fn in (check_import, check_settings, check_index, check_jobs, check_runs, check_tokens, check_expiry, check_offsite,
                check_secrets, check_permissions, check_agents, check_git, check_calendar, check_mail,
                check_guard, check_grammar, check_delivery, check_paused, check_outlook, check_holds,
                check_cost, check_version, check_models, check_direct_models, check_sharing_policy,
