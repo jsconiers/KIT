@@ -1,0 +1,23 @@
+# Kit's automated checks: syntax for the shell, Python, and PowerShell, job templates and JSON,
+# and a scan for personal details (patterns in the SCAN_PATTERNS secret). See .github/scripts/checks.py.
+name: Checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install zsh
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zsh
+      - name: Run Kit's checks
+        env:
+          SCAN_PATTERNS: ${{ secrets.SCAN_PATTERNS }}
+        run: python3 .github/scripts/checks.py
