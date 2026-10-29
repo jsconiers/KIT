@@ -96,7 +96,7 @@ def load_styles(path):
     if not path:
         return styles
     try:
-        with open(path, encoding="utf8") as f:
+        with open(path, encoding="utf-8-sig") as f:
             over = json.load(f)
     except (OSError, ValueError) as e:
         raise InputError(f"can't read styles file {path}: {e}")
@@ -200,7 +200,7 @@ def auto_ports(a, b):
 
 def from_spec(path, styles):
     try:
-        with open(path, encoding="utf8") as f:
+        with open(path, encoding="utf-8-sig") as f:
             spec = json.load(f)
     except (OSError, ValueError) as e:
         raise InputError(f"can't read spec {path}: {e}")
