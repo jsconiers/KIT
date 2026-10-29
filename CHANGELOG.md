@@ -224,6 +224,8 @@ versions follow [semantic versioning](https://semver.org).
   behaviour is unchanged (checked against a frozen copy of the old code).
 
 ### Changed
+- The GitHub checks use `actions/checkout@v7` and `actions/setup-python@v7`, which run on Node.js 24,
+  so the Node.js 20 deprecation warnings are gone.
 - Kit is now marked all rights reserved. `LICENSE` says it isn't open source and that using,
   copying, changing, or sharing it takes the copyright holder's written permission; the README says
   so up front, and GOVERNANCE.md separates the Owner role (releases and changes) from ownership of
