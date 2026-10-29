@@ -7,6 +7,8 @@ versions follow [semantic versioning](https://semver.org).
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-10-29
+
 ### Added
 - `kit-preread`: a pre-read for a design or architecture review. Kit's red team reads the document (Word,
   PowerPoint, Excel, OpenDocument, text, or PDF) in a closed run: its text goes in the prompt with the
