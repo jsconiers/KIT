@@ -56,7 +56,7 @@ import tempfile
 
 KIT = pathlib.Path(os.path.expanduser(os.environ.get("KIT_DIR", "~/Claude/Agents/kit")))
 CONFIG = KIT / ".install/shared/morning/config"
-SKIP_DIRS = {".git", "__pycache__", ".install/logs"}
+SKIP_DIRS = {".git", "__pycache__", ".install/logs", ".install/library"}   # library: the catalog, rebuilt by kit-library index
 SKIP_NAMES = {".DS_Store"}
 SKIP_SUFFIXES = (".pyc",)
 PATTERN = re.compile(r"^kit-backup-\d{8}-\d{6}\.tar\.gz(\.enc)?$")

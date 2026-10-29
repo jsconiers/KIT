@@ -1,25 +1,43 @@
 #!/usr/bin/env python3
-"""kit-expiry: everything of yours that expires (tokens, logins, keys, domains, certificates), and when.
+"""kit-expiry: what expires or comes up for renewal (logins, domains, certificates, licenses, registrations, documents, policies, memberships), and when.
 
-  kit-expiry            the whole list, soonest first, with days left
-  kit-expiry --check    only what's expired or due inside its warning window (the health check uses this)
+  kit-expiry                       the whole list, soonest first, with days left
+  kit-expiry --check [--health]    only what's expired, due inside its warning window, or unreadable;
+                                   --health limits it to Kit's own health items (see below)
+  kit-expiry brief [--queue]       the renewals due for the morning brief (not the health items), work
+                                   ones tagged [work]; --queue also adds a to-do for each, once per date
+  kit-expiry missing               renewals that still need a date
+  kit-expiry add NAME [--date YYYY-MM-DD] [--every 1y] [--warn DAYS] [--work] [--kind KIND] [--how TEXT]
+  kit-expiry set NAME DATE         set or change an item's date (YYYY-MM-DD, 12-May-2031, or 05/12/2031)
+  kit-expiry renewed NAME [--to DATE]   renewed: the date moves on by its period (--every), or to DATE
+  kit-expiry remove NAME
+  kit-expiry --json                the list as JSON
 
 The list is ~/Claude/Agents/kit/expiry.json, which stays on this computer:
 
   {"warn_days": 30,
    "items": [
-     {"name": "Claude token for scheduled runs", "expires": "2027-10-28",
+     {"name": "Claude token for scheduled runs", "kind": "token", "expires": "2027-10-28",
       "renew": "claude setup-token, then store it in the Keychain as kit-claude-token"},
      {"name": "example.org certificate", "check": "cert", "host": "example.org"},
-     {"name": "example.org domain", "check": "domain", "domain": "example.org", "warn_days": 60}
+     {"name": "example.org domain", "check": "domain", "domain": "example.org", "warn_days": 60},
+     {"name": "Passport", "kind": "document", "expires": "2031-05-12", "every": "10y",
+      "warn_days": 270, "renew": "renew by mail or online"},
+     {"name": "Professional certification", "kind": "certification", "expires": null, "side": "work"}
    ]}
 
-An item has a fixed "expires" date (YYYY-MM-DD) or a "check" that looks it up live: "cert" (the HTTPS
-certificate on "host") or "domain" (the registry's expiry date for "domain", over RDAP). A live lookup
-that fails falls back to the last date it found, and says so. Cross-platform.
+An item has a fixed "expires" date, a "check" that looks it up live ("cert": the HTTPS certificate on
+"host"; "domain": the registry's expiry date for "domain", over RDAP), or no date yet ("expires": null),
+which lists it as needing a date without counting it as a problem. A live lookup that fails falls back
+to the last date it found, and says so. "every" (1y, 2y, 6m, 90d) is how far `renewed` moves the date.
+"side": "work" marks a work item. Health items are Kit's own: those with a "check", those whose "kind"
+is token, login, key, domain, or certificate, and those with no "kind" (older lists). Every other
+kind is a renewal for the brief. KIT_DIR overrides the Kit folder (for tests). Cross-platform.
 """
+import calendar
 import datetime as dt
 import json
+import os
 import pathlib
 import re
 import shutil
@@ -28,11 +46,14 @@ import ssl
 import subprocess
 import sys
 
-HOME = pathlib.Path.home()
-LIST = HOME / "Claude/Agents/kit/expiry.json"
-CACHE = HOME / "Claude/Agents/kit/.install/logs/expiry-cache.json"
+KIT = pathlib.Path(os.path.expanduser(os.environ.get("KIT_DIR", "~/Claude/Agents/kit")))
+LIST = KIT / "expiry.json"
+CACHE = KIT / ".install/logs/expiry-cache.json"
+TODO = pathlib.Path(__file__).resolve().parent / "todo"
+HEALTH_KINDS = {"token", "login", "key", "domain", "cert", "certificate"}
 
 
+# ------------------------------------------------------------------ live lookups
 def cert_expiry(host):
     if shutil.which("openssl"):
         pem = subprocess.run(["openssl", "s_client", "-servername", host, "-connect", f"{host}:443"],
@@ -69,6 +90,68 @@ def domain_expiry(domain):
     raise RuntimeError("RDAP record has no expiry date")
 
 
+# ------------------------------------------------------------------ helpers
+def is_health(item):
+    return bool(item.get("check")) or not item.get("kind") or item.get("kind", "").lower() in HEALTH_KINDS
+
+
+def is_work(item):
+    return (item.get("side") or "").lower() == "work"
+
+
+def parse_date(text):
+    """YYYY-MM-DD, DD-Mmm-YYYY, Mmm DD YYYY, or MM/DD/YYYY."""
+    t = text.strip().rstrip(".,")
+    for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d %b %Y", "%b %d %Y", "%b %d, %Y", "%m/%d/%Y", "%m/%d/%y"):
+        try:
+            return dt.datetime.strptime(t, fmt).date()
+        except ValueError:
+            pass
+    raise ValueError(f"not a date: {text!r} (use YYYY-MM-DD, 12-May-2031, or 05/12/2031)")
+
+
+def add_period(d, spec):
+    m = re.fullmatch(r"\s*(\d+)\s*([ymwd])\s*", (spec or "").lower())
+    if not m:
+        raise ValueError(f"not a period: {spec!r} (use 1y, 2y, 6m, 4w, or 90d)")
+    n, unit = int(m.group(1)), m.group(2)
+    if unit == "d":
+        return d + dt.timedelta(days=n)
+    if unit == "w":
+        return d + dt.timedelta(weeks=n)
+    months = n * 12 if unit == "y" else n
+    y, mo = divmod(d.month - 1 + months, 12)
+    y, mo = d.year + y, mo + 1
+    return dt.date(y, mo, min(d.day, calendar.monthrange(y, mo)[1]))
+
+
+def load():
+    if not LIST.exists():
+        return {"warn_days": 30, "items": []}
+    return json.loads(LIST.read_text())
+
+
+def save(cfg):
+    LIST.parent.mkdir(parents=True, exist_ok=True)
+    tmp = LIST.with_suffix(".tmp")
+    tmp.write_text(json.dumps(cfg, indent=2) + "\n")
+    tmp.replace(LIST)
+
+
+def find(cfg, name):
+    items = cfg.get("items", [])
+    low = name.strip().lower()
+    exact = [i for i in items if i["name"].lower() == low]
+    if exact:
+        return exact[0]
+    hits = [i for i in items if low and low in i["name"].lower()]
+    if len(hits) == 1:
+        return hits[0]
+    if not hits:
+        raise LookupError(f"no item matches {name!r}")
+    raise LookupError(f"{name!r} matches {len(hits)} items: " + "; ".join(i["name"] for i in hits))
+
+
 def resolve(item, cache):
     """(date or None, note) for one item."""
     key = item["name"]
@@ -80,7 +163,7 @@ def resolve(item, cache):
         elif item.get("check") == "domain":
             d = domain_expiry(item["domain"])
         else:
-            return None, "no date and no check"
+            return None, "needs a date"
         cache[key] = d.isoformat()
         return d, ""
     except Exception as e:  # noqa: BLE001
@@ -89,44 +172,232 @@ def resolve(item, cache):
         return None, f"lookup failed ({str(e)[:80]})"
 
 
-def main(argv):
-    if not LIST.exists():
-        print(f"No expiry list yet: {LIST}")
-        return 0
-    cfg = json.loads(LIST.read_text())
+def rows_for(cfg, today, live=True):
+    """One row per item. live=False skips the network lookups (cached dates only)."""
     cache = json.loads(CACHE.read_text()) if CACHE.exists() else {}
-    today = dt.date.today()
     rows = []
     for item in cfg.get("items", []):
-        d, note = resolve(item, cache)
+        if not live and item.get("check"):
+            d = dt.date.fromisoformat(cache[item["name"]]) if item["name"] in cache else None
+            note = "" if d else "not looked up"
+        else:
+            d, note = resolve(item, cache)
         warn = int(item.get("warn_days", cfg.get("warn_days", 30)))
         left = (d - today).days if d else None
-        rows.append((left if left is not None else 10 ** 6, item, d, left, warn, note))
-    CACHE.parent.mkdir(parents=True, exist_ok=True)
-    CACHE.write_text(json.dumps(cache, indent=2) + "\n")
-    rows.sort(key=lambda r: r[0])
-    check = "--check" in argv
-    problems = 0
-    for _, item, d, left, warn, note in rows:
         if left is None:
-            state = "UNKNOWN"
+            state = "NODATE" if note == "needs a date" else "UNKNOWN"
         elif left < 0:
             state = "EXPIRED"
         elif left <= warn:
             state = "SOON"
         else:
             state = "ok"
-        if check and state == "ok":
+        rows.append({"item": item, "date": d, "left": left, "warn": warn, "note": note, "state": state})
+    if live:
+        CACHE.parent.mkdir(parents=True, exist_ok=True)
+        CACHE.write_text(json.dumps(cache, indent=2) + "\n")
+    rows.sort(key=lambda r: (r["left"] if r["left"] is not None else 10 ** 6, r["item"]["name"].lower()))
+    return rows
+
+
+def days_text(left):
+    if left == 0:
+        return "today"
+    if left < 0:
+        return f"{-left} day{'s' if left != -1 else ''} ago"
+    return f"in {left} day{'s' if left != 1 else ''}"
+
+
+# ------------------------------------------------------------------ commands
+def cmd_list(argv):
+    if not LIST.exists():
+        print(f"No expiry list yet: {LIST}")
+        return 0
+    cfg = load()
+    check, health = "--check" in argv, "--health" in argv
+    problems = 0
+    for r in rows_for(cfg, dt.date.today()):
+        item, d, left, state, note = r["item"], r["date"], r["left"], r["state"], r["note"]
+        if health and not is_health(item):
+            continue
+        if check and state in ("ok", "NODATE"):
             continue
         if state in ("EXPIRED", "SOON", "UNKNOWN"):
             problems += 1
         when = f"{d:%d-%b-%Y} ({left} days)" if d else "date unknown"
         renew = f"  renew: {item['renew']}" if item.get("renew") and state != "ok" else ""
         extra = f"  [{note}]" if note else ""
-        print(f"{state:8} {when:24} {item['name']}{extra}{renew}")
+        work = " [work]" if is_work(item) else ""
+        label = "NO DATE" if state == "NODATE" else state
+        print(f"{label:8} {when:24} {item['name']}{work}{extra}{renew}")
     if check and not problems:
         print("nothing expiring soon")
     return 0
+
+
+def queue_todo(item, d, left):
+    """One to-do per renewal date, through the todo command, so it reaches the phone like any other."""
+    if item.get("queued") == d.isoformat():
+        return False
+    due = "today" if left <= 0 else f"{d:%d-%b-%Y}"
+    args = ([sys.executable, str(TODO)] + (["work"] if is_work(item) else [])
+            + [f"Renew: {item['name']}", due])
+    r = subprocess.run(args, capture_output=True, text=True, timeout=60)
+    if r.returncode != 0:
+        print(f"(couldn't add the to-do for {item['name']}: {(r.stderr or r.stdout).strip()[:120]})",
+              file=sys.stderr)
+        return False
+    item["queued"] = d.isoformat()
+    return True
+
+
+def cmd_brief(argv):
+    if not LIST.exists():
+        return 0
+    cfg = load()
+    queue = "--queue" in argv
+    changed = False
+    for r in rows_for(cfg, dt.date.today(), live=False):
+        item, d, left, state = r["item"], r["date"], r["left"], r["state"]
+        if is_health(item) or state not in ("EXPIRED", "SOON"):
+            continue
+        tag = "[work] " if is_work(item) else ""
+        word = "EXPIRED" if state == "EXPIRED" else "DUE"
+        how = f" Renew: {item['renew']}" if item.get("renew") else ""
+        print(f"{tag}{word} {d:%a %d-%b-%Y} ({days_text(left)}): {item['name']}.{how}")
+        if queue and TODO.exists():
+            changed |= queue_todo(item, d, left)
+    if changed:
+        save(cfg)
+    return 0
+
+
+def cmd_missing(argv):
+    cfg = load()
+    for item in cfg.get("items", []):
+        if not item.get("expires") and not item.get("check"):
+            print(f"{'[work] ' if is_work(item) else ''}{item['name']}"
+                  + (f"  ({item['kind']})" if item.get("kind") else ""))
+    return 0
+
+
+def opt(argv, flag, default=None):
+    if flag in argv:
+        i = argv.index(flag)
+        if i + 1 >= len(argv):
+            raise ValueError(f"{flag} needs a value")
+        val = argv[i + 1]
+        del argv[i:i + 2]
+        return val
+    return default
+
+
+def cmd_add(argv):
+    argv = list(argv)
+    date = opt(argv, "--date")
+    every = opt(argv, "--every")
+    warn = opt(argv, "--warn")
+    kind = opt(argv, "--kind", "renewal")
+    how = opt(argv, "--how")
+    work = "--work" in argv
+    argv = [a for a in argv if a != "--work"]
+    name = " ".join(argv).strip()
+    if not name:
+        raise ValueError("give a name: kit-expiry add NAME [--date ...]")
+    cfg = load()
+    if any(i["name"].lower() == name.lower() for i in cfg.get("items", [])):
+        raise ValueError(f"{name!r} is already on the list (use set or renewed)")
+    item = {"name": name, "kind": kind, "expires": parse_date(date).isoformat() if date else None}
+    if every:
+        add_period(dt.date.today(), every)  # validates
+        item["every"] = every
+    if warn:
+        item["warn_days"] = int(warn)
+    if work:
+        item["side"] = "work"
+    if how:
+        item["renew"] = how
+    cfg.setdefault("items", []).append(item)
+    save(cfg)
+    print(f"Added: {name}" + (f", {parse_date(date):%d-%b-%Y}" if date else ", date to come"))
+    return 0
+
+
+def cmd_set(argv):
+    if len(argv) < 2:
+        raise ValueError("kit-expiry set NAME DATE")
+    date = parse_date(argv[-1])
+    cfg = load()
+    item = find(cfg, " ".join(argv[:-1]))
+    if item.get("check"):
+        raise ValueError(f"{item['name']} is looked up live; it has no date to set")
+    item["expires"] = date.isoformat()
+    item.pop("queued", None)
+    save(cfg)
+    print(f"{item['name']}: {date:%d-%b-%Y}")
+    return 0
+
+
+def cmd_renewed(argv):
+    argv = list(argv)
+    to = opt(argv, "--to")
+    cfg = load()
+    item = find(cfg, " ".join(argv))
+    if item.get("check"):
+        raise ValueError(f"{item['name']} is looked up live; nothing to mark")
+    if to:
+        new = parse_date(to)
+    else:
+        if not item.get("every") or not item.get("expires"):
+            raise ValueError(f"{item['name']} has no period (--every) or date; give --to DATE")
+        new = add_period(dt.date.fromisoformat(item["expires"]), item["every"])
+        while new <= dt.date.today():
+            new = add_period(new, item["every"])
+    item["expires"] = new.isoformat()
+    item["renewed"] = dt.date.today().isoformat()
+    item.pop("queued", None)
+    save(cfg)
+    print(f"{item['name']}: renewed; next {new:%d-%b-%Y}")
+    return 0
+
+
+def cmd_remove(argv):
+    cfg = load()
+    item = find(cfg, " ".join(argv))
+    cfg["items"].remove(item)
+    save(cfg)
+    print(f"Removed: {item['name']}")
+    return 0
+
+
+def cmd_json(argv):
+    cfg = load()
+    out = []
+    for r in rows_for(cfg, dt.date.today(), live="--cached" not in argv):
+        it = r["item"]
+        out.append({"name": it["name"], "date": r["date"].isoformat() if r["date"] else None,
+                    "days_left": r["left"], "state": r["state"], "health": is_health(it),
+                    "side": "work" if is_work(it) else "personal", "kind": it.get("kind"),
+                    "renew": it.get("renew"), "note": r["note"]})
+    print(json.dumps(out, indent=2))
+    return 0
+
+
+def main(argv):
+    cmds = {"brief": cmd_brief, "missing": cmd_missing, "add": cmd_add, "set": cmd_set,
+            "renewed": cmd_renewed, "remove": cmd_remove}
+    try:
+        if argv and argv[0] in cmds:
+            return cmds[argv[0]](argv[1:])
+        if "--json" in argv:
+            return cmd_json(argv)
+        if argv and argv[0] not in ("--check", "--health"):
+            print(__doc__.split("\n\n")[1])
+            return 2
+        return cmd_list(argv)
+    except (ValueError, LookupError) as e:
+        print(f"kit-expiry: {e}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

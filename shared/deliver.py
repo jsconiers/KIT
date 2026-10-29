@@ -319,6 +319,23 @@ end run
 '''
 
 
+SENT_LEDGER = KIT / ".install/textback/sent.jsonl"
+
+
+def record_sent(text):
+    """Remember a hash of each text Kit sends, so kit-textback never takes Kit's own texts, which
+    land in the same conversation, for commands."""
+    try:
+        import hashlib
+        import json
+        digest = hashlib.sha256(" ".join(text.split()).encode()).hexdigest()
+        SENT_LEDGER.parent.mkdir(parents=True, exist_ok=True)
+        with open(SENT_LEDGER, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"t": int(time.time()), "h": digest}) + "\n")
+    except OSError:
+        pass
+
+
 def ch_imessage(ctx):
     if not IS_MAC:
         say("imessage: macOS only")
@@ -336,6 +353,7 @@ def ch_imessage(ctx):
         for to in targets:
             rc, _, err = run(["/usr/bin/osascript", "-", to, msg], timeout=60, stdin=MAC_IMESSAGE)
             if rc == 0:
+                record_sent(msg)
                 say("imessage: texted")
                 return True
             say(f"imessage: send failed: {err[:200]}")
@@ -447,6 +465,9 @@ def main(argv=None):
         for side in ("personal", "work"):
             names = (cfg.get(f"DELIVERY_{side.upper()}", "") or "local").lower().split()
             text = slurp(split_text(a.text, side)).strip() or ctx["text"]
+            if text == "NO TEXT":            # the run had nothing for this side
+                say(f"{side}: nothing to send")
+                continue
             # Work channels never carry the full brief, which has personal sections.
             side_ctx = dict(ctx, text=text, brief="" if side == "work" else ctx["brief"],
                             side=side)
@@ -462,7 +483,7 @@ def main(argv=None):
 
     for name, ok in results.items():
         say(f"result {name}: {'ok' if ok else 'FAILED'}")
-    return 0 if any(results.values()) else 1
+    return 0 if any(results.values()) or not results else 1
 
 
 if __name__ == "__main__":

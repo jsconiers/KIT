@@ -167,13 +167,15 @@ def check_tokens():
 
 
 def check_expiry():
-    """kit-expiry --check: anything in ~/Claude/Agents/kit/expiry.json that has expired or is close."""
+    """kit-expiry --check --health: Kit's own items in ~/Claude/Agents/kit/expiry.json (logins, tokens,
+    keys, domains, certificates) that have expired or are close. Personal and work renewals (licenses,
+    documents, policies) go in the brief's Renewals section instead (kit-expiry brief)."""
     import subprocess, sys as _sys
     tool = KIT / ".install/shared/bin/kit-expiry"
     if not tool.exists() or not (KIT / "expiry.json").exists():
         return
     try:
-        out = subprocess.run([_sys.executable, str(tool), "--check"], capture_output=True, text=True, timeout=180).stdout
+        out = subprocess.run([_sys.executable, str(tool), "--check", "--health"], capture_output=True, text=True, timeout=180).stdout
     except subprocess.TimeoutExpired:
         add("warn", "Expiry list", "lookups timed out")
         return
@@ -187,6 +189,77 @@ def check_expiry():
         add("warn", "Expiring soon", "; ".join(soon[:3]) + " (see: kit-expiry)")
     if not rows:
         add("ok", "Expiry list", "nothing expiring soon")
+
+
+def check_textback():
+    """When texting Kit back is on (TEXTBACK in the config), its reader needs Full Disk Access and its
+    loop should have checked for texts in the last few minutes."""
+    import json as _json
+    cfg = KIT / ".install/shared/morning/config"
+    if not cfg.exists() or not re.search(r'^TEXTBACK="?on"?\s*$', cfg.read_text(errors="ignore"), re.M):
+        return
+    try:
+        st = _json.loads((KIT / ".install/textback/state.json").read_text())
+    except (OSError, ValueError):
+        add("warn", "Texting Kit", "hasn't run yet (see: kit-textback status)")
+        return
+    if st.get("access_problem"):
+        add("warn", "Texting Kit", "KitMessages needs Full Disk Access (System Settings > Privacy & Security)")
+        return
+    age = dt.datetime.now().timestamp() - st.get("last_check", 0)
+    check(age < 900, "Texting Kit", "listening", f"no check for {int(age // 60)} min (see: kit-textback status)", "warn")
+
+
+def check_library():
+    """When collections are set up (kit-library), the catalog should be fresh, its PDF reader built, and
+    nothing stuck waiting to be delivered to the output folder."""
+    import subprocess, sys as _sys
+    tool = KIT / ".install/shared/bin/kit-library"
+    if not tool.exists() or not (KIT / "library/collections.json").exists():
+        return
+    try:
+        out = subprocess.run([_sys.executable, str(tool), "--check"], capture_output=True, text=True,
+                             timeout=60).stdout.strip()
+    except subprocess.TimeoutExpired:
+        add("warn", "Library", "the catalog check timed out")
+        return
+    level, _, detail = out.partition(" ")
+    if level == "ok":
+        add("ok", "Library", detail)
+    else:
+        add("FAIL" if level == "fail" else "warn", "Library", (detail or "no answer from kit-library") + " (see: kit-library)")
+
+
+def check_feedback():
+    """The team feedback log (kit-feedback) must stay readable only by you."""
+    import subprocess, sys as _sys
+    tool = KIT / ".install/shared/bin/kit-feedback"
+    if not tool.exists() or not (KIT / "feedback").exists():
+        return
+    try:
+        out = subprocess.run([_sys.executable, str(tool), "--check"], capture_output=True, text=True,
+                             timeout=60).stdout.strip()
+    except subprocess.TimeoutExpired:
+        add("warn", "Feedback log", "the check timed out")
+        return
+    level, _, detail = out.partition(" ")
+    add("ok" if level == "ok" else "warn", "Feedback log", detail or "no answer from kit-feedback")
+
+
+def check_mail_index():
+    """kitmail's quick inbox reads Mail's own index through KitMessages.app (Full Disk Access). It falls
+    back to asking Mail, which can take minutes, so say when the quick way isn't working."""
+    log = LOGS / "mail.log"
+    if not log.exists():
+        return
+    lines = log.read_text(errors="ignore").splitlines()[-20:]
+    recent = [l for l in lines if l[:10] >= (dt.date.today() - dt.timedelta(days=2)).isoformat()]
+    if not recent:
+        return
+    last = recent[-1]
+    if "unavailable" in last:
+        why = "Full Disk Access for KitMessages" if "no-access" in last else last.split("(", 1)[-1].split(")")[0][:90]
+        add("warn", "Mail, quick inbox", f"not working, so mail checks are slow: {why}")
 
 
 def check_offsite():
@@ -744,7 +817,7 @@ def main(argv):
         r = readiness()
         print(json.dumps(r, indent=1) if "--json" in argv else render_readiness(r))
         return 0
-    for fn in (check_import, check_settings, check_index, check_jobs, check_runs, check_tokens, check_expiry, check_offsite,
+    for fn in (check_import, check_settings, check_index, check_jobs, check_runs, check_tokens, check_expiry, check_offsite, check_textback, check_library, check_feedback, check_mail_index,
                check_secrets, check_permissions, check_agents, check_git, check_calendar, check_mail,
                check_guard, check_grammar, check_delivery, check_paused, check_outlook, check_holds,
                check_cost, check_version, check_models, check_direct_models, check_sharing_policy,

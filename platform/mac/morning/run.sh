@@ -16,6 +16,13 @@
 #   run.sh open     post-open read (weekdays 9:45)               optional extra for a trading setup
 #   run.sh journal  trade journal after the close (weekdays 16:20) optional extra for a trading setup
 # The open and journal runs are optional: install their launchd jobs only if you trade.
+#   run.sh NAME     a run of your own: its prompt is .install/prompts/prompt-NAME.md (kept out of the
+#                   shared package), its short text briefs/NAME-text.txt, and its extra tools
+#                   ALLOW_TOOLS_<NAME> in the config (any run's extra tools can go there, too).
+# Before the morning brief and the weekly review, run.sh writes briefs/dates.txt (kit-dates),
+# briefs/renewals.txt (kit-expiry brief) and, for the review, briefs/renewals-missing.txt, with no
+# model call; the morning run also adds a to-do for each date or renewal that needs one. Each
+# executable in .install/brief.d/ (your own hooks) prints a section to briefs/extra-<hook>.txt.
 # To test a run without using up that day's run:
 #   touch ~/Claude/Agents/kit/.install/platform/mac/morning/test-run
 #   launchctl kickstart gui/$(id -u)/com.$USER.kit.morning      (or .open, .weekly)
@@ -63,7 +70,11 @@ case "$MODE" in
   journal) PROMPT="$SHAREDIR/prompt-journal.md"; TEXT="briefs/journal-text.txt" ;;
   worklist) PROMPT="$SHAREDIR/prompt-worklist.md"; TEXT="briefs/worklist-text.txt" ;;
   eod)    [ "${EOD:-on}" = "off" ] && exit 0; PROMPT="$SHAREDIR/prompt-eod.md"; TEXT="briefs/eod-text.txt" ;;
-  *)      MODE=morning; PROMPT="$SHAREDIR/prompt.md"; TEXT="briefs/latest-text.txt" ;;
+  *)      if [[ "$MODE" =~ ^[a-z][a-z0-9-]*$ ]] && [ -f "$KIT/.install/prompts/prompt-$MODE.md" ]; then
+            PROMPT="$KIT/.install/prompts/prompt-$MODE.md"; TEXT="briefs/$MODE-text.txt"
+          else
+            MODE=morning; PROMPT="$SHAREDIR/prompt.md"; TEXT="briefs/latest-text.txt"
+          fi ;;
 esac
 DONE="$LOGDIR/$TODAY.$MODE.done"
 [ "$MODE" = "morning" ] && DONE="$LOGDIR/$TODAY.done"
@@ -134,7 +145,7 @@ if [ -f "$KIT/.install/shared/bin/kit-cost" ]; then
   if [ "$COST_LEVEL" = "stop" ] && [[ " ${COST_ESSENTIAL_MODES:-morning} " != *" $MODE "* ]]; then
     echo "== $(date) $MODE run skipped: $COST_PCT of the monthly budget used (stop at ${COST_STOP_PCT:-95}%)" >> "$LOG"
     if [ ! -f "$LOGDIR/$TODAY.cost-notice" ]; then
-      echo "Kit budget: $COST_PCT of this month's budget is used, so Kit skipped its $MODE run. The morning brief still runs. See: kit-cost" > "$LOGDIR/cost-notice.txt"
+      echo "Kit · Budget: $COST_PCT of this month's budget is used, so Kit skipped its $MODE run. The morning brief still runs. See: kit-cost" > "$LOGDIR/cost-notice.txt"
       deliver "$LOGDIR/cost-notice.txt" nobrief >> "$LOG" 2>&1 && touch "$LOGDIR/$TODAY.cost-notice"
     fi
     run_alerts --only cost
@@ -180,6 +191,26 @@ if [ "$MODE" = "morning" ] || [ "$MODE" = "weekly" ]; then
   rm -f briefs/alerts.txt
   run_alerts --out briefs/alerts.txt
   ALERT_LINES=$(cat briefs/alerts.txt 2>/dev/null)
+fi
+# Dates, renewals, and your own brief hooks, for their sections of the brief and the review: no model
+# call. The morning run (not a test) also adds a to-do for each date or renewal that needs one.
+if [ "$MODE" = "morning" ] || [ "$MODE" = "weekly" ]; then
+  rm -f briefs/dates.txt briefs/renewals.txt briefs/renewals-missing.txt briefs/extra-*.txt(N)
+  QUEUE_FLAG=()
+  [ "$MODE" = "morning" ] && [ -z "$TEST" ] && QUEUE_FLAG=(--queue)
+  [ -f "$KIT/dates.json" ] && [ -f "$KIT/.install/shared/bin/kit-dates" ] \
+    && python3 "$KIT/.install/shared/bin/kit-dates" brief "${QUEUE_FLAG[@]}" > briefs/dates.txt 2>> "$LOG"
+  [ -f "$KIT/expiry.json" ] && [ -f "$KIT/.install/shared/bin/kit-expiry" ] \
+    && python3 "$KIT/.install/shared/bin/kit-expiry" brief "${QUEUE_FLAG[@]}" > briefs/renewals.txt 2>> "$LOG"
+  [ "$MODE" = "weekly" ] && [ -f "$KIT/expiry.json" ] && [ -f "$KIT/.install/shared/bin/kit-expiry" ] \
+    && python3 "$KIT/.install/shared/bin/kit-expiry" missing > briefs/renewals-missing.txt 2>> "$LOG"
+  for hook in "$KIT"/.install/brief.d/*(N); do
+    [ -x "$hook" ] || continue
+    out="briefs/extra-${hook:t}.txt"
+    perl -e 'alarm shift; exec @ARGV' 60 "$hook" "$MODE" > "$out" 2>> "$LOG" || rm -f "$out"
+    [ -s "$out" ] || rm -f "$out"
+  done
+  for f in briefs/dates.txt briefs/renewals.txt briefs/renewals-missing.txt; do [ -s "$f" ] || rm -f "$f"; done
 fi
 PROMPT_TEXT=$(sed "s/{{OWNER}}/${OWNER_NAME:-the owner}/g" "$PROMPT")
 if [ "$MODE" = "morning" ] || [ "$MODE" = "weekly" ]; then
@@ -273,6 +304,10 @@ for r in "${(@s:;:)ALLOW_TOOLS:-}"; do r="${r## }"; r="${r%% }"; [ -n "$r" ] && 
 if [ "$MODE" = "weekly" ]; then
   for r in "${(@s:;:)ALLOW_TOOLS_WEEKLY:-}"; do r="${r## }"; r="${r%% }"; [ -n "$r" ] && ALLOWED+=("$r"); done
   for r in "${DEMAND_RULES[@]}" "${REGWATCH_RULES[@]}"; do [ -n "$r" ] && ! (( ${ALLOWED[(Ie)$r]} )) && ALLOWED+=("$r"); done
+else
+  # Any other run's extra tools: ALLOW_TOOLS_<MODE> (hyphens become underscores), same format.
+  MODE_TOOLS_VAR="ALLOW_TOOLS_${(U)MODE//-/_}"
+  for r in "${(@s:;:)${(P)MODE_TOOLS_VAR:-}}"; do r="${r## }"; r="${r%% }"; [ -n "$r" ] && ALLOWED+=("$r"); done
 fi
 # A rule written with ~/ doesn't match a command the run spells with the full home path, so each
 # Bash rule with ~/ also gets a twin with $HOME spelled out.

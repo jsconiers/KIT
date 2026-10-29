@@ -1,0 +1,550 @@
+#!/usr/bin/env python3
+"""kit-feedback: a private log of feedback on the people you lead, for 1:1s and reviews.
+
+  kit-feedback                       who's due a note, and the last week's notes (a line each)
+  kit-feedback add NAME TEXT... [--kind praise|coaching|observation|goal|concern] [--impact TEXT]
+                   [--date D] [--by D] [--tag T,...]
+                                     one note: what you saw them do, and where (--impact: what it led
+                                     to). The kind defaults to observation; a goal can have --by
+  kit-feedback show NAME [--since D] [--kind K] [--json]
+  kit-feedback done NAME N           mark goal N (its number in show) done
+  kit-feedback people                everyone you lead: role, rhythm, last note, notes this quarter
+  kit-feedback add-person NAME [--role R] [--every DAYS] [--alias "Sam,Samuel"]
+  kit-feedback set NAME [--role R] [--every DAYS] [--alias A,B]
+  kit-feedback remove-person NAME [--forget]
+                                     stop tracking someone; their notes stay unless --forget (which
+                                     asks first, at the keyboard)
+  kit-feedback met NAME [--date D]   record a 1:1 (the next prep starts from it)
+  kit-feedback prep NAME [--write]   a 1:1 page: praise to give, coaching to raise, what you've seen,
+                                     open goals, since your last 1:1 with them (or 30 days)
+  kit-feedback review NAME [--from D] [--to D] [--write]
+                                     the notes over a review period, by kind, with dates and counts:
+                                     the raw material for a review you write yourself
+  kit-feedback brief                 [work] lines for the brief: who's had no note in a while, and
+                                     today's 1:1s on the calendar, with the prep command
+  kit-feedback --check               one line for kit doctor
+
+Kept in Kit's folder, in feedback/: only your account can open it, it is never committed or
+exported, and it's backed up only encrypted. Notes are about work: what someone did and what it led
+to, never guesses about motives, health, or private life. Nothing is ever sent to anyone, and none of
+it goes into a text: the brief gets names and counts only, tagged [work]. Dates: YYYY-MM-DD,
+DD-Mmm-YYYY, 20-Oct, today, yesterday.
+"""
+import datetime as dt
+import json
+import os
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+import uuid
+
+KIT = pathlib.Path(os.path.expanduser(os.environ.get("KIT_DIR", "~/Claude/Agents/kit")))
+DIR = KIT / "feedback"
+PEOPLE = DIR / "people.json"
+NOTES = DIR / "notes.jsonl"
+KINDS = ("praise", "coaching", "observation", "goal", "concern")
+DEFAULT_EVERY = 14
+ONE_ON_ONE = re.compile(r"\b(1\s*:\s*1|1-1|1on1|one[- ]on[- ]one|1x1|check[- ]in)\b", re.I)
+
+
+class Fail(Exception):
+    pass
+
+
+def today():
+    s = os.environ.get("KIT_TODAY")
+    return dt.date.fromisoformat(s) if s else dt.date.today()
+
+
+def private(path):
+    try:
+        os.chmod(path, 0o700 if path.is_dir() else 0o600)
+    except OSError:
+        pass
+
+
+def ensure():
+    DIR.mkdir(parents=True, exist_ok=True)
+    private(DIR)
+
+
+def load_people():
+    if not PEOPLE.exists():
+        return {"people": []}
+    return json.loads(PEOPLE.read_text(encoding="utf-8"))
+
+
+def save_people(d):
+    ensure()
+    tmp = PEOPLE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(d, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    private(tmp)
+    tmp.replace(PEOPLE)
+
+
+def notes():
+    out = []
+    if NOTES.exists():
+        for line in NOTES.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                out.append(json.loads(line))
+            except ValueError:
+                continue
+    return out
+
+
+def save_notes(rows):
+    ensure()
+    tmp = NOTES.with_suffix(".tmp")
+    tmp.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+    private(tmp)
+    tmp.replace(NOTES)
+
+
+def append_note(row):
+    ensure()
+    with open(NOTES, "a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    private(NOTES)
+
+
+def norm(s):
+    return re.sub(r"[^a-z0-9 ]+", "", (s or "").lower()).strip()
+
+
+def find(d, name, required=True):
+    n = norm(name)
+    if not n:
+        raise Fail("whose? Give a name")
+    exact = [p for p in d["people"] if n == norm(p["name"]) or n in [norm(a) for a in p.get("aliases", [])]]
+    if exact:
+        return exact[0]
+    first = [p for p in d["people"] if norm(p["name"]).split(" ")[0] == n.split(" ")[0]
+             and (len(n.split()) == 1 or n in norm(p["name"]))]
+    if len(first) == 1:
+        return first[0]
+    if len(first) > 1:
+        raise Fail(f"more than one person matches {name!r}: " + ", ".join(p["name"] for p in first))
+    if required:
+        raise Fail(f"{name!r} isn't on your list (kit-feedback add-person \"{name}\")")
+    return None
+
+
+def parse_day(s):
+    s = (s or "").strip().lower()
+    if s in ("", "today"):
+        return today()
+    if s == "yesterday":
+        return today() - dt.timedelta(days=1)
+    for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%m/%d/%Y", "%d-%b", "%m/%d"):
+        try:
+            d = dt.datetime.strptime(s, fmt).date()
+            if fmt in ("%d-%b", "%m/%d"):
+                d = d.replace(year=today().year)
+            return d
+        except ValueError:
+            pass
+    raise Fail(f"not a date: {s!r}")
+
+
+def opt(argv, name, default=None):
+    if name in argv:
+        i = argv.index(name)
+        if i + 1 >= len(argv):
+            raise Fail(f"{name} needs a value")
+        v = argv[i + 1]
+        del argv[i:i + 2]
+        return v
+    return default
+
+
+def flag(argv, name):
+    if name in argv:
+        argv.remove(name)
+        return True
+    return False
+
+
+def fmt(d):
+    return (d if isinstance(d, dt.date) else dt.date.fromisoformat(d)).strftime("%d-%b-%Y")
+
+
+def mine(rows, p):
+    return [r for r in rows if r.get("person") == p["name"]]
+
+
+def last_note(rows, p):
+    dates = [r["date"] for r in mine(rows, p)]
+    return max(dates) if dates else None
+
+
+def goals(rows, p):
+    """Open goals, oldest first, numbered as in show."""
+    return [r for r in mine(rows, p) if r.get("kind") == "goal" and not r.get("done")]
+
+
+# ------------------------------------------------------------------ commands
+def cmd_default(argv):
+    d, rows = load_people(), notes()
+    if not d["people"]:
+        print("No one on your list yet: kit-feedback add-person NAME --role ROLE --every 14")
+        return 0
+    week = (today() - dt.timedelta(days=7)).isoformat()
+    for p in sorted(d["people"], key=lambda p: p["name"].lower()):
+        last = last_note(rows, p)
+        every = int(p.get("every") or DEFAULT_EVERY)
+        gap = (today() - dt.date.fromisoformat(last)).days if last else None
+        due = "no notes yet" if gap is None else f"last note {gap} days ago" + (" (due)" if gap >= every else "")
+        print(f"{p['name']}: {due}")
+        for r in sorted((r for r in mine(rows, p) if r["date"] >= week), key=lambda r: r["date"]):
+            print(f"  {fmt(r['date'])} {r['kind']}: {r['text'][:110]}")
+    return 0
+
+
+def cmd_add(argv):
+    argv = list(argv)
+    kind = (opt(argv, "--kind", "observation") or "").lower()
+    if kind not in KINDS:
+        raise Fail(f"--kind is one of: {', '.join(KINDS)}")
+    impact, when, by, tags = opt(argv, "--impact"), opt(argv, "--date"), opt(argv, "--by"), opt(argv, "--tag")
+    d = load_people()
+    if not argv:
+        raise Fail('kit-feedback add NAME "what you saw" [--kind praise] [--impact "what it led to"]')
+    # The name is the longest leading run of words that names someone on the list.
+    p, used = None, 0
+    for n in range(min(4, len(argv)), 0, -1):
+        p = find(d, " ".join(argv[:n]), required=False)
+        if p:
+            used = n
+            break
+    if not p:
+        raise Fail(f"{argv[0]!r} isn't on your list (kit-feedback add-person NAME)")
+    text = " ".join(argv[used:]).strip()
+    if not text:
+        raise Fail("what did you see? kit-feedback add NAME \"what happened\"")
+    day = parse_day(when)
+    if day > today():
+        raise Fail("that date hasn't happened yet")
+    row = {"id": uuid.uuid4().hex[:8], "at": dt.datetime.now().isoformat(timespec="minutes"), "date": day.isoformat(),
+           "person": p["name"], "kind": kind, "text": text[:2000]}
+    if impact:
+        row["impact"] = impact[:1000]
+    if by and kind == "goal":
+        row["by"] = parse_day(by).isoformat() if not re.match(r"\d{4}-\d{2}-\d{2}$", by) else by
+    if tags:
+        row["tags"] = [t.strip().lower() for t in tags.split(",") if t.strip()]
+    append_note(row)
+    print(f"Noted for {p['name']} ({kind}, {fmt(day)}).")
+    return 0
+
+
+def show_rows(rows):
+    for r in rows:
+        extra = []
+        if r.get("impact"):
+            extra.append(f"impact: {r['impact']}")
+        if r.get("kind") == "goal":
+            extra.append(f"by {fmt(r['by'])}" if r.get("by") else "")
+            extra.append(f"done {fmt(r['done'])}" if r.get("done") else "open")
+        extra = [e for e in extra if e]
+        print(f"{fmt(r['date'])}  {r['kind']:<11} {r['text']}" + (f"  ({'; '.join(extra)})" if extra else ""))
+
+
+def cmd_show(argv):
+    argv = list(argv)
+    since, kind, as_json = opt(argv, "--since"), opt(argv, "--kind"), flag(argv, "--json")
+    d = load_people()
+    p = find(d, " ".join(argv))
+    rows = mine(notes(), p)
+    if since:
+        rows = [r for r in rows if r["date"] >= parse_day(since).isoformat()]
+    if kind:
+        rows = [r for r in rows if r["kind"] == kind.lower()]
+    rows.sort(key=lambda r: (r["date"], r["at"]), reverse=True)
+    if as_json:
+        print(json.dumps(rows, indent=2, ensure_ascii=False))
+        return 0
+    print(f"{p['name']}" + (f", {p['role']}" if p.get("role") else "") + f": {len(rows)} note(s)")
+    open_goals = goals(notes(), p)
+    if open_goals:
+        print("Open goals:")
+        for i, g in enumerate(open_goals, 1):
+            print(f"  {i}. {g['text']}" + (f" (by {fmt(g['by'])})" if g.get("by") else ""))
+    show_rows(rows)
+    return 0
+
+
+def cmd_done(argv):
+    argv = list(argv)
+    if not argv or not argv[-1].isdigit():
+        raise Fail("kit-feedback done NAME N (N from kit-feedback show NAME)")
+    n = int(argv.pop())
+    d, rows = load_people(), notes()
+    p = find(d, " ".join(argv))
+    open_goals = goals(rows, p)
+    if not 1 <= n <= len(open_goals):
+        raise Fail(f"{p['name']} has {len(open_goals)} open goal(s)")
+    target = open_goals[n - 1]["id"]
+    for r in rows:
+        if r.get("id") == target:
+            r["done"] = today().isoformat()
+    save_notes(rows)
+    print(f"Done: {open_goals[n - 1]['text'][:80]}")
+    return 0
+
+
+def cmd_people(argv):
+    d, rows = load_people(), notes()
+    if not d["people"]:
+        print("No one on your list yet.")
+        return 0
+    quarter = (today() - dt.timedelta(days=91)).isoformat()
+    for p in sorted(d["people"], key=lambda p: p["name"].lower()):
+        last = last_note(rows, p)
+        n = len([r for r in mine(rows, p) if r["date"] >= quarter])
+        print(f"{p['name']}" + (f" ({p['role']})" if p.get("role") else "") +
+              f": every {p.get('every') or DEFAULT_EVERY} days; last note {fmt(last) if last else 'none'}; "
+              f"{n} in 90 days" + (f"; last 1:1 {fmt(p['last_1on1'])}" if p.get("last_1on1") else ""))
+    return 0
+
+
+def apply_fields(p, argv):
+    role, every, alias = opt(argv, "--role"), opt(argv, "--every"), opt(argv, "--alias")
+    if role is not None:
+        p["role"] = role.strip()[:80]
+    if every is not None:
+        e = int(re.sub(r"\D", "", every) or 0)
+        if not 1 <= e <= 365:
+            raise Fail("--every is a number of days, 1 to 365")
+        p["every"] = e
+    if alias is not None:
+        p["aliases"] = [a.strip() for a in alias.split(",") if a.strip()]
+
+
+def cmd_add_person(argv):
+    argv = list(argv)
+    p = {"name": "", "every": DEFAULT_EVERY, "added": today().isoformat()}
+    apply_fields(p, argv)
+    name = re.sub(r"\s+", " ", " ".join(argv)).strip()
+    if not name:
+        raise Fail("kit-feedback add-person NAME [--role R] [--every DAYS]")
+    d = load_people()
+    hit = find(d, name, required=False)
+    if hit and norm(hit["name"]) == norm(name):
+        raise Fail(f"{name} is already on your list")
+    p["name"] = name[:60]
+    d["people"].append(p)
+    save_people(d)
+    print(f"Added {p['name']}: a note every {p['every']} days or so.")
+    return 0
+
+
+def cmd_set(argv):
+    argv = list(argv)
+    probe = list(argv)
+    apply_fields({}, probe)
+    d = load_people()
+    p = find(d, " ".join(probe))
+    apply_fields(p, argv)
+    save_people(d)
+    print(f"{p['name']}" + (f" ({p['role']})" if p.get("role") else "") + f": every {p.get('every')} days.")
+    return 0
+
+
+def cmd_remove_person(argv):
+    argv = list(argv)
+    forget = flag(argv, "--forget")
+    d = load_people()
+    p = find(d, " ".join(argv))
+    if forget:
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            raise Fail("--forget deletes notes, so it needs you at the keyboard")
+        ans = input(f"Delete all {len(mine(notes(), p))} notes on {p['name']}? This can't be undone. [y/N] ")
+        if ans.strip().lower() not in ("y", "yes"):
+            print("Kept.")
+            return 0
+        save_notes([r for r in notes() if r.get("person") != p["name"]])
+    d["people"].remove(p)
+    save_people(d)
+    print(f"Removed {p['name']}" + (" and their notes." if forget else "; their notes are kept."))
+    return 0
+
+
+def cmd_met(argv):
+    argv = list(argv)
+    when = parse_day(opt(argv, "--date", "today"))
+    d = load_people()
+    p = find(d, " ".join(argv))
+    p["last_1on1"] = when.isoformat()
+    save_people(d)
+    print(f"1:1 with {p['name']} on {fmt(when)} noted.")
+    return 0
+
+
+def block(title, rows):
+    out = [f"## {title}", ""]
+    if not rows:
+        return out + ["None.", ""]
+    for r in rows:
+        line = f"- {fmt(r['date'])}: {r['text']}"
+        if r.get("impact"):
+            line += f" (It led to: {r['impact']})"
+        out.append(line)
+    return out + [""]
+
+
+def write_private(name, text):
+    ensure()
+    f = DIR / name
+    f.write_text(text, encoding="utf-8")
+    private(f)
+    return f
+
+
+def cmd_prep(argv):
+    argv = list(argv)
+    write = flag(argv, "--write")
+    d, rows = load_people(), notes()
+    p = find(d, " ".join(argv))
+    since = p.get("last_1on1") or (today() - dt.timedelta(days=30)).isoformat()
+    recent = sorted((r for r in mine(rows, p) if r["date"] >= since), key=lambda r: r["date"])
+    by = {k: [r for r in recent if r["kind"] == k] for k in KINDS}
+    lines = [f"# 1:1 prep: {p['name']}" + (f", {p['role']}" if p.get("role") else ""), "",
+             f"Since {'your last 1:1, ' if p.get('last_1on1') else ''}{fmt(since)}: {len(recent)} note(s). Private "
+             "(Kit's feedback/ folder); share what you choose, in your own words.", ""]
+    lines += block("Praise to give", by["praise"])
+    lines += block("Coaching to raise", by["coaching"] + by["concern"])
+    lines += block("What you've seen", by["observation"])
+    open_goals = goals(rows, p)
+    lines += ["## Open goals", ""] + ([f"- {g['text']}" + (f" (by {fmt(g['by'])}" + (", overdue" if g['by'] < today().isoformat() else "") + ")" if g.get("by") else "")
+                                       for g in open_goals] or ["None."]) + [""]
+    lines += ["## To ask", "", "- What's going well, and what's in your way?",
+              "- What do you need from me?", "- Where do you want to grow next?", "",
+              f"After the 1:1: kit-feedback met {p['name'].split()[0]}"]
+    text = "\n".join(lines) + "\n"
+    if write:
+        f = write_private(f"prep-{re.sub(r'[^a-z0-9]+', '-', p['name'].lower())}-{today().isoformat()}.md", text)
+        print(f"Saved {f}")
+    else:
+        print(text, end="")
+    return 0
+
+
+def cmd_review(argv):
+    argv = list(argv)
+    write = flag(argv, "--write")
+    start = parse_day(opt(argv, "--from", (today() - dt.timedelta(days=182)).isoformat()))
+    end = parse_day(opt(argv, "--to", "today"))
+    d, rows = load_people(), notes()
+    p = find(d, " ".join(argv))
+    period = sorted((r for r in mine(rows, p) if start.isoformat() <= r["date"] <= end.isoformat()),
+                    key=lambda r: r["date"])
+    counts = ", ".join(f"{k} {len([r for r in period if r['kind'] == k])}" for k in KINDS
+                       if any(r["kind"] == k for r in period)) or "no notes"
+    lines = [f"# Review notes: {p['name']}" + (f", {p['role']}" if p.get("role") else ""), "",
+             f"{fmt(start)} to {fmt(end)}: {len(period)} note(s) ({counts}). The raw material for a review you "
+             "write yourself: dated, specific, and work only. Private (Kit's feedback/ folder).", ""]
+    tags = {}
+    for r in period:
+        for t in r.get("tags", []):
+            tags[t] = tags.get(t, 0) + 1
+    if tags:
+        lines += ["Themes (tags): " + ", ".join(f"{t} {n}" for t, n in sorted(tags.items(), key=lambda x: -x[1])), ""]
+    titles = {"praise": "Strengths shown", "coaching": "Coaching given", "concern": "Concerns raised",
+              "observation": "Other observations", "goal": "Goals"}
+    for k in ("praise", "coaching", "concern", "observation"):
+        lines += block(titles[k], [r for r in period if r["kind"] == k])
+    gl = [r for r in mine(rows, p) if r["kind"] == "goal" and (r["date"] <= end.isoformat())
+          and (not r.get("done") or r["done"] >= start.isoformat())]
+    lines += ["## Goals", ""] + ([f"- {g['text']}: " + (f"done {fmt(g['done'])}" if g.get("done") else "open")
+                                  + (f" (by {fmt(g['by'])})" if g.get("by") else "") for g in gl] or ["None."]) + [""]
+    text = "\n".join(lines) + "\n"
+    if write:
+        slug = re.sub(r"[^a-z0-9]+", "-", p["name"].lower())
+        f = write_private(f"review-{slug}-{start.isoformat()}-to-{end.isoformat()}.md", text)
+        print(f"Saved {f}")
+    else:
+        print(text, end="")
+    return 0
+
+
+def todays_events():
+    exe = shutil.which("kitcal") or str(pathlib.Path.home() / ".local/bin/kitcal")
+    if not os.path.exists(exe) and not shutil.which("kitcal"):
+        return []
+    cmd = [exe, "events", "--from", today().isoformat(), "--to", today().isoformat()]
+    if exe.endswith(".py"):
+        cmd = [sys.executable] + cmd
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        return json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip() else []
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return []
+
+
+def cmd_brief(argv):
+    d, rows = load_people(), notes()
+    if not d["people"]:
+        return 0
+    lines = []
+    for e in todays_events():
+        title = e.get("title") or ""
+        if e.get("all_day") or not ONE_ON_ONE.search(title):
+            continue
+        for p in d["people"]:
+            names = [p["name"].split()[0]] + p.get("aliases", [])
+            if any(re.search(rf"\b{re.escape(n)}\b", title, re.I) for n in names if n):
+                when = (e.get("start") or "")[11:16]
+                if re.match(r"\d\d:\d\d$", when):
+                    when = dt.datetime.strptime(when, "%H:%M").strftime("%I:%M %p").lstrip("0")
+                lines.append(f"[work] 1:1 with {p['name']}" + (f" at {when}" if when else "")
+                             + f" today: kit-feedback prep {p['name'].split()[0]}")
+                break
+    quiet = []
+    for p in sorted(d["people"], key=lambda p: p["name"].lower()):
+        last = last_note(rows, p)
+        gap = (today() - dt.date.fromisoformat(last)).days if last else None
+        if gap is None or gap >= int(p.get("every") or DEFAULT_EVERY):
+            quiet.append(f"{p['name'].split()[0]} ({'none yet' if gap is None else f'{gap} days'})")
+    if quiet:
+        lines.append("[work] No feedback note lately: " + ", ".join(quiet) + ". (kit-feedback add NAME \"...\")")
+    if lines:
+        print("Team feedback")
+        print("\n".join(lines))
+    return 0
+
+
+def cmd_check(argv):
+    d, rows = load_people(), notes()
+    loose = DIR.exists() and os.name == "posix" and (DIR.stat().st_mode & 0o077 or any(
+        f.stat().st_mode & 0o077 for f in DIR.iterdir()))
+    state = "warn" if loose else "ok"
+    print(f"{state} {len(d['people'])} people, {len(rows)} notes" + (" (feedback/ is readable by others: chmod -R "
+                                                                    "go-rwx it)" if loose else ""))
+    return 0
+
+
+def main(argv):
+    cmds = {"add": cmd_add, "show": cmd_show, "done": cmd_done, "people": cmd_people, "add-person": cmd_add_person,
+            "set": cmd_set, "remove-person": cmd_remove_person, "met": cmd_met, "prep": cmd_prep,
+            "review": cmd_review, "brief": cmd_brief, "--check": cmd_check}
+    try:
+        if not argv:
+            return cmd_default([])
+        if argv[0] in ("-h", "--help", "help"):
+            print(__doc__)
+            return 0
+        fn = cmds.get(argv[0])
+        if not fn:
+            print(__doc__.split("\n\n")[1])
+            return 2
+        return fn(list(argv[1:])) or 0
+    except Fail as e:
+        print(f"kit-feedback: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

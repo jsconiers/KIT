@@ -30,6 +30,12 @@ Anything that needs {{OWNER}} goes in the review.
 7. Next week: deadlines in the next seven days, and the three things that matter most. Run the
    calendar command in memory/context/calendar.md for the next seven days, and flag conflicts,
    double bookings, and anything scheduled on a rest day (skip if no calendar command is set).
+   Then, each only if its file exists (written before this run): "Dates" from briefs/dates.txt and
+   "Renewals" from briefs/renewals.txt, as the morning brief lists them ([work] lines are work);
+   from briefs/renewals-missing.txt, one line: "Renewal dates still to fill in: ..." and how to give
+   them ("kit-expiry set NAME DATE", or text Kit "kit renew NAME DATE"); and for each
+   briefs/extra-*.txt, a section titled with its first line and the rest as written (a "Text:"
+   line goes in the personal text only).
 8. Horizon scan, only if the radar exists (the radar folder in memory/context/future-tech.md,
    under the library root in library.md; skip in one line if it doesn't). Read RADAR.md, LOG.md,
    and lifecycle/, starting with lifecycle/summary.md from kit-lifecycle (say how old it is if it's

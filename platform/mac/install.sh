@@ -30,7 +30,7 @@ umask 077
 "$PY" "$ROOT/shared/kit_setup.py" activate
 # Put the everyday commands on the PATH (~/.local/bin), pointing at Kit's own copy.
 mkdir -p "$HOME/.local/bin"
-for tool in todo kit-settings kit-update kit-pause kit-backup kit-retention kit-outlook kit-team kit-precedent kit-cost kit-queue kit-version kit-models kit-labcheck kit-metrics kit-project kit-delegate kit-run kit-lifecycle kit-roadmap kit-connect kit-evals kit-commitments kit-quality kit-refarch kit-sysprofile kit-onepager kit-sizing kit-diagram-diff kit-diaglint kit-wins kit-oneonone kit-meetprep kit-triage kit-awaiting kit-plugin kit-audit-export kit-exceptions kit-pbc kit-holds kit-degraded kit-reliability kit-alerts kit-csf kit-controls kit-trace kit-decisions kit-stakeholders kit-viewpoints kit-coverage kit-questions kit-templatecheck kit-letter kit-expiry; do
+for tool in todo kit-settings kit-update kit-pause kit-backup kit-retention kit-outlook kit-team kit-precedent kit-cost kit-queue kit-version kit-models kit-labcheck kit-metrics kit-project kit-delegate kit-run kit-lifecycle kit-roadmap kit-connect kit-evals kit-commitments kit-quality kit-refarch kit-sysprofile kit-onepager kit-sizing kit-diagram-diff kit-diaglint kit-wins kit-oneonone kit-meetprep kit-triage kit-awaiting kit-plugin kit-audit-export kit-exceptions kit-pbc kit-holds kit-degraded kit-reliability kit-alerts kit-csf kit-controls kit-trace kit-decisions kit-stakeholders kit-viewpoints kit-coverage kit-questions kit-templatecheck kit-letter kit-expiry kit-dates kit-textback kit-library kit-touch kit-feedback kit-meetload; do
   ln -sf "$HOME/Claude/Agents/kit/.install/shared/bin/$tool" "$HOME/.local/bin/$tool"
 done
 case ":$PATH:" in

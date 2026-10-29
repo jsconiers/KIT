@@ -1,0 +1,1994 @@
+#!/usr/bin/env python3
+"""kit-library: catalog folders of your documents (collections, scanned PDFs included), tag them, search them; and Kit Output.
+
+  kit-library                          status: collections, how many documents, when last indexed
+  kit-library collections              each collection: its folders, what it holds, its tags and rules
+  kit-library add NAME FOLDER [--label L] [--about TEXT] [--tag T,...] [--scripture] [--images]
+                                       a new collection, or one more folder for an existing one
+  kit-library remove NAME [FOLDER]     stop cataloging a collection (or one of its folders); the files
+                                       themselves are never touched
+  kit-library about NAME "TEXT"        say what a collection holds
+  kit-library tag NAME TAG[,TAG]       tag every document in a collection (untag NAME TAG undoes it)
+  kit-library rule NAME PATTERN TAG[,TAG]
+                                       tag the documents in a collection whose path inside it matches
+                                       PATTERN: a glob ("*40 Day*") or plain words ("devotional")
+  kit-library rules NAME               a collection's rules, numbered (unrule NAME N removes one)
+  kit-library exclude NAME PATTERN     leave matching files and folders out (include NAME PATTERN undoes)
+  kit-library define TAG "MEANING"     say what a tag means
+  kit-library tags                     every tag, what it means, how many documents carry it
+  kit-library index [NAME ...] [--full] [--max-minutes N] [--quiet]
+                                       catalog new and changed files (--full reads every file again)
+  kit-library search WORDS [--in NAME] [--tag T] [--type pdf] [--ref "John 3:16"] [--year 2024]
+                     [--limit 10] [--json]
+                                       find documents. WORDS may use "quoted phrases", OR, and word*;
+                                       --ref finds the documents that cite a passage (scripture
+                                       collections), with or without WORDS
+  kit-library show ID [--text] [--chars N] [--json]
+                                       one document: where it is, its tags, the passages it cites;
+                                       --text adds its text from the catalog (so agents can read Word
+                                       and PowerPoint files); --chars caps it (default 20000, 0 = all)
+  kit-library recent [--days 14] [--in NAME] [--json]
+  kit-library output [KIND] [--json]   the output folder (Kit Output), or the folder for one kind
+  kit-library deliver FILE... [--kind KIND] [--sub FOLDER] [--name NAME] [--replace] [--no-date]
+                      [--as-md] [--keep-md]
+                                       put finished work in the output folder and catalog it there.
+                                       Markdown becomes a Word file (--as-md keeps it markdown,
+                                       --keep-md delivers both); names start with the date unless
+                                       --no-date; an existing file is never overwritten unless --replace
+  kit-library mirror                   copy Kit Output one way to the synced folder in output.mirror (an
+                                       iCloud Drive folder, say): new and changed files only, never deletes;
+                                       every delivery does this on its own
+  kit-library fetch ID [--to-phone] [--json]
+                                       stage a cataloged file for sending (texting Kit uses this); --to-phone
+                                       also puts a copy in the mirror's "Sent to phone" folder
+  kit-library --check                  one line for kit doctor
+
+Collections and tags are in ~/Claude/Agents/kit/library/collections.json (change them with the
+commands above, or edit it). The catalog, with each document's text, is .install/library/index.db: it
+is rebuilt from the folders, readable only by you, and never committed or backed up. Long runs of
+digits (account, card, and ID numbers) are blanked out of the stored text, so they can't surface in
+a search, a brief, or a text.
+
+kit-library only reads the folders it catalogs. It never changes, moves, renames, or deletes anything
+in them; the one place it writes is the output folder, and there only through deliver. On a Mac,
+folders like Documents need permission: when a scheduled job can't read or write them, kit-library
+hands the work to KitLibrary.app, which holds that permission and runs only index, flush (deliveries
+waiting in .install/library/outbox), mirror, fetch, and check.
+
+Text formats: Word (.docx, .doc), RTF, OpenDocument, PowerPoint (.pptx; .ppt roughly), Excel (.xlsx),
+PDF (through kit-pdftext, a small PDFKit tool built with the Mac platform files; scanned PDFs are read
+with on-device OCR, up to ocr.max_pages pages each, when ocr.pdf is on), web pages, EPUB,
+plain text and markdown, and Scrivener projects. Pages, Keynote, audio, and video are cataloged by
+name, folder, and date. Pictures are left out unless a collection says --images.
+"""
+import datetime as dt
+import fcntl
+import fnmatch
+import html
+import json
+import os
+import pathlib
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+import zipfile
+
+HOME = pathlib.Path.home()
+KIT = pathlib.Path(os.path.expanduser(os.environ.get("KIT_DIR", "~/Claude/Agents/kit")))
+LIBRARY = KIT / "library"
+CONFIG = LIBRARY / "collections.json"
+STATE = KIT / ".install" / "library"
+DB = STATE / "index.db"
+OUTBOX = STATE / "outbox"
+LOCK = STATE / "index.lock"
+DELIVERED = STATE / "delivered.log"
+LOG = KIT / ".install" / "logs" / "library.log"
+MACLIB = pathlib.Path(__file__).resolve().parent.parent.parent / "platform" / "mac" / "library"
+APP = pathlib.Path(os.environ.get("KIT_LIBRARY_APP", MACLIB / "KitLibrary.app"))
+PDFTEXT = pathlib.Path(os.environ.get("KIT_PDFTEXT", MACLIB / "kit-pdftext"))
+IN_APP = os.environ.get("KIT_LIBRARY_IN_APP") == "1"
+APP_COMMANDS = {"index", "flush", "mirror", "fetch", "--check"}
+SEND = OUTBOX.parent / "send"                 # copies made for "kit send" (cleared after a day)
+MAX_SEND = 30 * 1024 * 1024
+MAX_CHARS = 600_000
+TOOL_PATH = f"{HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+DEFAULT_KINDS = {"letters": "Letters", "preaching": "Sermon Prep", "content": "Content", "receipts": "Receipts",
+                 "reports": "Reports", "research": "Research", "other": "Other"}
+DEFAULT_CONFIG = {"version": 1,
+                  "output": {"folder": "~/Documents/Kit Output", "kinds": DEFAULT_KINDS, "mirror": ""},
+                  "ocr": {"pdf": True, "max_pages": 60},
+                  "skip": ["~$*", ".~lock*", "*.tmp", "Thumbs.db", "desktop.ini", "*.lnk"],
+                  "collections": [], "tags": {}}
+
+TEXT_EXTS = {".txt", ".text", ".md", ".markdown", ".csv", ".tsv", ".json"}
+WORD_EXTS = {".docx", ".docm", ".dotx", ".dotm"}
+PPTX_EXTS = {".pptx", ".pptm", ".ppsx", ".potx"}
+ODF_EXTS = {".odt", ".ott", ".odp", ".ods"}
+HTML_EXTS = {".html", ".htm", ".xhtml"}
+TEXTUTIL_EXTS = {".doc", ".dot", ".webarchive", ".wordml"}
+LEGACY_EXTS = {".ppt", ".pps", ".pot"}
+NAME_ONLY_EXTS = {".pages", ".key", ".numbers", ".vellum", ".xls", ".xlsb", ".mobi", ".azw3"}
+EXTRACT_EXTS = (TEXT_EXTS | WORD_EXTS | PPTX_EXTS | ODF_EXTS | HTML_EXTS | TEXTUTIL_EXTS | LEGACY_EXTS
+                | {".rtf", ".pdf", ".epub", ".xlsx", ".xlsm", ".scriv", ".rtfd"})
+DOC_EXTS = EXTRACT_EXTS | NAME_ONLY_EXTS
+MEDIA_EXTS = {".mp3", ".m4a", ".wav", ".aac", ".aif", ".aiff", ".flac", ".mp4", ".m4v", ".mov", ".wmv", ".avi",
+              ".mkv", ".mpg", ".mpeg", ".3gp", ".webm"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".heic", ".gif", ".tif", ".tiff", ".bmp", ".webp"}
+# Folders that are really one file. The ones in DOC_EXTS are cataloged; the rest are skipped whole.
+PACKAGES = {".scriv", ".rtfd", ".pages", ".key", ".numbers", ".vellum", ".app", ".photoslibrary", ".bundle",
+            ".band", ".logicx", ".imovielibrary", ".fcpbundle", ".musiclibrary", ".lrdata", ".sparsebundle",
+            ".framework", ".plugin", ".kext", ".xcodeproj", ".playground", ".dsym"}
+NUMBERS = [(re.compile(r"\b\d{3}-\d{2}-\d{4}\b"), "[number]"),                    # SSN-shaped
+           (re.compile(r"\b(?:\d{4}[ -]){2,4}\d{1,7}\b"), "[number]"),           # card-shaped groups
+           (re.compile(r"\b\d{9,}\b"), "[number]")]                              # long digit runs
+
+
+# ------------------------------------------------------------------ small helpers
+def log(msg):
+    try:
+        LOG.parent.mkdir(parents=True, exist_ok=True)
+        with open(LOG, "a", encoding="utf-8") as f:
+            f.write(f"{dt.datetime.now():%Y-%m-%d %H:%M:%S} {msg}\n")
+    except OSError:
+        pass
+
+
+class Fail(Exception):
+    pass
+
+
+class NeedsApp(Exception):
+    """A folder needs macOS permission this process doesn't have; KitLibrary.app has it."""
+
+
+def opt(argv, name, default=None):
+    if name in argv:
+        i = argv.index(name)
+        if i + 1 >= len(argv):
+            raise Fail(f"{name} needs a value")
+        val = argv[i + 1]
+        del argv[i:i + 2]
+        return val
+    return default
+
+
+def flag(argv, name):
+    if name in argv:
+        argv.remove(name)
+        return True
+    return False
+
+
+def expand(p):
+    return pathlib.Path(os.path.expanduser(str(p)))
+
+
+def tilde(p):
+    s = str(p)
+    h = str(HOME)
+    return "~" + s[len(h):] if s == h or s.startswith(h + "/") else s
+
+
+def slug(s):
+    return re.sub(r"[^a-z0-9:]+", "-", (s or "").lower()).strip("-")
+
+
+def human_size(n):
+    for unit in ("bytes", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "bytes" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n} bytes"
+
+
+def day(ts):
+    return dt.datetime.fromtimestamp(ts).strftime("%d-%b-%Y") if ts else "?"
+
+
+def redact(text):
+    for rx, rep in NUMBERS:
+        text = rx.sub(rep, text)
+    return text
+
+
+def clean_title(stem):
+    t = re.sub(r"[_]+", " ", stem)
+    t = re.sub(r"\s+", " ", t).strip(" -")
+    return t or stem
+
+
+def matches(pattern, rel):
+    """A rule or exclusion pattern against a path inside a collection: a glob, or plain words."""
+    p, r = pattern.lower().strip(), rel.lower()
+    if not p:
+        return False
+    if any(c in p for c in "*?["):
+        return fnmatch.fnmatchcase(r, p) or fnmatch.fnmatchcase(os.path.basename(r), p)
+    return p in r
+
+
+# ------------------------------------------------------------------ configuration
+def load_config():
+    if not CONFIG.exists():
+        return json.loads(json.dumps(DEFAULT_CONFIG))
+    try:
+        cfg = json.loads(CONFIG.read_text())
+    except ValueError as e:
+        raise Fail(f"{tilde(CONFIG)} isn't valid JSON ({e}); fix it or restore it from git")
+    for k, v in DEFAULT_CONFIG.items():
+        cfg.setdefault(k, json.loads(json.dumps(v)))
+    cfg["output"].setdefault("folder", DEFAULT_CONFIG["output"]["folder"])
+    kinds = cfg["output"].setdefault("kinds", {})
+    for k, v in DEFAULT_KINDS.items():          # a kind added in a later version shows up on its own
+        kinds.setdefault(k, v)
+    for c in cfg["collections"]:
+        c.setdefault("label", c["name"].replace("-", " ").title())
+        c.setdefault("folders", [])
+        c.setdefault("tags", [])
+        c.setdefault("rules", [])
+        c.setdefault("exclude", [])
+    return cfg
+
+
+def save_config(cfg):
+    LIBRARY.mkdir(parents=True, exist_ok=True)
+    cfg.pop("_pairs", None)
+    tmp = CONFIG.with_suffix(".tmp")
+    tmp.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n")
+    tmp.replace(CONFIG)
+
+
+def collection(cfg, name):
+    for c in cfg["collections"]:
+        if c["name"] == name or c.get("label", "").lower() == name.lower():
+            return c
+    raise Fail(f"no collection named {name!r} (kit-library collections lists them)")
+
+
+def folder_pairs(cfg):
+    """(folder path, collection), most specific folder first (worked out once per run)."""
+    if "_pairs" not in cfg:
+        pairs = [(expand(f).resolve(), c) for c in cfg["collections"] for f in c["folders"]]
+        cfg["_pairs"] = sorted(pairs, key=lambda p: len(str(p[0])), reverse=True)
+    return cfg["_pairs"]
+
+
+def owner(cfg, path):
+    """The collection a file belongs to (the most specific folder holding it), and its path inside."""
+    for folder, c in folder_pairs(cfg):
+        try:
+            rel = pathlib.Path(path).relative_to(folder)
+        except ValueError:
+            continue
+        return c, folder, str(rel)
+    return None, None, None
+
+
+def tags_for(cfg, path):
+    """A file's tags: every collection holding it (nested ones too) and every rule that matches."""
+    tags = set()
+    for folder, c in folder_pairs(cfg):
+        try:
+            rel = str(pathlib.Path(path).relative_to(folder))
+        except ValueError:
+            continue
+        tags.update(c.get("tags", []))
+        for rule in c.get("rules", []):
+            if matches(rule.get("match", ""), rel):
+                tags.update(rule.get("tags", []))
+    return sorted(slug(t) for t in tags if slug(t))
+
+
+def excluded(cfg, coll, rel):
+    name = os.path.basename(rel)
+    if any(fnmatch.fnmatch(name.lower(), p.lower()) for p in cfg.get("skip", [])):
+        return True
+    return any(matches(p, rel) for p in coll.get("exclude", []))
+
+
+def output_root(cfg):
+    return expand(cfg["output"]["folder"])
+
+
+# ------------------------------------------------------------------ scripture references
+BOOKS = [("Genesis", 50, "Gen Gn"), ("Exodus", 40, "Exod Ex"), ("Leviticus", 27, "Lev Lv"),
+         ("Numbers", 36, "Num Nm"), ("Deuteronomy", 34, "Deut Dt"), ("Joshua", 24, "Josh"),
+         ("Judges", 21, "Judg Jdg"), ("Ruth", 4, ""), ("1 Samuel", 31, "Sam"), ("2 Samuel", 24, ""),
+         ("1 Kings", 22, "Kgs"), ("2 Kings", 25, ""), ("1 Chronicles", 29, "Chron Chr"), ("2 Chronicles", 36, ""),
+         ("Ezra", 10, ""), ("Nehemiah", 13, "Neh"), ("Esther", 10, "Esth"), ("Job", 42, ""),
+         ("Psalms", 150, "Psalm Ps Psa Pss"), ("Proverbs", 31, "Prov Prv"), ("Ecclesiastes", 12, "Eccl Eccles Ecc"),
+         ("Song of Solomon", 8, "Song of Songs|SOS"), ("Isaiah", 66, "Isa"), ("Jeremiah", 52, "Jer"),
+         ("Lamentations", 5, "Lam"), ("Ezekiel", 48, "Ezek Eze"), ("Daniel", 12, "Dan"), ("Hosea", 14, "Hos"),
+         ("Joel", 3, ""), ("Amos", 9, ""), ("Obadiah", 1, "Obad"), ("Jonah", 4, "Jon"), ("Micah", 7, "Mic"),
+         ("Nahum", 3, "Nah"), ("Habakkuk", 3, "Hab"), ("Zephaniah", 3, "Zeph"), ("Haggai", 2, "Hag"),
+         ("Zechariah", 14, "Zech"), ("Malachi", 4, "Mal"), ("Matthew", 28, "Matt Mt"), ("Mark", 16, "Mk Mrk"),
+         ("Luke", 24, "Lk"), ("John", 21, "Jn Jhn"), ("Acts", 28, ""), ("Romans", 16, "Rom"),
+         ("1 Corinthians", 16, "Cor"), ("2 Corinthians", 13, ""), ("Galatians", 6, "Gal"), ("Ephesians", 6, "Eph"),
+         ("Philippians", 4, "Phil Php"), ("Colossians", 4, "Col"), ("1 Thessalonians", 5, "Thess Thes"),
+         ("2 Thessalonians", 3, ""), ("1 Timothy", 6, "Tim"), ("2 Timothy", 4, ""), ("Titus", 3, ""),
+         ("Philemon", 1, "Phlm Philem"), ("Hebrews", 13, "Heb"), ("James", 5, "Jas"), ("1 Peter", 5, "Pet"),
+         ("2 Peter", 3, ""), ("1 John", 5, ""), ("2 John", 1, ""), ("3 John", 1, ""), ("Jude", 1, ""),
+         ("Revelation", 22, "Rev Revelations")]
+CHAPTERS = {b: n for b, n, _ in BOOKS}
+# Book names that are also everyday words or names: in running text they count only when capitalized.
+AMBIGUOUS = {"job", "acts", "numbers", "mark", "ruth", "judges", "kings", "james", "song", "jude", "amos", "joel",
+             "titus", "daniel", "john", "luke", "peter", "timothy", "esther", "jonah", "ezra", "hosea", "micah",
+             "nahum", "revelation", "romans", "hebrews", "lamentations", "chronicles", "samuel", "philemon"}
+
+
+def _book_words():
+    """word (lowercase) -> (base book, numbered?, is abbreviation)."""
+    words = {}
+    for name, _, abbrs in BOOKS:
+        numbered = name[0].isdigit()
+        base = name.split(" ", 1)[1] if numbered else name
+        words.setdefault(base.lower(), (base, numbered, False))
+        for a in [x for x in re.split(r"[ |]", abbrs.replace("Song of Songs", "Song_of_Songs")) if x]:
+            a = a.replace("_", " ")
+            words.setdefault(a.lower(), (base, numbered, len(a) <= 5 and a.lower() not in ("psalm", "song of songs")))
+    for w in ("john", "jn", "jhn"):
+        words[w] = ("John", True, words[w][2])        # 1 John with a number, the Gospel without one
+    return words
+
+
+BOOK_WORDS = _book_words()
+_names = sorted(BOOK_WORDS, key=len, reverse=True)
+REF_RX = re.compile(
+    r"(?<![A-Za-z0-9])(?:(?P<num>[123]|iii|ii|i|1st|2nd|3rd|first|second|third)\s*)?"
+    r"(?P<book>" + "|".join(re.escape(n).replace(r"\ ", " ").replace(" ", r"\s+") for n in _names) + r")\.?"
+    r"\s*(?P<ch>\d{1,3})(?:(?::\s*|\.)(?P<v1>\d{1,3})(?:\s*[-–—]\s*(?P<v2>\d{1,3}))?)?(?![0-9])",
+    re.I)
+ORDINAL = {"1": "1", "2": "2", "3": "3", "i": "1", "ii": "2", "iii": "3", "1st": "1", "2nd": "2", "3rd": "3",
+           "first": "1", "second": "2", "third": "3"}
+
+
+def find_refs(text, strict=True, cap=500):
+    """Scripture references in text: [(book, chapter, first verse, last verse)]. strict: everyday-word
+    book names count only capitalized, and abbreviations only with a verse (Rom 8:28, not Rom 8)."""
+    out, seen = [], set()
+    for m in REF_RX.finditer(text or ""):
+        word = re.sub(r"\s+", " ", m.group("book"))
+        base, numbered, abbr = BOOK_WORDS[word.lower()]
+        raw = m.group("num") or ""
+        num = ORDINAL.get(raw.lower())
+        if strict:
+            if not word[0].isupper() and (word.lower() in AMBIGUOUS or abbr):
+                continue
+            if abbr and not m.group("v1") and base != "Psalms":
+                continue
+            if raw.lower() in ("i", "ii", "iii") and not raw.isupper():
+                num = None                        # the word "i", not a Roman numeral
+        if numbered:
+            if num:
+                book = f"{num} {base}"
+            elif base == "John":
+                book = "John"
+            else:
+                continue                          # "Samuel 3": which one?
+        else:
+            book = base                           # a number before Genesis is just a number
+        if book not in CHAPTERS:
+            continue
+        ch = int(m.group("ch"))
+        v1 = int(m.group("v1")) if m.group("v1") else None
+        v2 = int(m.group("v2")) if m.group("v2") else v1
+        if CHAPTERS[book] == 1 and v1 is None:
+            ch, v1, v2 = 1, ch, ch                # Jude 3 is verse 3
+        if not 1 <= ch <= CHAPTERS[book] or (v1 is not None and not 1 <= v1 <= 176):
+            continue
+        if v2 is not None and v1 is not None and v2 < v1:
+            v2 = v1
+        key = (book, ch, v1, v2)
+        if key not in seen:
+            seen.add(key)
+            out.append(key)
+            if len(out) >= cap:
+                break
+    return out
+
+
+def ref_label(book, ch, v1, v2):
+    name = "Psalm" if book == "Psalms" else book
+    if v1 is None:
+        return f"{name} {ch}"
+    return f"{name} {ch}:{v1}" + (f"-{v2}" if v2 and v2 != v1 else "")
+
+
+def parse_ref(text):
+    refs = find_refs(text, strict=False, cap=1)
+    if not refs:
+        raise Fail(f"not a Bible reference: {text!r} (like John 3:16, Psalm 23, or 1 Cor 13)")
+    return refs[0]
+
+
+# ------------------------------------------------------------------ the catalog
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS docs (
+  id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL, collection TEXT NOT NULL, rel TEXT NOT NULL,
+  area TEXT NOT NULL DEFAULT '', title TEXT NOT NULL, ext TEXT NOT NULL, kind TEXT NOT NULL,
+  size INTEGER, mtime REAL, added REAL, indexed REAL, chars INTEGER DEFAULT 0, status TEXT,
+  tags TEXT NOT NULL DEFAULT '');
+CREATE INDEX IF NOT EXISTS docs_collection ON docs(collection);
+CREATE TABLE IF NOT EXISTS refs (doc INTEGER NOT NULL, book TEXT NOT NULL, chapter INTEGER NOT NULL,
+  v1 INTEGER, v2 INTEGER);
+CREATE INDEX IF NOT EXISTS refs_passage ON refs(book, chapter);
+CREATE INDEX IF NOT EXISTS refs_doc ON refs(doc);
+CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(title, rel, tags, body,
+  tokenize = 'porter unicode61 remove_diacritics 2');
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+"""
+
+
+def connect(create=True):
+    if not create and not DB.exists():
+        raise Fail("there's no catalog yet: run kit-library index")
+    STATE.mkdir(parents=True, exist_ok=True)
+    os.chmod(STATE, 0o700)
+    db = sqlite3.connect(str(DB), timeout=60)
+    db.execute("PRAGMA busy_timeout=60000")
+    db.execute("PRAGMA journal_mode=WAL")
+    db.executescript(SCHEMA)
+    for p in (DB, pathlib.Path(str(DB) + "-wal"), pathlib.Path(str(DB) + "-shm")):
+        if p.exists():
+            os.chmod(p, 0o600)
+    return db
+
+
+def meta(db, key, value=None):
+    if value is None:
+        row = db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        return row[0] if row else None
+    db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", (key, str(value)))
+
+
+def tagstr(tags):
+    return (" " + " ".join(tags) + " ") if tags else ""
+
+
+def store(db, rec, text, status, refs):
+    """Add or replace one document: its row, its searchable text, and its passages."""
+    now = time.time()
+    row = db.execute("SELECT id, added FROM docs WHERE path=?", (rec["path"],)).fetchone()
+    vals = (rec["collection"], rec["rel"], rec["area"], rec["title"], rec["ext"], rec["kind"], rec["size"],
+            rec["mtime"], now, len(text), status, tagstr(rec["tags"]))
+    if row:
+        doc = row[0]
+        db.execute("UPDATE docs SET collection=?, rel=?, area=?, title=?, ext=?, kind=?, size=?, mtime=?, indexed=?, "
+                   "chars=?, status=?, tags=? WHERE id=?", vals + (doc,))
+        db.execute("DELETE FROM fts WHERE rowid=?", (doc,))
+        db.execute("DELETE FROM refs WHERE doc=?", (doc,))
+    else:
+        cur = db.execute("INSERT INTO docs(collection, rel, area, title, ext, kind, size, mtime, indexed, chars, "
+                         "status, tags, path, added) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                         vals + (rec["path"], now))
+        doc = cur.lastrowid
+    db.execute("INSERT INTO fts(rowid, title, rel, tags, body) VALUES (?,?,?,?,?)",
+               (doc, rec["title"], rec["rel"], " ".join(rec["tags"]), text))
+    db.executemany("INSERT INTO refs(doc, book, chapter, v1, v2) VALUES (?,?,?,?,?)", [(doc,) + r for r in refs])
+    return doc
+
+
+def forget(db, doc_ids):
+    for doc in doc_ids:
+        db.execute("DELETE FROM docs WHERE id=?", (doc,))
+        db.execute("DELETE FROM fts WHERE rowid=?", (doc,))
+        db.execute("DELETE FROM refs WHERE doc=?", (doc,))
+
+
+def retag(db, cfg):
+    """Recompute every document's tags from the configuration (no file is read)."""
+    changed = 0
+    for doc, path, tags in db.execute("SELECT id, path, tags FROM docs").fetchall():
+        new = tagstr(tags_for(cfg, path))
+        if new != tags:
+            db.execute("UPDATE docs SET tags=? WHERE id=?", (new, doc))
+            db.execute("UPDATE fts SET tags=? WHERE rowid=?", (new.strip(), doc))
+            changed += 1
+    return changed
+
+
+# ------------------------------------------------------------------ reading text out of files
+def xml_strip(x, breaks):
+    """Text from Office/ODF XML: the closing tags in `breaks` end lines; every other tag goes."""
+    for tag in breaks:
+        x = x.replace(tag, "\n")
+    x = re.sub(r"<[^>]+>", "", x)
+    return html.unescape(x)
+
+
+def text_docx(path):
+    out = []
+    with zipfile.ZipFile(path) as z:
+        names = set(z.namelist())
+        for part in ("word/document.xml", "word/footnotes.xml", "word/endnotes.xml"):
+            if part not in names:
+                continue
+            x = z.read(part).decode("utf-8", "replace")
+            x = re.sub(r"<w:(delText|instrText)\b[^>]*>.*?</w:\1>", "", x, flags=re.S)
+            x = re.sub(r"<w:tabs>.*?</w:tabs>", "", x, flags=re.S)
+            x = re.sub(r"<w:tab\b[^>]*/>", "\t", x)
+            x = re.sub(r"<w:(br|cr)\b[^>]*/>", "\n", x)
+            out.append(xml_strip(x, ("</w:p>",)))
+    return "\n".join(out)
+
+
+def text_pptx(path):
+    def num(n):
+        m = re.search(r"(\d+)\.xml$", n)
+        return int(m.group(1)) if m else 0
+    out = []
+    with zipfile.ZipFile(path) as z:
+        names = z.namelist()
+        slides = sorted((n for n in names if re.match(r"ppt/slides/slide\d+\.xml$", n)), key=num)
+        notes = sorted((n for n in names if re.match(r"ppt/notesSlides/notesSlide\d+\.xml$", n)), key=num)
+        for n in slides + notes:
+            x = re.sub(r"<a:br\b[^>]*/>", "\n", z.read(n).decode("utf-8", "replace"))
+            out.append(xml_strip(x, ("</a:p>",)))
+    return "\n".join(out)
+
+
+def text_xlsx(path):
+    with zipfile.ZipFile(path) as z:
+        if "xl/sharedStrings.xml" not in z.namelist():
+            return ""
+        x = z.read("xl/sharedStrings.xml").decode("utf-8", "replace")
+    return "\n".join(html.unescape(t) for t in re.findall(r"<t[^>]*>([^<]*)</t>", x))
+
+
+def text_odf(path):
+    with zipfile.ZipFile(path) as z:
+        x = z.read("content.xml").decode("utf-8", "replace")
+    x = re.sub(r"<text:tab\b[^>]*/>", "\t", x)
+    x = re.sub(r"<text:line-break\b[^>]*/>", "\n", x)
+    return xml_strip(x, ("</text:p>", "</text:h>"))
+
+
+def text_html(s):
+    s = re.sub(r"(?is)<(script|style|head)\b.*?</\1>", "", s)
+    s = re.sub(r"(?i)<br\s*/?>|</(p|div|h[1-6]|li|tr|blockquote)>", "\n", s)
+    return html.unescape(re.sub(r"<[^>]+>", "", s))
+
+
+def text_epub(path):
+    out = []
+    with zipfile.ZipFile(path) as z:
+        for n in sorted(z.namelist()):
+            if n.lower().endswith((".xhtml", ".html", ".htm")):
+                out.append(text_html(z.read(n).decode("utf-8", "replace")))
+    return "\n".join(out)
+
+
+RTF_SKIP = {"fonttbl", "colortbl", "stylesheet", "info", "pict", "object", "header", "footer", "headerl", "headerr",
+            "headerf", "footerl", "footerr", "footerf", "fldinst", "themedata", "colorschememapping", "latentstyles",
+            "datastore", "xmlnstbl", "listtable", "listoverridetable", "rsidtbl", "generator", "mmathPr", "filetbl",
+            "revtbl", "userprops", "expandedcolortbl", "pgdsctbl", "bkmkstart", "bkmkend", "operator", "author"}
+RTF_CHARS = {"par": "\n", "line": "\n", "sect": "\n", "page": "\n", "row": "\n", "cell": "\t", "tab": "\t",
+             "emdash": "\u2014", "endash": "\u2013", "bullet": "\u2022", "lquote": "\u2018", "rquote": "\u2019",
+             "ldblquote": "\u201c", "rdblquote": "\u201d", "emspace": " ", "enspace": " ", "qmspace": " "}
+RTF_TOKEN = re.compile(r"\\([a-zA-Z]{1,32})(-?\d{1,10})? ?|\\'([0-9a-fA-F]{2})|\\([^a-zA-Z])|([{}])|[\r\n]+|([^\\{}\r\n]+)")
+
+
+def rtf_to_text(s):
+    out, stack = [], []
+    skip, uc, pending = False, 1, 0
+    for m in RTF_TOKEN.finditer(s):
+        word, arg, hexc, sym, brace, run = m.groups()
+        if brace:
+            pending = 0
+            if brace == "{":
+                stack.append((skip, uc))
+            elif stack:
+                skip, uc = stack.pop()
+        elif sym:
+            pending = 0
+            if sym == "*":
+                skip = True
+            elif not skip:
+                out.append({"~": "\u00a0", "_": "-", "-": ""}.get(sym, sym if sym in "{}\\" else ""))
+        elif word:
+            pending = 0
+            if word in RTF_SKIP:
+                skip = True
+            elif skip:
+                continue
+            elif word == "uc":
+                uc = int(arg or 1)
+            elif word == "u":
+                code = int(arg or 0)
+                out.append(chr(code + 0x10000 if code < 0 else code))
+                pending = uc
+            elif word in RTF_CHARS:
+                out.append(RTF_CHARS[word])
+        elif hexc:
+            if pending:
+                pending -= 1
+            elif not skip:
+                out.append(bytes.fromhex(hexc).decode("cp1252", "replace"))
+        elif run:
+            if pending:
+                drop = min(pending, len(run))
+                run, pending = run[drop:], pending - drop
+            if not skip:
+                out.append(run)
+    return "".join(out)
+
+
+def text_scriv(path):
+    """A Scrivener project: every document in it, in folder order."""
+    parts = []
+    data = pathlib.Path(path) / "Files" / "Data"
+    files = sorted(data.glob("*/content.rtf")) if data.exists() else sorted(pathlib.Path(path).rglob("*.rtf"))
+    total = 0
+    for f in files:
+        try:
+            t = rtf_to_text(f.read_text(encoding="latin-1"))
+        except OSError:
+            continue
+        parts.append(t)
+        total += len(t)
+        if total > MAX_CHARS:
+            break
+    return "\n\n".join(parts)
+
+
+def text_legacy(path):
+    """Old binary Office files (.ppt): the runs of readable text in them, roughly."""
+    with open(path, "rb") as f:
+        data = f.read(60_000_000)
+    out = [m.group().decode("utf-16-le") for m in re.finditer(rb"(?:[\x20-\x7e\xa0-\xff]\x00){4,}", data)]
+    out += [m.group().decode("latin-1") for m in re.finditer(rb"[\x20-\x7e]{16,}", data) if m.group().count(b" ") >= 2]
+    seen, keep = set(), []
+    for line in out:
+        line = line.strip()
+        letters = sum(ch.isalpha() or ch == " " for ch in line)
+        if (line and line not in seen and re.search(r"[A-Za-z]{3}", line) and letters >= 0.8 * len(line)
+                and not re.search(r"(Times New Roman|Arial|Calibri|Helvetica|Microsoft|Office Theme|_PID_|"
+                                  r"Click to edit|Default Design)", line)):
+            seen.add(line)
+            keep.append(line)
+    return "\n".join(keep)
+
+
+def text_textutil(path):
+    r = subprocess.run(["/usr/bin/textutil", "-convert", "txt", "-stdout", str(path)], capture_output=True,
+                       timeout=90)
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr or b"").decode("utf-8", "replace")[:120] or f"textutil exit {r.returncode}")
+    return r.stdout.decode("utf-8", "replace")
+
+
+def read_text(path, limit=8_000_000):
+    with open(path, "rb") as f:
+        raw = f.read(limit)
+    for enc in ("utf-8", "utf-16"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            pass
+    return raw.decode("latin-1")
+
+
+def extract(path, ext):
+    """(text, status) for anything but PDFs, which go through pdf_texts in batches."""
+    try:
+        if ext in TEXT_EXTS:
+            t = read_text(path)
+        elif ext in WORD_EXTS:
+            t = text_docx(path)
+        elif ext in PPTX_EXTS:
+            t = text_pptx(path)
+        elif ext in (".xlsx", ".xlsm"):
+            t = text_xlsx(path)
+        elif ext in ODF_EXTS:
+            t = text_odf(path)
+        elif ext in HTML_EXTS:
+            t = text_html(read_text(path))
+        elif ext == ".epub":
+            t = text_epub(path)
+        elif ext == ".rtf":
+            t = rtf_to_text(read_text(path))
+        elif ext == ".rtfd":
+            inner = pathlib.Path(path) / "TXT.rtf"
+            t = rtf_to_text(read_text(inner)) if inner.exists() else ""
+        elif ext == ".scriv":
+            t = text_scriv(path)
+        elif ext in TEXTUTIL_EXTS:
+            try:
+                t = text_textutil(path)
+            except (RuntimeError, subprocess.SubprocessError, OSError):
+                t = text_legacy(path)
+        elif ext in LEGACY_EXTS:
+            t = text_legacy(path)
+        else:
+            return "", "name-only"
+    except (zipfile.BadZipFile, KeyError) as e:
+        return "", f"error:unreadable ({type(e).__name__})"
+    except PermissionError:
+        raise NeedsApp(str(path))
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
+        return "", f"error:{type(e).__name__}"
+    t = re.sub(r"[ \t\u00a0]+\n", "\n", t)
+    t = re.sub(r"\n{3,}", "\n\n", t).strip()
+    return redact(t[:MAX_CHARS]), ("ok" if t.strip() else "no-text")
+
+
+def pdf_texts(paths, batch=10, ocr=None, deadline=None):
+    """{path: (text, status)} for PDFs, through kit-pdftext; a PDF that hangs is skipped alone. With
+    ocr={"max_pages": N}, a PDF with no text layer (a scan) is read again with the Mac's text
+    recognition, one at a time: status "ok-ocr", or "no-text-ocr" when even that finds nothing. Past the
+    deadline the scans are left as "no-text", for the next run."""
+    if not paths:
+        return {}
+    if not PDFTEXT.exists():
+        return {p: ("", "error:no-pdf-helper") for p in paths}
+    results = {}
+
+    def run(group, timeout, extra=()):
+        try:
+            r = subprocess.run([str(PDFTEXT), "--max-chars", str(MAX_CHARS), *extra], input="\n".join(group) + "\n",
+                               capture_output=True, text=True, timeout=timeout)
+            stdout = r.stdout
+        except subprocess.TimeoutExpired as e:
+            stdout = e.stdout.decode("utf-8", "replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+        for line in stdout.splitlines():
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            p = row.get("path")
+            if p in group:
+                if row.get("error"):
+                    results[p] = ("", f"error:{row['error']}")
+                else:
+                    t = re.sub(r"\n{3,}", "\n\n", row.get("text", "")).strip()
+                    status = "ok" if t else "no-text"
+                    if extra:
+                        status = "ok-ocr" if t else "no-text-ocr"
+                    results[p] = (redact(t[:MAX_CHARS]), status)
+
+    for i in range(0, len(paths), batch):
+        group = paths[i:i + batch]
+        run(group, 60 + 20 * len(group))
+        for p in group:
+            if p not in results:
+                run([p], 120)
+            if p not in results:
+                results[p] = ("", "error:timeout")
+    if ocr and ocr.get("pdf", True):
+        pages = int(ocr.get("max_pages", 60))
+        for p in [p for p, (_, s) in results.items() if s == "no-text"]:
+            if deadline and time.time() > deadline:
+                break
+            del results[p]
+            run([p], 90 + 5 * pages, ("--ocr", "--ocr-max-pages", str(pages)))
+            results.setdefault(p, ("", "no-text"))
+    return results
+
+
+# ------------------------------------------------------------------ walking the folders
+def kind_of(ext, coll):
+    if ext in DOC_EXTS:
+        return "document"
+    if ext in MEDIA_EXTS:
+        return "media"
+    if ext in IMAGE_EXTS and coll.get("images"):
+        return "image"
+    return None
+
+
+def package_stats(path):
+    size, newest = 0, os.stat(path).st_mtime
+    for dp, _, fns in os.walk(path):
+        for f in fns:
+            try:
+                st = os.stat(os.path.join(dp, f))
+            except OSError:
+                continue
+            size += st.st_size
+            newest = max(newest, st.st_mtime)
+    return size, newest
+
+
+def walk(cfg, coll, folder, other_folders):
+    """Each file to catalog in one folder of a collection: dicts with path, rel, area, ext, kind, size,
+    mtime. Skips hidden files, exclusions, folders that belong to a more specific collection, and the
+    insides of packages (a Scrivener project is one document)."""
+    try:
+        os.listdir(folder)
+    except PermissionError:
+        raise NeedsApp(str(folder))
+
+    def item(full, rel, ext, size, mtime):
+        parts = rel.split(os.sep)
+        return {"path": full, "rel": rel, "area": parts[0] if len(parts) > 1 else "", "ext": ext,
+                "kind": kind_of(ext, coll), "size": size, "mtime": mtime,
+                "title": clean_title(os.path.splitext(parts[-1])[0])}
+
+    for dp, dns, fns in os.walk(folder):
+        keep = []
+        for d in sorted(dns):
+            full = os.path.join(dp, d)
+            rel = os.path.relpath(full, folder)
+            if d.startswith(".") or full in other_folders or excluded(cfg, coll, rel):
+                continue
+            ext = os.path.splitext(d)[1].lower()
+            if ext in PACKAGES:
+                if ext in DOC_EXTS:
+                    try:
+                        size, mtime = package_stats(full)
+                    except OSError:
+                        continue
+                    yield item(full, rel, ext, size, mtime)
+                continue
+            keep.append(d)
+        dns[:] = keep
+        for f in sorted(fns):
+            if f.startswith("."):
+                continue
+            full = os.path.join(dp, f)
+            rel = os.path.relpath(full, folder)
+            ext = os.path.splitext(f)[1].lower()
+            if not kind_of(ext, coll) or excluded(cfg, coll, rel):
+                continue
+            try:
+                st = os.stat(full)
+            except OSError:
+                continue
+            yield item(full, rel, ext, st.st_size, st.st_mtime)
+
+
+class IndexLock:
+    def __enter__(self):
+        STATE.mkdir(parents=True, exist_ok=True)
+        self.f = open(LOCK, "w")
+        try:
+            fcntl.flock(self.f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            self.f.close()
+            raise Fail("another index run is going; try again when it finishes")
+        return self
+
+    def __exit__(self, *exc):
+        fcntl.flock(self.f, fcntl.LOCK_UN)
+        self.f.close()
+
+
+def index_items(db, cfg, items, started, deadline, say):
+    """Read the text of each item and store it. Returns how many were read; stops at the deadline."""
+    done = 0
+    pdfs = [it for it in items if it["ext"] == ".pdf"]
+    others = [it for it in items if it["ext"] != ".pdf"]
+
+    def keep(it, text, status):
+        nonlocal done
+        c, _, _ = owner(cfg, it["path"])
+        it = dict(it, collection=c["name"] if c else it.get("collection", "?"), tags=tags_for(cfg, it["path"]))
+        refs = []
+        if c and c.get("scripture"):
+            refs = find_refs(it["title"], strict=False) + [r for r in find_refs(text) if r]
+            refs = list(dict.fromkeys(refs))[:500]
+        store(db, it, text, status, refs)
+        done += 1
+        if done % 50 == 0:
+            db.commit()
+            say(f"  {done} read ({time.time() - started:.0f}s)")
+
+    for it in others:
+        if deadline and time.time() > deadline:
+            return done, True
+        if it["kind"] != "document" or it["ext"] in NAME_ONLY_EXTS:
+            keep(it, "", "name-only")
+            continue
+        text, status = extract(it["path"], it["ext"])
+        keep(it, text, status)
+    for i in range(0, len(pdfs), 10):
+        if deadline and time.time() > deadline:
+            return done, True
+        group = pdfs[i:i + 10]
+        got = pdf_texts([it["path"] for it in group], ocr=cfg.get("ocr"), deadline=deadline)
+        for it in group:
+            text, status = got.get(it["path"], ("", "error:no-output"))
+            keep(it, text, status)
+    db.commit()
+    return done, False
+
+
+def index_paths(db, cfg, paths):
+    """Catalog particular files now (a delivery, say), if they're inside a collection."""
+    items = []
+    for p in paths:
+        p = str(pathlib.Path(p).resolve())
+        c, folder, rel = owner(cfg, p)
+        if not c or not os.path.exists(p):
+            continue
+        ext = os.path.splitext(p)[1].lower()
+        if not kind_of(ext, c):
+            continue
+        st = os.stat(p)
+        parts = rel.split(os.sep)
+        items.append({"path": str(p), "rel": rel, "area": parts[0] if len(parts) > 1 else "", "ext": ext,
+                      "kind": kind_of(ext, c), "size": st.st_size, "mtime": st.st_mtime,
+                      "title": clean_title(os.path.splitext(parts[-1])[0])})
+    return index_items(db, cfg, items, time.time(), None, lambda m: None)[0]
+
+
+def run_in_app(argv):
+    """Run kit-library ARGS inside KitLibrary.app (which holds the folder permission); relay its output."""
+    if IN_APP:
+        raise Fail("KitLibrary.app can't read that folder either: open System Settings > Privacy & Security > "
+                   "Files and Folders and turn on Documents for KitLibrary")
+    if not APP.exists():
+        raise Fail(f"this needs folder permission, and KitLibrary.app isn't built ({tilde(APP.parent)}/build.sh)")
+    with tempfile.TemporaryDirectory(prefix="kit-library-") as tmp:
+        out, err = os.path.join(tmp, "out"), os.path.join(tmp, "err")
+        r = subprocess.run(["/usr/bin/open", "-W", "-n", "-g", "--stdout", out, "--stderr", err, str(APP), "--args",
+                            *argv], capture_output=True, text=True, timeout=4 * 3600)
+        o = pathlib.Path(out).read_text(errors="replace") if os.path.exists(out) else ""
+        e = pathlib.Path(err).read_text(errors="replace") if os.path.exists(err) else ""
+    if o:
+        print(o, end="" if o.endswith("\n") else "\n")
+    if e:
+        print(e, end="" if e.endswith("\n") else "\n", file=sys.stderr)
+    if not o and not e and r.returncode:
+        raise Fail(f"KitLibrary.app didn't run ({(r.stderr or '').strip()[:120]})")
+    return 1 if e and not o else 0
+
+
+# ------------------------------------------------------------------ index
+def cmd_index(argv):
+    full = flag(argv, "--full")
+    quiet = flag(argv, "--quiet")
+    minutes = float(opt(argv, "--max-minutes", "0") or 0)
+    names = [a for a in argv if not a.startswith("--")]
+    cfg = load_config()
+    colls = [collection(cfg, n) for n in names] if names else list(cfg["collections"])
+    if not colls:
+        raise Fail("no collections yet: kit-library add NAME FOLDER")
+    say = (lambda m: None) if quiet else print
+    started = time.time()
+    deadline = started + minutes * 60 if minutes else None
+    all_folders = {str(expand(f).resolve()) for c in cfg["collections"] for f in c["folders"]}
+    try:
+        with IndexLock():
+            db = connect()
+            totals = {"new": 0, "changed": 0, "gone": 0, "read": 0, "missing": []}
+            stopped = False
+            if not names:                       # collections taken out of the configuration
+                names_now = [c["name"] for c in cfg["collections"]]
+                stale = [i for (i,) in db.execute(
+                    f"SELECT id FROM docs WHERE collection NOT IN ({','.join('?' * len(names_now))})", names_now)]
+                forget(db, stale)
+                totals["gone"] += len(stale)
+            for c in colls:
+                seen, todo = set(), []
+                known = {p: (i, s, m, st) for i, p, s, m, st in
+                         db.execute("SELECT id, path, size, mtime, status FROM docs WHERE collection=?", (c["name"],))}
+                reachable = []
+                for f in c["folders"]:
+                    folder = expand(f).resolve()
+                    if not folder.exists() and folder == output_root(cfg).resolve():
+                        try:
+                            folder.mkdir(parents=True, exist_ok=True)       # Kit Output, before its first delivery
+                        except PermissionError:
+                            raise NeedsApp(str(folder))
+                        except OSError:
+                            pass
+                    if not folder.exists():
+                        totals["missing"].append(tilde(folder))
+                        continue
+                    reachable.append(str(folder))
+                    others = {o for o in all_folders if o != str(folder) and o.startswith(str(folder) + os.sep)}
+                    for it in walk(cfg, c, str(folder), others):
+                        it["collection"] = c["name"]
+                        seen.add(it["path"])
+                        old = known.get(it["path"])
+                        status = str(old[3] or "") if old else ""
+                        retry = bool(old) and ((status == "error:no-pdf-helper" and PDFTEXT.exists()) or (
+                            status == "no-text" and it["ext"] == ".pdf" and (cfg.get("ocr") or {}).get("pdf", True)))
+                        if old and not full and not retry and old[1] == it["size"] \
+                                and abs((old[2] or 0) - it["mtime"]) < 1:
+                            continue
+                        totals["changed" if old else "new"] += 1
+                        todo.append(it)
+                gone = [i for p, (i, *_rest) in known.items() if p not in seen
+                        and any(p.startswith(r + os.sep) for r in reachable)]
+                gone += [i for p, (i, *_rest) in known.items() if p not in seen and not owner(cfg, p)[0]]
+                forget(db, set(gone))
+                totals["gone"] += len(set(gone))
+                if todo:
+                    say(f"{c.get('label', c['name'])}: reading {len(todo)} file(s)")
+                n, stopped = index_items(db, cfg, todo, started, deadline, say)
+                totals["read"] += n
+                if stopped:
+                    break
+            retag(db, cfg)
+            meta(db, "last_index", time.time())
+            meta(db, "last_index_seconds", round(time.time() - started))
+            db.commit()
+            db.close()
+        if not names and mirror_root(cfg):
+            try:                                # the nightly run also brings the phone copy up to date
+                mirror_files(cfg)
+            except NeedsApp as e:
+                log(f"index: phone copy skipped ({e})")
+    except NeedsApp:
+        return run_in_app(["index"] + names + (["--full"] if full else []) + (["--quiet"] if quiet else [])
+                          + (["--max-minutes", str(minutes)] if minutes else []))
+    left = totals["new"] + totals["changed"] - totals["read"]
+    line = (f"indexed: {totals['read']} read ({totals['new']} new, {totals['changed']} changed), "
+            f"{totals['gone']} gone, {time.time() - started:.0f}s"
+            + (f"; {left} left for the next run (time limit)" if stopped and left > 0 else "")
+            + (f"; missing folder(s): {', '.join(totals['missing'])}" if totals["missing"] else ""))
+    log(line)
+    if not quiet or totals["read"] or totals["gone"] or totals["missing"]:
+        print(line)
+    return 0
+
+
+# ------------------------------------------------------------------ search
+def fts_query(words):
+    """A safe FTS5 query from what someone typed: words are quoted (so punctuation can't break it),
+    "phrases" stay phrases, OR / AND / NOT stay operators, word* stays a prefix search."""
+    out = []
+    for tok in re.findall(r'"[^"]*"|\S+', words):
+        if tok in ("OR", "AND", "NOT"):
+            if out and out[-1] not in ("OR", "AND", "NOT"):
+                out.append(tok)
+            continue
+        star = tok.endswith("*") and not tok.startswith('"')
+        tok = tok.strip('"').rstrip("*").replace('"', "")
+        if not re.search(r"\w", tok):
+            continue
+        out.append(f'"{tok}"' + ("*" if star else ""))
+    while out and out[-1] in ("OR", "AND", "NOT"):
+        out.pop()
+    return " ".join(out)
+
+
+def search(cfg, db, words="", coll=None, tag=None, ext=None, ref=None, year=None, limit=10, offset=0):
+    where, args, joins = [], [], ""
+    rank = "0"
+    if words:
+        q = fts_query(words)
+        if not q:
+            return [], 0
+        joins += " JOIN fts ON fts.rowid = d.id"
+        where.append("fts MATCH ?")
+        args.append(q)
+        # bm25 is negative (lower is better), so a collection's weight above 1 lifts its documents.
+        weights = " ".join(f"WHEN '{c['name']}' THEN {float(c.get('weight', 1.0)):.3f}" for c in cfg["collections"]
+                           if re.fullmatch(r"[a-z0-9:-]+", c["name"]))
+        rank = f"bm25(fts, 10.0, 3.0, 4.0, 1.0) * (CASE d.collection {weights} ELSE 1.0 END)" if weights \
+            else "bm25(fts, 10.0, 3.0, 4.0, 1.0)"
+    if ref:
+        book, ch, v1, v2 = parse_ref(ref)
+        sub = "SELECT doc FROM refs WHERE book=? AND chapter=?"
+        rargs = [book, ch]
+        if v1 is not None:
+            sub += " AND (v1 IS NULL OR (v1 <= ? AND IFNULL(v2, v1) >= ?))"
+            rargs += [v2 or v1, v1]
+        where.append(f"d.id IN ({sub})")
+        args += rargs
+    if coll:
+        where.append("d.collection = ?")
+        args.append(collection(cfg, coll)["name"])
+    if tag:
+        where.append("d.tags LIKE ?")
+        args.append(f"% {slug(tag)} %")
+    if ext:
+        e = ext.lower().lstrip(".")
+        if e in ("media", "audio", "video"):
+            where.append("d.kind = 'media'")
+        elif e in ("word", "doc"):
+            where.append("d.ext IN ('.doc', '.docx')")
+        elif e in ("powerpoint", "slides", "ppt"):
+            where.append("d.ext IN ('.ppt', '.pptx', '.key')")
+        else:
+            where.append("d.ext = ?")
+            args.append("." + e)
+    if year:
+        where.append("strftime('%Y', d.mtime, 'unixepoch', 'localtime') = ?")
+        args.append(str(year))
+    if not words and not ref and not (coll or tag or ext or year):
+        return [], 0
+    sql_where = (" WHERE " + " AND ".join(where)) if where else ""
+    order = f"{rank}, d.mtime DESC" if words else "d.mtime DESC"
+    if ref and not words:
+        order = "(SELECT COUNT(*) FROM refs r WHERE r.doc = d.id) DESC, d.mtime DESC"
+    rows = db.execute(f"SELECT d.id, d.path, d.collection, d.title, d.ext, d.mtime, d.tags, d.area, d.rel, d.status "
+                      f"FROM docs d{joins}{sql_where} ORDER BY {order} LIMIT 400", args).fetchall()
+    # One result per piece of work: "Sermon.docx" and "Sermon.pdf" side by side are one hit.
+    groups, order_keys = {}, []
+    for r in rows:
+        key = (os.path.dirname(r[1]), re.sub(r"[^a-z0-9]+", "", r[3].lower()))
+        if key not in groups:
+            groups[key] = []
+            order_keys.append(key)
+        groups[key].append(r)
+    total = len(order_keys)
+    out = []
+    prefer = [".docx", ".doc", ".pages", ".rtf", ".odt", ".scriv", ".md", ".txt", ".pptx", ".key", ".pdf"]
+    for key in order_keys[offset:offset + limit]:
+        g = groups[key]
+        best = sorted(g, key=lambda r: prefer.index(r[4]) if r[4] in prefer else len(prefer))[0]
+        c = next((x for x in cfg["collections"] if x["name"] == best[2]), {"label": best[2]})
+        stem = os.path.splitext(best[1])[0] + "."
+        also = {r[0]: (r[1], r[4]) for r in g if r[0] != best[0]}
+        for i, p, e in db.execute("SELECT id, path, ext FROM docs WHERE substr(path, 1, ?) = ? AND id != ?",
+                                  (len(stem), stem, best[0])):
+            if "/" not in p[len(stem):]:
+                also[i] = (p, e)
+        hit = {"id": best[0], "title": best[3], "collection": best[2], "label": c.get("label", best[2]),
+               "path": best[1], "ext": best[4].lstrip("."), "modified": dt.date.fromtimestamp(best[5]).isoformat()
+               if best[5] else None, "tags": best[6].split(), "area": best[7],
+               "also": [{"id": i, "path": p, "ext": e.lstrip(".")} for i, (p, e) in sorted(also.items())]}
+        if words:
+            snip = db.execute("SELECT snippet(fts, 3, '[', ']', '...', 14) FROM fts WHERE fts MATCH ? AND rowid = ?",
+                              (fts_query(words), best[0])).fetchone()
+            hit["snippet"] = re.sub(r"\s+", " ", snip[0]).strip() if snip and snip[0] else ""
+        if ref:
+            book, ch, v1, v2 = parse_ref(ref)
+            cites = db.execute("SELECT book, chapter, v1, v2 FROM refs WHERE doc=? AND book=? AND chapter=?",
+                               (best[0], book, ch)).fetchall()
+            hit["cites"] = [ref_label(*x) for x in cites][:6]
+        out.append(hit)
+    return out, total
+
+
+def spotlight(cfg, words, limit=10):
+    """Files Spotlight finds by their content in the collection folders (for formats the catalog can't read)."""
+    found = []
+    for folder, _ in folder_pairs(cfg):
+        try:
+            r = subprocess.run(["/usr/bin/mdfind", "-onlyin", str(folder), words], capture_output=True, text=True,
+                               timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        found += [p for p in r.stdout.splitlines() if p and not os.path.basename(p).startswith(".")]
+        if len(found) >= limit:
+            break
+    return found[:limit]
+
+
+def cmd_search(argv):
+    as_json = flag(argv, "--json")
+    coll, tag, ext = opt(argv, "--in"), opt(argv, "--tag"), opt(argv, "--type")
+    ref, year = opt(argv, "--ref"), opt(argv, "--year")
+    limit = int(opt(argv, "--limit", "10"))
+    offset = int(opt(argv, "--offset", "0"))
+    words = " ".join(argv).strip()
+    cfg = load_config()
+    db = connect(create=False)
+    hits, total = search(cfg, db, words, coll, tag, ext, ref, year, limit, offset)
+    if not hits and words and not (coll or tag or ext or ref or year):
+        extra = spotlight(cfg, words)
+    else:
+        extra = []
+    if as_json:
+        print(json.dumps({"total": total, "results": hits, "spotlight": extra}, indent=2))
+        return 0
+    if not hits and not extra:
+        print("Nothing found." + ("" if words or ref else " Give some words, --ref, --in, --tag, --type, or --year."))
+        return 0
+    for n, h in enumerate(hits, offset + 1):
+        kinds = ", ".join([h["ext"]] + [a["ext"] for a in h["also"]])
+        when = dt.date.fromisoformat(h["modified"]).strftime("%d-%b-%Y") if h["modified"] else "?"
+        print(f"{n}. {h['title']}  [{h['label']} · {kinds} · {when}]  #{h['id']}")
+        print(f"   {tilde(h['path'])}")
+        if h.get("cites"):
+            print(f"   cites {', '.join(h['cites'])}")
+        if h.get("snippet"):
+            print(f"   {h['snippet'][:220]}")
+    if total > offset + len(hits):
+        print(f"({total} in all; --offset {offset + len(hits)} for more)")
+    if extra:
+        print("Spotlight also found (not in the catalog's text):")
+        for p in extra:
+            print(f"   {tilde(p)}")
+    return 0
+
+
+def doc_row(db, ident):
+    if str(ident).lstrip("#").isdigit():
+        row = db.execute("SELECT * FROM docs WHERE id=?", (int(str(ident).lstrip("#")),)).fetchone()
+    else:
+        row = db.execute("SELECT * FROM docs WHERE path=?", (str(expand(ident).resolve()),)).fetchone()
+    if not row:
+        raise Fail(f"no document {ident} in the catalog")
+    cols = [d[0] for d in db.execute("SELECT * FROM docs LIMIT 0").description]
+    return dict(zip(cols, row))
+
+
+def cmd_show(argv):
+    as_json = flag(argv, "--json")
+    with_text = flag(argv, "--text")
+    chars = int(opt(argv, "--chars", "20000"))
+    if not argv:
+        raise Fail("kit-library show ID (the #number search shows)")
+    cfg = load_config()
+    db = connect(create=False)
+    d = doc_row(db, argv[0])
+    refs = [ref_label(*r) for r in db.execute("SELECT book, chapter, v1, v2 FROM refs WHERE doc=? ORDER BY rowid",
+                                              (d["id"],))]
+    siblings = db.execute("SELECT id, path FROM docs WHERE path LIKE ? AND id != ?",
+                          (os.path.splitext(d["path"])[0] + ".%", d["id"])).fetchall()
+    text = ""
+    if with_text:
+        row = db.execute("SELECT body FROM fts WHERE rowid=?", (d["id"],)).fetchone()
+        text = (row[0] if row else "") or ""
+        if chars and len(text) > chars:
+            text = text[:chars] + f"\n[... {len(text) - chars:,} more characters: --chars 0 for all]"
+    c = next((x for x in cfg["collections"] if x["name"] == d["collection"]), {"label": d["collection"]})
+    if as_json:
+        print(json.dumps(dict(d, label=c.get("label"), tags=d["tags"].split(), passages=refs,
+                              also=[{"id": i, "path": p} for i, p in siblings], text=text if with_text else None),
+                         indent=2))
+        return 0
+    print(f"#{d['id']} {d['title']}")
+    print(f"Collection: {c.get('label')}" + (f" · {d['area']}" if d["area"] else "")
+          + (f" (tags: {', '.join(d['tags'].split())})" if d["tags"].strip() else ""))
+    print(f"File: {tilde(d['path'])}  ({d['ext'].lstrip('.')}, {human_size(d['size'] or 0)}, "
+          f"changed {day(d['mtime'])})")
+    for i, p in siblings:
+        print(f"Also: {tilde(p)}  #{i}")
+    if refs:
+        print(f"Passages: {', '.join(refs[:40])}" + (f" (+{len(refs) - 40} more)" if len(refs) > 40 else ""))
+    status = d["status"] or ""
+    if status == "ok":
+        print(f"Text: {d['chars']:,} characters")
+    elif status == "ok-ocr":
+        print(f"Text: {d['chars']:,} characters, read from the scan (text recognition can misread a word)")
+    else:
+        print(f"Text: none ({status})")
+    if with_text:
+        print("\n" + text)
+    return 0
+
+
+def cmd_recent(argv):
+    as_json = flag(argv, "--json")
+    days = int(opt(argv, "--days", "14"))
+    coll = opt(argv, "--in")
+    cfg = load_config()
+    db = connect(create=False)
+    since = time.time() - days * 86400
+    sql = "SELECT id, title, collection, path, mtime, added FROM docs WHERE mtime >= ?"
+    args = [since]
+    if coll:
+        sql += " AND collection = ?"
+        args.append(collection(cfg, coll)["name"])
+    rows = db.execute(sql + " ORDER BY mtime DESC LIMIT 100", args).fetchall()
+    if as_json:
+        print(json.dumps([{"id": r[0], "title": r[1], "collection": r[2], "path": r[3],
+                           "modified": dt.date.fromtimestamp(r[4]).isoformat()} for r in rows], indent=2))
+        return 0
+    if not rows:
+        print(f"Nothing new or changed in the last {days} days.")
+    for r in rows:
+        print(f"{day(r[4])}  {r[1]}  [{r[2]}]  #{r[0]}")
+    return 0
+
+
+# ------------------------------------------------------------------ collections and tags
+def maybe_retag(cfg):
+    if DB.exists():
+        db = connect()
+        n = retag(db, cfg)
+        db.commit()
+        db.close()
+        return n
+    return 0
+
+
+def cmd_collections(argv):
+    as_json = flag(argv, "--json")
+    cfg = load_config()
+    counts = {}
+    if DB.exists():
+        db = connect()
+        counts = dict(db.execute("SELECT collection, COUNT(*) FROM docs GROUP BY collection").fetchall())
+        db.close()
+    if as_json:
+        print(json.dumps([dict(c, documents=counts.get(c["name"], 0)) for c in cfg["collections"]], indent=2))
+        return 0
+    if not cfg["collections"]:
+        print("No collections yet. Add one: kit-library add sermons ~/Documents/Sermons --tag sermon")
+    for c in cfg["collections"]:
+        print(f"{c['name']}: {c.get('label')} ({counts.get(c['name'], 0):,} documents)")
+        if c.get("about"):
+            print(f"  About: {c['about']}")
+        for f in c["folders"]:
+            print(f"  Folder: {tilde(expand(f))}")
+        extras = (["scripture passages indexed"] if c.get("scripture") else []) + (["pictures"] if c.get("images") else [])
+        if c.get("tags") or extras:
+            print(f"  Tags: {', '.join(c.get('tags', [])) or 'none'}" + (f" · {', '.join(extras)}" if extras else ""))
+        for n, r in enumerate(c.get("rules", []), 1):
+            print(f"  Rule {n}: {r['match']!r} -> {', '.join(r['tags'])}")
+        if c.get("exclude"):
+            print(f"  Left out: {', '.join(repr(x) for x in c['exclude'])}")
+    return 0
+
+
+def cmd_add(argv):
+    label, about, tags = opt(argv, "--label"), opt(argv, "--about"), opt(argv, "--tag")
+    scripture, images = flag(argv, "--scripture"), flag(argv, "--images")
+    if len(argv) != 2:
+        raise Fail('kit-library add NAME FOLDER [--label "Sermons"] [--about "..."] [--tag sermon]')
+    name, folder = slug(argv[0]), expand(argv[1])
+    if not name:
+        raise Fail("NAME needs letters or digits")
+    try:
+        if not folder.is_dir():
+            raise Fail(f"no such folder: {argv[1]}")
+    except PermissionError:
+        pass                                     # macOS privacy: index will go through KitLibrary.app
+    cfg = load_config()
+    store_as = tilde(folder.resolve())
+    c = next((x for x in cfg["collections"] if x["name"] == name), None)
+    if c is None:
+        c = {"name": name, "label": label or argv[0].replace("-", " ").title(), "about": about or "",
+             "folders": [], "tags": [], "rules": [], "exclude": []}
+        cfg["collections"].append(c)
+        what = "Added collection"
+    else:
+        what = "Updated collection"
+        if label:
+            c["label"] = label
+        if about:
+            c["about"] = about
+    if store_as not in c["folders"]:
+        c["folders"].append(store_as)
+    for t in (tags or "").split(","):
+        if slug(t) and slug(t) not in c["tags"]:
+            c["tags"].append(slug(t))
+    if scripture:
+        c["scripture"] = True
+    if images:
+        c["images"] = True
+    save_config(cfg)
+    print(f"{what} {name} ({c['label']}): {', '.join(c['folders'])}. Run kit-library index {name} to catalog it.")
+    return 0
+
+
+def cmd_remove(argv):
+    if not argv:
+        raise Fail("kit-library remove NAME [FOLDER]")
+    cfg = load_config()
+    c = collection(cfg, argv[0])
+    if len(argv) > 1:
+        target = str(expand(argv[1]).resolve())
+        before = len(c["folders"])
+        c["folders"] = [f for f in c["folders"] if str(expand(f).resolve()) != target]
+        if len(c["folders"]) == before:
+            raise Fail(f"{argv[1]} isn't one of {c['name']}'s folders")
+        what = f"Removed {tilde(target)} from {c['name']}"
+    else:
+        cfg["collections"].remove(c)
+        what = f"Removed collection {c['name']}"
+    save_config(cfg)
+    if DB.exists():
+        db = connect()
+        stale = [i for i, p in db.execute("SELECT id, path FROM docs WHERE collection=?", (c["name"],))
+                 if owner(cfg, p)[0] is None or (len(argv) == 1)]
+        forget(db, stale)
+        db.commit()
+        db.close()
+    print(f"{what}; the files themselves are untouched.")
+    return 0
+
+
+def cmd_about(argv):
+    if len(argv) < 2:
+        raise Fail('kit-library about NAME "what it holds"')
+    cfg = load_config()
+    c = collection(cfg, argv[0])
+    c["about"] = " ".join(argv[1:])
+    save_config(cfg)
+    print(f"{c['name']}: {c['about']}")
+    return 0
+
+
+def split_tags(s):
+    return [slug(t) for t in re.split(r"[,\s]+", s or "") if slug(t)]
+
+
+def cmd_tag(argv, remove=False):
+    if len(argv) < 2:
+        raise Fail(f"kit-library {'untag' if remove else 'tag'} NAME TAG[,TAG]")
+    cfg = load_config()
+    c = collection(cfg, argv[0])
+    for t in split_tags(" ".join(argv[1:])):
+        if remove and t in c["tags"]:
+            c["tags"].remove(t)
+        elif not remove and t not in c["tags"]:
+            c["tags"].append(t)
+    save_config(cfg)
+    n = maybe_retag(cfg)
+    print(f"{c['name']} tags: {', '.join(c['tags']) or 'none'} ({n} documents updated)")
+    return 0
+
+
+def cmd_rule(argv):
+    if len(argv) < 3:
+        raise Fail('kit-library rule NAME PATTERN TAG[,TAG]   (PATTERN like "*40 Day*" or words)')
+    cfg = load_config()
+    c = collection(cfg, argv[0])
+    tags = split_tags(" ".join(argv[2:]))
+    if not tags:
+        raise Fail("which tag(s)?")
+    c["rules"].append({"match": argv[1], "tags": tags})
+    save_config(cfg)
+    n = maybe_retag(cfg)
+    print(f"{c['name']} rule {len(c['rules'])}: {argv[1]!r} -> {', '.join(tags)} ({n} documents updated)")
+    return 0
+
+
+def cmd_rules(argv):
+    if not argv:
+        raise Fail("kit-library rules NAME")
+    c = collection(load_config(), argv[0])
+    if not c["rules"]:
+        print(f"{c['name']} has no rules.")
+    for n, r in enumerate(c["rules"], 1):
+        print(f"{n}. {r['match']!r} -> {', '.join(r['tags'])}")
+    return 0
+
+
+def cmd_unrule(argv):
+    if len(argv) != 2 or not argv[1].isdigit():
+        raise Fail("kit-library unrule NAME N   (kit-library rules NAME shows the numbers)")
+    cfg = load_config()
+    c = collection(cfg, argv[0])
+    i = int(argv[1]) - 1
+    if not 0 <= i < len(c["rules"]):
+        raise Fail(f"{c['name']} has no rule {argv[1]}")
+    r = c["rules"].pop(i)
+    save_config(cfg)
+    n = maybe_retag(cfg)
+    print(f"Removed rule {r['match']!r} -> {', '.join(r['tags'])} ({n} documents updated)")
+    return 0
+
+
+def cmd_exclude(argv, include=False):
+    if len(argv) < 2:
+        raise Fail(f"kit-library {'include' if include else 'exclude'} NAME PATTERN")
+    cfg = load_config()
+    c = collection(cfg, argv[0])
+    pattern = " ".join(argv[1:])
+    if include:
+        if pattern not in c["exclude"]:
+            raise Fail(f"{pattern!r} isn't left out of {c['name']}")
+        c["exclude"].remove(pattern)
+        save_config(cfg)
+        print(f"{c['name']} includes {pattern!r} again; kit-library index {c['name']} catalogs it.")
+        return 0
+    c["exclude"].append(pattern)
+    save_config(cfg)
+    dropped = 0
+    if DB.exists():
+        db = connect()
+        stale = []
+        for i, p in db.execute("SELECT id, path FROM docs WHERE collection=?", (c["name"],)).fetchall():
+            _, folder, rel = owner(cfg, p)
+            if rel and any(matches(pattern, part) for part in [rel] + [os.path.join(*rel.split(os.sep)[:k])
+                                                                       for k in range(1, rel.count(os.sep) + 1)]):
+                stale.append(i)
+        forget(db, stale)
+        db.commit()
+        db.close()
+        dropped = len(stale)
+    print(f"{c['name']} leaves out {pattern!r} ({dropped} documents dropped from the catalog).")
+    return 0
+
+
+def cmd_define(argv):
+    if len(argv) < 2:
+        raise Fail('kit-library define TAG "what it means"')
+    cfg = load_config()
+    t = slug(argv[0])
+    cfg["tags"][t] = " ".join(argv[1:])
+    save_config(cfg)
+    print(f"{t}: {cfg['tags'][t]}")
+    return 0
+
+
+def cmd_tags(argv):
+    as_json = flag(argv, "--json")
+    cfg = load_config()
+    counts = {}
+    if DB.exists():
+        db = connect()
+        for (tags,) in db.execute("SELECT tags FROM docs"):
+            for t in tags.split():
+                counts[t] = counts.get(t, 0) + 1
+        db.close()
+    used = set(cfg["tags"]) | set(counts)
+    for c in cfg["collections"]:
+        used |= set(c.get("tags", []))
+        for r in c.get("rules", []):
+            used |= set(r.get("tags", []))
+    rows = sorted(used)
+    if as_json:
+        print(json.dumps([{"tag": t, "means": cfg["tags"].get(t, ""), "documents": counts.get(t, 0)} for t in rows],
+                         indent=2))
+        return 0
+    if not rows:
+        print("No tags yet.")
+    for t in rows:
+        print(f"{t} ({counts.get(t, 0):,})" + (f": {cfg['tags'][t]}" if cfg["tags"].get(t) else ""))
+    return 0
+
+
+# ------------------------------------------------------------------ the output folder
+SAFE_PART = re.compile(r"^(?!\.{1,2}$)[^/\\:\x00]{1,200}$")
+
+
+def check_part(p):
+    if not SAFE_PART.match(p or ""):
+        raise Fail(f"not a usable file or folder name: {p!r}")
+    return p
+
+
+def kind_folder(cfg, kind):
+    kinds = cfg["output"]["kinds"]
+    if kind in kinds:
+        return kinds[kind]
+    for k, v in kinds.items():
+        if v.lower() == (kind or "").lower():
+            return v
+    raise Fail(f"no output kind {kind!r}; the kinds are: {', '.join(kinds)}")
+
+
+def md_to_html(md, title):
+    """Markdown to simple HTML, enough for textutil to make a tidy Word file."""
+    out, para, table = [], [], []
+    state = {"list": None}
+
+    def inline(s):
+        s = html.escape(s, quote=False)
+        s = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", s)
+        s = re.sub(r"(?<![\w*])\*(?!\s)(.+?)(?<!\s)\*(?![\w*])", r"<i>\1</i>", s)
+        s = re.sub(r"(?<![\w_])_(?!\s)(.+?)(?<!\s)_(?![\w_])", r"<i>\1</i>", s)
+        s = re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
+        return re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)", r'<a href="\2">\1</a>', s)
+
+    def end_para():
+        if para:
+            out.append("<p>" + inline(" ".join(para)) + "</p>")
+            para.clear()
+
+    def end_list():
+        if state["list"]:
+            out.append(f"</{state['list']}>")
+            state["list"] = None
+
+    def end_table():
+        if not table:
+            return
+        rows = [[c.strip() for c in r.strip().strip("|").split("|")] for r in table
+                if not re.match(r"^\s*\|?[\s:|-]+\|?\s*$", r)]
+        cells = []
+        for i, r in enumerate(rows):
+            tag = "th" if i == 0 else "td"
+            cells.append("<tr>" + "".join(f"<{tag}>{inline(c)}</{tag}>" for c in r) + "</tr>")
+        out.append('<table border="1" cellpadding="4" cellspacing="0">' + "".join(cells) + "</table>")
+        table.clear()
+
+    for raw in md.splitlines():
+        s = raw.rstrip()
+        if table and not s.lstrip().startswith("|"):
+            end_table()
+        if not s.strip():
+            end_para()
+            end_list()
+            continue
+        m = re.match(r"^(#{1,6})\s+(.*)$", s)
+        if m:
+            end_para()
+            end_list()
+            n = len(m.group(1))
+            out.append(f"<h{n}>{inline(m.group(2))}</h{n}>")
+            continue
+        if re.match(r"^\s*(-{3,}|\*{3,}|_{3,})\s*$", s):
+            end_para()
+            end_list()
+            out.append("<hr>")
+            continue
+        m = re.match(r"^\s*([-*+]|\d+[.)])\s+(.*)$", s)
+        if m:
+            end_para()
+            kind = "ol" if m.group(1)[0].isdigit() else "ul"
+            if state["list"] != kind:
+                end_list()
+                out.append(f"<{kind}>")
+                state["list"] = kind
+            out.append(f"<li>{inline(m.group(2))}</li>")
+            continue
+        if s.lstrip().startswith(">"):
+            end_para()
+            end_list()
+            out.append(f"<blockquote><i>{inline(s.lstrip().lstrip('>').strip())}</i></blockquote>")
+            continue
+        if s.lstrip().startswith("|"):
+            end_para()
+            end_list()
+            table.append(s)
+            continue
+        end_list()
+        para.append(s.strip())
+    end_para()
+    end_list()
+    end_table()
+    style = ("body{font-family:Georgia,serif;font-size:12pt;line-height:1.35}"
+             "h1,h2,h3,h4{font-family:Helvetica,Arial,sans-serif}th{background:#eee}")
+    return (f"<html><head><meta charset=\"utf-8\"><title>{html.escape(title)}</title><style>{style}</style></head>"
+            f"<body>{''.join(out)}</body></html>")
+
+
+def free_name(path):
+    if not path.exists():
+        return path
+    stem, ext = path.stem, path.suffix
+    n = 2
+    while True:
+        p = path.with_name(f"{stem} ({n}){ext}")
+        if not p.exists():
+            return p
+        n += 1
+
+
+def flush(cfg):
+    """Move every waiting delivery from the outbox into the output folder; catalog what arrived."""
+    root = output_root(cfg)
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        os.listdir(root)
+    except PermissionError:
+        raise NeedsApp(str(root))
+    delivered = []
+    jobs = sorted(p for p in OUTBOX.iterdir() if p.is_dir()) if OUTBOX.exists() else []
+    for job in jobs:
+        mf = job / "manifest.json"
+        if not mf.exists():
+            if time.time() - job.stat().st_mtime > 3600:
+                shutil.rmtree(job, ignore_errors=True)       # a delivery that never finished writing
+            continue
+        try:
+            m = json.loads(mf.read_text())
+            parts = [check_part(p) for p in m["dir"].split("/") if p]
+            dest_dir = root.joinpath(*parts)
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            dest_dir.resolve().relative_to(root.resolve())
+            for e in m["files"]:
+                dest = dest_dir / check_part(e["as"])
+                if dest.exists() and not m.get("replace"):
+                    dest = free_name(dest)
+                shutil.copyfile(job / check_part(e["file"]), dest)
+                delivered.append((m.get("kind", "other"), dest))
+        except (ValueError, KeyError, OSError, Fail) as e:
+            log(f"flush: {job.name} failed: {e}")
+            if isinstance(e, PermissionError):
+                raise NeedsApp(str(root))
+            continue
+        shutil.rmtree(job, ignore_errors=True)
+    if delivered:
+        STATE.mkdir(parents=True, exist_ok=True)
+        with open(DELIVERED, "a", encoding="utf-8") as f:
+            for kind, p in delivered:
+                f.write(f"{dt.datetime.now():%Y-%m-%d %H:%M}\t{kind}\t{p}\n")
+        db = connect()
+        index_paths(db, cfg, [str(p) for _, p in delivered])
+        db.commit()
+        db.close()
+    return [p for _, p in delivered]
+
+
+def mirror_root(cfg):
+    m = (cfg["output"].get("mirror") or "").strip()
+    return expand(m) if m else None
+
+
+def mirror_files(cfg, files=None):
+    """Copy Kit Output (or just `files` in it) to the phone mirror (output.mirror, a folder in iCloud
+    Drive): new and changed files only. Nothing is ever deleted on either side. Returns how many copied."""
+    dest_root = mirror_root(cfg)
+    if not dest_root:
+        return 0
+    root = output_root(cfg)
+    if files is None:
+        try:
+            os.listdir(root)
+        except FileNotFoundError:
+            return 0
+        except PermissionError:
+            raise NeedsApp(str(root))
+        files = []
+        for dp, dns, fns in os.walk(root):
+            dns[:] = [d for d in dns if not d.startswith(".")]
+            files += [pathlib.Path(dp) / f for f in fns if not f.startswith(".")]
+    copied = 0
+    for src in files:
+        src = pathlib.Path(src)
+        try:
+            rel = src.resolve().relative_to(root.resolve())
+            st = src.stat()
+        except (ValueError, FileNotFoundError):
+            continue
+        except PermissionError:
+            raise NeedsApp(str(root))
+        dest = dest_root / rel
+        try:
+            if dest.exists():
+                ds = dest.stat()
+                if ds.st_size == st.st_size and ds.st_mtime >= st.st_mtime - 1:
+                    continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dest)
+            copied += 1
+        except PermissionError:
+            raise NeedsApp(str(dest_root))
+    if copied:
+        log(f"mirror: {copied} file(s) to {tilde(dest_root)}")
+    return copied
+
+
+def phone_name(path):
+    """Where a mirrored file shows up on the phone, in words."""
+    p = tilde(path)
+    marker = "~/Library/Mobile Documents/com~apple~CloudDocs/"
+    return "iCloud Drive > " + p[len(marker):].replace("/", " > ") if p.startswith(marker) else p
+
+
+def cmd_mirror(argv):
+    quiet = flag(argv, "--quiet")
+    cfg = load_config()
+    if not mirror_root(cfg):
+        print("No phone mirror set (output.mirror in library/collections.json).")
+        return 0
+    try:
+        n = mirror_files(cfg)
+    except NeedsApp:
+        return run_in_app(["mirror"] + (["--quiet"] if quiet else []))
+    if n or not quiet:
+        print(f"Copied {n} file(s) to {phone_name(mirror_root(cfg))}.")
+    return 0
+
+
+def cmd_flush(argv):
+    quiet = flag(argv, "--quiet")
+    cfg = load_config()
+    try:
+        done = flush(cfg)
+    except NeedsApp:
+        return run_in_app(["flush"] + (["--quiet"] if quiet else []))
+    for p in done:
+        print(f"Delivered: {tilde(p)}")
+    if not done and not quiet:
+        print("Nothing waiting to deliver.")
+    if done and mirror_root(cfg):
+        try:
+            mirror_files(cfg, done)
+        except NeedsApp:
+            if IN_APP:
+                print("(Not copied to the phone folder: KitLibrary needs permission for iCloud Drive.)")
+            else:
+                run_in_app(["mirror", "--quiet"])
+    return 0
+
+
+def cmd_fetch(argv):
+    """kit-library fetch ID [--to-phone] [--json]: a copy of one cataloged file, for texting it."""
+    as_json, phone = flag(argv, "--json"), flag(argv, "--to-phone")
+    if not argv:
+        raise Fail("kit-library fetch ID [--to-phone] [--json]")
+    ident = argv[0]
+    again = ["fetch", ident] + (["--to-phone"] if phone else []) + (["--json"] if as_json else [])
+    cfg = load_config()
+    db = connect(create=False)
+    d = doc_row(db, ident)
+    db.close()
+    src = pathlib.Path(d["path"])
+    try:
+        if src.is_dir():
+            raise Fail(f"{d['title']} is a folder ({d['ext'].lstrip('.')}), so it can't be texted; open it on the Mac")
+        size = src.stat().st_size
+    except PermissionError:
+        return run_in_app(again)
+    except FileNotFoundError:
+        raise Fail(f"{d['title']} isn't where the catalog says anymore (kit-library index refreshes it)")
+    if size > MAX_SEND:
+        raise Fail(f"{d['title']} is {human_size(size)}, too big to text (30 MB at most)")
+    SEND.mkdir(parents=True, exist_ok=True)
+    os.chmod(SEND, 0o700)
+    for old in SEND.iterdir():
+        if time.time() - old.stat().st_mtime > 86400:
+            old.unlink()
+    dest = SEND / f"{d['id']}-{src.name}"
+    try:
+        shutil.copyfile(src, dest)
+    except PermissionError:
+        return run_in_app(again)
+    out = {"id": d["id"], "title": d["title"], "path": str(dest), "size": size}
+    if phone and mirror_root(cfg):
+        pdest = mirror_root(cfg) / "Sent to phone" / src.name
+        try:
+            pdest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, pdest)
+            out["phone"] = phone_name(pdest)
+        except PermissionError:
+            if not IN_APP:
+                return run_in_app(again)
+            out["phone_error"] = "KitLibrary needs permission for iCloud Drive"
+    if as_json:
+        print(json.dumps(out))
+    else:
+        print(f"Copied #{d['id']} {d['title']} to {tilde(dest)}" + (f"; on the phone: {out['phone']}" if out.get("phone") else ""))
+    return 0
+
+
+def cmd_deliver(argv):
+    kind = opt(argv, "--kind", "other")
+    sub, name = opt(argv, "--sub"), opt(argv, "--name")
+    replace, no_date = flag(argv, "--replace"), flag(argv, "--no-date")
+    as_md, keep_md = flag(argv, "--as-md"), flag(argv, "--keep-md")
+    if not argv:
+        raise Fail("kit-library deliver FILE... [--kind KIND] [--sub FOLDER] [--name NAME]")
+    if name and len(argv) > 1:
+        raise Fail("--name goes with one file")
+    cfg = load_config()
+    parts = [check_part(kind_folder(cfg, kind))] + [check_part(p) for p in (sub or "").split("/") if p.strip()]
+    job = OUTBOX / f"{dt.datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}"
+    job.mkdir(parents=True)
+    entries, today = [], dt.date.today().isoformat()
+    try:
+        for f in argv:
+            src = expand(f)
+            if not src.is_file():
+                raise Fail(f"no such file: {f}")
+            stem, ext = os.path.splitext(name or src.name)
+            ext = ext if ext and len(ext) <= 6 else src.suffix
+            if not no_date and not re.match(r"^\d{4}-\d{2}-\d{2}", stem):
+                stem = f"{today} {stem}"
+            stem = check_part(re.sub(r"[/\\:]+", "-", stem).strip())
+            if src.suffix.lower() in (".md", ".markdown") and not as_md:
+                tmp = job / ".page.html"
+                tmp.write_text(md_to_html(src.read_text(errors="replace"), stem), encoding="utf-8")
+                r = subprocess.run(["/usr/bin/textutil", "-convert", "docx", "-output", str(job / f"{stem}.docx"),
+                                    str(tmp)], capture_output=True, timeout=120)
+                tmp.unlink()
+                if r.returncode == 0 and (job / f"{stem}.docx").exists():
+                    entries.append({"file": f"{stem}.docx", "as": f"{stem}.docx"})
+                else:
+                    keep_md = True
+                if keep_md:
+                    shutil.copyfile(src, job / f"{stem}.md")
+                    entries.append({"file": f"{stem}.md", "as": f"{stem}.md"})
+            else:
+                shutil.copyfile(src, job / f"{stem}{ext}")
+                entries.append({"file": f"{stem}{ext}", "as": f"{stem}{ext}"})
+        (job / "manifest.json").write_text(json.dumps({"kind": kind, "dir": "/".join(parts), "replace": replace,
+                                                       "files": entries, "created": time.time()}, indent=2))
+    except BaseException:
+        shutil.rmtree(job, ignore_errors=True)
+        raise
+    return cmd_flush([])
+
+
+def cmd_output(argv):
+    as_json = flag(argv, "--json")
+    cfg = load_config()
+    root = output_root(cfg)
+    if as_json:
+        print(json.dumps({"folder": str(root), "kinds": {k: str(root / v) for k, v in cfg["output"]["kinds"].items()}},
+                         indent=2))
+        return 0
+    path = root / kind_folder(cfg, argv[0]) if argv else root
+    print(str(path))
+    return 0
+
+
+# ------------------------------------------------------------------ status
+def cmd_status(argv):
+    cfg = load_config()
+    if not cfg["collections"]:
+        print("No collections yet. Add one: kit-library add sermons ~/Documents/Sermons --tag sermon")
+        return 0
+    counts, last, took, total = {}, None, None, 0
+    if DB.exists():
+        db = connect()
+        counts = dict(db.execute("SELECT collection, COUNT(*) FROM docs GROUP BY collection").fetchall())
+        total = sum(counts.values())
+        last, took = meta(db, "last_index"), meta(db, "last_index_seconds")
+        db.close()
+    when = dt.datetime.fromtimestamp(float(last)).strftime("%d-%b-%Y %H:%M") if last else "never"
+    print(f"Library: {total:,} documents in {len(cfg['collections'])} collections (last indexed {when}"
+          + (f", took {int(float(took)) // 60}m {int(float(took)) % 60}s" if took else "") + ")")
+    for c in cfg["collections"]:
+        print(f"  {c.get('label', c['name']):22} {counts.get(c['name'], 0):>6,}  "
+              + "; ".join(tilde(expand(f)) for f in c["folders"]))
+    print(f"Output: {tilde(output_root(cfg))}  ("
+          + ", ".join(f"{k} -> {v}" for k, v in cfg["output"]["kinds"].items()) + ")")
+    waiting = len([p for p in OUTBOX.iterdir() if p.is_dir()]) if OUTBOX.exists() else 0
+    if waiting:
+        print(f"Waiting to deliver: {waiting} (kit-library flush)")
+    if DB.exists():
+        print(f"Catalog: {human_size(DB.stat().st_size)} ({tilde(DB)})")
+    return 0
+
+
+def cmd_check(argv):
+    """One line for kit doctor: ok / warn / fail, then the detail."""
+    try:
+        cfg = load_config()
+    except Fail as e:
+        print(f"fail {e}")
+        return 1
+    if not cfg["collections"]:
+        print("ok no collections set up")
+        return 0
+    if not DB.exists():
+        print("warn no catalog yet: kit-library index")
+        return 0
+    db = connect()
+    total = db.execute("SELECT COUNT(*) FROM docs").fetchone()[0]
+    last = meta(db, "last_index")
+    helper = db.execute("SELECT COUNT(*) FROM docs WHERE status='error:no-pdf-helper'").fetchone()[0]
+    db.close()
+    age = (time.time() - float(last)) / 3600 if last else None
+    waiting = len([p for p in OUTBOX.iterdir() if p.is_dir()]) if OUTBOX.exists() else 0
+    problems = []
+    if age is None or age > 50:
+        problems.append(f"last indexed {'never' if age is None else f'{age / 24:.0f} days ago'}")
+    if helper:
+        problems.append(f"{helper} PDFs unread (kit-pdftext isn't built)")
+    if waiting:
+        problems.append(f"{waiting} deliveries waiting (kit-library flush)")
+    level = "warn" if problems else "ok"
+    print(f"{level} {total:,} documents" + (f"; {'; '.join(problems)}" if problems else
+                                            f", indexed {age:.0f}h ago"))
+    return 0
+
+
+COMMANDS = {"collections": cmd_collections, "add": cmd_add, "remove": cmd_remove, "about": cmd_about,
+            "tag": cmd_tag, "untag": lambda a: cmd_tag(a, remove=True), "rule": cmd_rule, "rules": cmd_rules,
+            "unrule": cmd_unrule, "exclude": cmd_exclude, "include": lambda a: cmd_exclude(a, include=True),
+            "define": cmd_define, "tags": cmd_tags, "index": cmd_index, "search": cmd_search, "find": cmd_search,
+            "show": cmd_show, "recent": cmd_recent, "output": cmd_output, "deliver": cmd_deliver,
+            "flush": cmd_flush, "mirror": cmd_mirror, "fetch": cmd_fetch, "status": cmd_status}
+
+
+def main(argv):
+    argv = list(argv)
+    if IN_APP and (not argv or argv[0] not in APP_COMMANDS):
+        print("KitLibrary.app runs only: index, flush, mirror, fetch, --check", file=sys.stderr)
+        return 2
+    try:
+        if not argv:
+            return cmd_status([])
+        if argv[0] == "--check":
+            return cmd_check(argv[1:])
+        if argv[0] in ("-h", "--help", "help"):
+            print(__doc__)
+            return 0
+        fn = COMMANDS.get(argv[0])
+        if not fn:
+            print(__doc__.split("\n\n")[1])
+            return 2
+        return fn(argv[1:]) or 0
+    except Fail as e:
+        print(f"kit-library: {e}", file=sys.stderr)
+        return 1
+    except sqlite3.OperationalError as e:
+        print(f"kit-library: the catalog had a problem ({e}); kit-library index --full rebuilds it",
+              file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

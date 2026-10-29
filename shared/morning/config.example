@@ -27,6 +27,21 @@ DELIVERY_EMAIL_TO="you@example.com"
 IMESSAGE_TO="+15555550123"
 IMESSAGE_TO_ALT="you@example.com"
 
+# Text Kit back (macOS): kit-textback answers texts you send yourself that start with "Kit" ("kit
+# today", "kit todo call the bank fri", or any question). Its reader, KitMessages.app (build it with
+# platform/mac/textback/build.sh), needs Full Disk Access; its job is com.<you>.kit.textback (from
+# com.USER.kit.textback.plist.template). Replies go to IMESSAGE_TO. Questions use Claude, read-only.
+TEXTBACK="off"
+TEXTBACK_ASK="on"
+TEXTBACK_MODEL="sonnet"
+# The model that reads a date or an event out of a text ("kit event lunch Friday 12:30"): quick and cheap.
+TEXTBACK_PARSE_MODEL="haiku"
+TEXTBACK_MAX_PER_HOUR=30
+
+# A run of your own: put its prompt in .install/prompts/prompt-NAME.md, schedule
+# "run.sh NAME", and give it extra tools with ALLOW_TOOLS_<NAME> (permission rules separated by
+# semicolons, like ALLOW_TOOLS). Executables in .install/brief.d/ add sections to the brief.
+
 # To-do sync backend: outlook (Outlook Tasks, the default on macOS and Windows) or apple
 # (Apple Reminders, macOS only; syncs through iCloud, so keep work items out of it).
 REMINDERS_BACKEND="outlook"

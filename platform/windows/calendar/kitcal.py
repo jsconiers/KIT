@@ -487,6 +487,18 @@ def describe(e):
     loc = _safe_str(getattr(e, "Location", "") or "")
     if loc:
         d["location"] = loc
+    # Your answer to it and how it shows your time, for kit-meetload (declined and free don't count).
+    try:
+        d["my_response"] = {0: "none", 1: "organizer", 2: "tentative", 3: "accepted", 4: "declined",
+                            5: "not responded"}.get(int(e.ResponseStatus), "none")
+        d["i_organize"] = d["my_response"] == "organizer"
+    except Exception:
+        pass
+    try:
+        d["show_as"] = {0: "free", 1: "tentative", 2: "busy", 3: "out of office",
+                        4: "working elsewhere"}.get(int(e.BusyStatus), "busy")
+    except Exception:
+        pass
     return d
 
 

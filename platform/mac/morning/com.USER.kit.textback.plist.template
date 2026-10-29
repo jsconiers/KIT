@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.{{USER}}.kit.textback</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>{{HOME}}/Claude/Agents/kit/.install/platform/mac/textback/textback.sh</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>60</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>{{HOME}}/Claude/Agents/kit/.install/logs/launchd.out</string>
+  <key>StandardErrorPath</key><string>{{HOME}}/Claude/Agents/kit/.install/logs/textback.err</string>
+</dict>
+</plist>

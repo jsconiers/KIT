@@ -1,0 +1,357 @@
+#!/usr/bin/env python3
+"""kit-dates: important dates, personal and work (birthdays, anniversaries, work anniversaries, memorials, one-off days), with reminders ahead of time.
+
+  kit-dates [--days N]          what's coming in the next N days (default 30)
+  kit-dates all                 every date, by month
+  kit-dates add NAME DATE [--what birthday] [--work] [--action card|call|gift|note] [--lead DAYS]
+                [--relation TEXT] [--note TEXT] [--once]
+                                DATE is MM-DD for a yearly date with no year, or YYYY-MM-DD (or
+                                DD-Mmm-YYYY) when the year is known, which adds the age or the count
+  kit-dates remove NAME [--what WHAT]
+  kit-dates brief [--queue]     lines for the morning brief: dates inside their reminder window, work
+                                ones tagged [work]; --queue also adds a to-do for each date with an
+                                action (send a card, call, buy a gift, write a note), once per year
+  kit-dates --json [--days N]   the upcoming list as JSON
+
+The list is ~/Claude/Agents/kit/dates.json, which stays on this computer:
+
+  {"lead_days": 7,
+   "items": [
+     {"name": "Alex", "what": "birthday", "date": "1990-11-14", "relation": "son", "action": "card",
+      "lead_days": 10},
+     {"name": "Sam Rivera", "what": "work anniversary", "date": "2021-03-01", "side": "work",
+      "action": "note"},
+     {"name": "Wedding anniversary", "what": "anniversary", "date": "06-20"},
+     {"name": "Team offsite", "what": "event", "date": "2027-02-10", "once": true, "side": "work"}
+   ]}
+
+"side": "work" marks a work date: the brief puts it with the work items, and its note is drafted for
+work channels. A card or note line says where its draft goes (briefs/cards/), and the morning run
+writes the draft; nothing is ever sent. February 29 dates fall on February 28 in other years.
+KIT_DIR overrides the Kit folder (for tests). Cross-platform.
+"""
+import datetime as dt
+import json
+import os
+import pathlib
+import re
+import subprocess
+import sys
+
+KIT = pathlib.Path(os.path.expanduser(os.environ.get("KIT_DIR", "~/Claude/Agents/kit")))
+LIST = KIT / "dates.json"
+TODO = pathlib.Path(__file__).resolve().parent / "todo"
+ACTIONS = {"card", "call", "gift", "note", "none"}
+# How many days ahead each action needs its to-do: a card has to be bought and mailed.
+ACTION_LEAD = {"card": 7, "gift": 5, "call": 0, "note": 1}
+DOING = {"card": "Send a card to", "gift": "Get a gift for", "call": "Call", "note": "Write a note to"}
+
+
+def load():
+    if not LIST.exists():
+        return {"lead_days": 7, "items": []}
+    return json.loads(LIST.read_text())
+
+
+def save(cfg):
+    LIST.parent.mkdir(parents=True, exist_ok=True)
+    tmp = LIST.with_suffix(".tmp")
+    tmp.write_text(json.dumps(cfg, indent=2) + "\n")
+    tmp.replace(LIST)
+
+
+def parse_date(text):
+    """(year or None, month, day) from MM-DD, M/D, YYYY-MM-DD, DD-Mmm-YYYY, DD-Mmm, or Mmm DD."""
+    t = text.strip().rstrip(".,")
+    m = re.fullmatch(r"(\d{1,2})[-/](\d{1,2})", t)
+    if m:
+        mo, d = int(m.group(1)), int(m.group(2))
+        dt.date(2000, mo, d)  # validates, 2000 is a leap year
+        return None, mo, d
+    for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%m/%d/%Y", "%b %d %Y", "%b %d, %Y", "%d %b %Y"):
+        try:
+            x = dt.datetime.strptime(t, fmt).date()
+            return x.year, x.month, x.day
+        except ValueError:
+            pass
+    for fmt in ("%d-%b", "%b %d", "%d %b"):
+        try:
+            x = dt.datetime.strptime(f"{t} 2000", f"{fmt} %Y").date()
+            return None, x.month, x.day
+        except ValueError:
+            pass
+    raise ValueError(f"not a date: {text!r} (use 11-14, 14-Nov, or 1990-11-14)")
+
+
+def item_parts(item):
+    s = item["date"]
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+        y, mo, d = int(s[:4]), int(s[5:7]), int(s[8:10])
+        return y, mo, d
+    mo, d = int(s[:2]), int(s[3:5])
+    return None, mo, d
+
+
+def on_year(year, mo, d):
+    if mo == 2 and d == 29 and not (year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)):
+        return dt.date(year, 2, 28)
+    return dt.date(year, mo, d)
+
+
+def next_occurrence(item, today):
+    """The next date on or after today, or None for a one-off date that has passed."""
+    y, mo, d = item_parts(item)
+    if item.get("once"):
+        when = dt.date(y, mo, d) if y else on_year(today.year, mo, d)
+        return when if when >= today else None
+    when = on_year(today.year, mo, d)
+    if when < today:
+        when = on_year(today.year + 1, mo, d)
+    return when
+
+
+def ordinal(n):
+    suffix = "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+def describe(item, when):
+    """'Alex's birthday (turns 36)', 'Sam Rivera's work anniversary (5 years)'."""
+    what = (item.get("what") or "date").strip()
+    y, _, _ = item_parts(item)
+    name = item["name"]
+    owner = f"{name}'" if name.endswith("s") else f"{name}'s"
+    count = ""
+    if y and not item.get("once"):
+        n = when.year - y
+        if what.lower() == "birthday" and n > 0:
+            count = f" (turns {n})"
+        elif "anniversary" in what.lower() and n > 0:
+            count = f" ({ordinal(n)})" if "work" not in what.lower() else f" ({n} year{'s' if n != 1 else ''})"
+        elif what.lower() == "memorial" and n > 0:
+            count = f" ({n} year{'s' if n != 1 else ''})"
+    if what.lower() in ("event", "date", "other") or item.get("once"):
+        return f"{name}{count}"
+    return f"{owner} {what}{count}"
+
+
+def slug(text):
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:40]
+
+
+def upcoming(cfg, today, days):
+    out = []
+    for item in cfg.get("items", []):
+        when = next_occurrence(item, today)
+        if when is None:
+            continue
+        left = (when - today).days
+        if left <= days:
+            out.append((when, left, item))
+    out.sort(key=lambda r: (r[0], r[2]["name"].lower()))
+    return out
+
+
+def when_text(when, left):
+    if left == 0:
+        return f"TODAY {when:%a %d-%b}"
+    if left == 1:
+        return f"TOMORROW {when:%a %d-%b}"
+    return f"{when:%a %d-%b} (in {left} days)"
+
+
+def is_work(item):
+    return (item.get("side") or "").lower() == "work"
+
+
+def cmd_upcoming(argv):
+    days = int(opt(list(argv), "--days", "30"))
+    cfg = load()
+    rows = upcoming(cfg, dt.date.today(), days)
+    if not rows:
+        print(f"Nothing in the next {days} days." if LIST.exists() else f"No dates yet: {LIST}")
+        return 0
+    for when, left, item in rows:
+        tag = " [work]" if is_work(item) else ""
+        act = f"; {item['action']}" if item.get("action") and item["action"] != "none" else ""
+        rel = f", {item['relation']}" if item.get("relation") else ""
+        print(f"{when_text(when, left):24} {describe(item, when)}{rel}{tag}{act}")
+    return 0
+
+
+def cmd_all(argv):
+    cfg = load()
+    items = sorted(cfg.get("items", []), key=lambda i: item_parts(i)[1:])
+    month = None
+    for item in items:
+        y, mo, d = item_parts(item)
+        if mo != month:
+            month = mo
+            print(dt.date(2000, mo, 1).strftime("%B"))
+        tag = " [work]" if is_work(item) else ""
+        act = f"; {item['action']}" if item.get("action") and item["action"] != "none" else ""
+        year = f" {y}" if y else ""
+        once = " (once)" if item.get("once") else ""
+        print(f"  {d:02d}{year}  {item['name']}: {item.get('what', 'date')}{tag}{act}{once}")
+    if not items:
+        print(f"No dates yet: {LIST}")
+    return 0
+
+
+def queue_todo(item, when):
+    """One to-do per occurrence for a date with an action, due when the action has to happen."""
+    action = item.get("action")
+    if action not in ACTION_LEAD:
+        return False
+    if item.get("queued") == when.isoformat():
+        return False
+    due = max(dt.date.today(), when - dt.timedelta(days=ACTION_LEAD[action]))
+    title = f"{DOING[action]} {item['name']}: {describe(item, when)}, {when:%a %d-%b}"
+    args = [sys.executable, str(TODO)] + (["work"] if is_work(item) else []) + [title, f"{due:%d-%b-%Y}"]
+    r = subprocess.run(args, capture_output=True, text=True, timeout=60)
+    if r.returncode != 0:
+        print(f"(couldn't add the to-do for {item['name']}: {(r.stderr or r.stdout).strip()[:120]})",
+              file=sys.stderr)
+        return False
+    item["queued"] = when.isoformat()
+    return True
+
+
+def cmd_brief(argv):
+    """Dates inside their reminder window (the item's lead_days, else the list's)."""
+    if not LIST.exists():
+        return 0
+    queue = "--queue" in argv
+    cfg = load()
+    today = dt.date.today()
+    default_lead = int(cfg.get("lead_days", 7))
+    changed = False
+    for when, left, item in upcoming(cfg, today, 400):
+        lead = int(item.get("lead_days", default_lead))
+        if item.get("action") in ACTION_LEAD:
+            lead = max(lead, ACTION_LEAD[item["action"]])
+        if left > lead:
+            continue
+        tag = "[work] " if is_work(item) else ""
+        rel = f" ({item['relation']})" if item.get("relation") else ""
+        line = f"{tag}{when_text(when, left)}: {describe(item, when)}{rel}."
+        action = item.get("action")
+        if action and action != "none":
+            line += f" Action: {action}."
+            if action in ("card", "note"):
+                draft = KIT / "briefs/cards" / f"{when:%Y-%m-%d}-{slug(item['name'])}-{action}.md"
+                rel_path = draft.relative_to(KIT).as_posix()
+                line += (f" Draft: {rel_path}" if draft.exists() else f" Draft needed: {rel_path}")
+        if item.get("note"):
+            line += f" Note: {item['note']}"
+        print(line)
+        if queue and TODO.exists():
+            changed |= queue_todo(item, when)
+    if changed:
+        save(cfg)
+    return 0
+
+
+def opt(argv, flag, default=None):
+    if flag in argv:
+        i = argv.index(flag)
+        if i + 1 >= len(argv):
+            raise ValueError(f"{flag} needs a value")
+        val = argv[i + 1]
+        del argv[i:i + 2]
+        return val
+    return default
+
+
+def cmd_add(argv):
+    argv = list(argv)
+    what = opt(argv, "--what", "birthday")
+    action = opt(argv, "--action")
+    lead = opt(argv, "--lead")
+    relation = opt(argv, "--relation")
+    note = opt(argv, "--note")
+    work = "--work" in argv
+    once = "--once" in argv
+    argv = [a for a in argv if a not in ("--work", "--once")]
+    if len(argv) < 2:
+        raise ValueError("kit-dates add NAME DATE [--what birthday] [--work] [--action card] ...")
+    y, mo, d = parse_date(argv[-1])
+    name = " ".join(argv[:-1]).strip()
+    if action and action not in ACTIONS:
+        raise ValueError(f"action is one of: {', '.join(sorted(ACTIONS))}")
+    if once and not y:
+        y = dt.date.today().year
+        if dt.date(y, mo, d) < dt.date.today():
+            y += 1
+    cfg = load()
+    dup = [i for i in cfg.get("items", []) if i["name"].lower() == name.lower()
+           and (i.get("what") or "").lower() == what.lower()]
+    if dup:
+        raise ValueError(f"{name}'s {what} is already on the list")
+    item = {"name": name, "what": what, "date": f"{y:04d}-{mo:02d}-{d:02d}" if y else f"{mo:02d}-{d:02d}"}
+    if work:
+        item["side"] = "work"
+    for key, val in (("action", action), ("relation", relation), ("note", note)):
+        if val:
+            item[key] = val
+    if lead:
+        item["lead_days"] = int(lead)
+    if once:
+        item["once"] = True
+    cfg.setdefault("items", []).append(item)
+    save(cfg)
+    when = next_occurrence(item, dt.date.today())
+    print(f"Added: {describe(item, when) if when else name}, next {when:%a %d-%b-%Y}" if when
+          else f"Added: {name}")
+    return 0
+
+
+def cmd_remove(argv):
+    argv = list(argv)
+    what = opt(argv, "--what")
+    name = " ".join(argv).strip().lower()
+    cfg = load()
+    hits = [i for i in cfg.get("items", []) if i["name"].lower() == name
+            and (not what or (i.get("what") or "").lower() == what.lower())]
+    if not hits:
+        hits = [i for i in cfg.get("items", []) if name and name in i["name"].lower()
+                and (not what or (i.get("what") or "").lower() == what.lower())]
+    if len(hits) != 1:
+        raise LookupError(f"{len(hits)} dates match {name!r}" + (": " + "; ".join(
+            f"{i['name']} ({i.get('what')})" for i in hits) if hits else ""))
+    cfg["items"].remove(hits[0])
+    save(cfg)
+    print(f"Removed: {hits[0]['name']} ({hits[0].get('what')})")
+    return 0
+
+
+def cmd_json(argv):
+    days = int(opt(list(argv), "--days", "30"))
+    cfg = load()
+    out = []
+    for when, left, item in upcoming(cfg, dt.date.today(), days):
+        out.append({"date": when.isoformat(), "days_left": left, "label": describe(item, when),
+                    "name": item["name"], "what": item.get("what"), "relation": item.get("relation"),
+                    "side": "work" if is_work(item) else "personal", "action": item.get("action")})
+    print(json.dumps(out, indent=2))
+    return 0
+
+
+def main(argv):
+    cmds = {"all": cmd_all, "add": cmd_add, "remove": cmd_remove, "brief": cmd_brief}
+    try:
+        if argv and argv[0] in cmds:
+            return cmds[argv[0]](argv[1:])
+        if "--json" in argv:
+            return cmd_json(argv)
+        if argv and argv[0] != "--days":
+            print(__doc__.split("\n\n")[1])
+            return 2
+        return cmd_upcoming(argv)
+    except (ValueError, LookupError) as e:
+        print(f"kit-dates: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

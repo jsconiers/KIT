@@ -8,6 +8,45 @@ versions follow [semantic versioning](https://semver.org).
 ## [Unreleased]
 
 ### Added
+- `kit-touch`: keep in touch. Who you haven't talked to in a while, each with their own rhythm; past
+  calls and meals on the calendar ("Call with NAME", "Lunch with NAME") count as talking, coming ones
+  mean it's planned; `talked`, `snooze`, `scan [--add]`, and brief lines (work contacts tagged [work]).
+  Texting Kit: `touch`, `talked to NAME [yesterday]` (also `called`, `texted`).
+- `kit-feedback`: a private feedback log on the people you lead (praise, coaching, observations,
+  goals, concerns): `prep NAME` for a 1:1, `review NAME` for a review period, `met`, `done`, and [work]
+  brief lines (today's 1:1s from the calendar; who's had no note lately). Kept in feedback/,
+  owner-only, never committed, exported, or texted.
+- `kit-meetload`: a meeting load audit, week by week: hours and share of working hours, recurring
+  meetings and their weekly cost (and the ones you run), back-to-back runs, focus blocks left,
+  meetings outside working hours, double bookings, and suggestions; `--holds` drafts focus-time holds
+  through `kit-holds`; `--json` and `--ics` inputs (daily, weekly, and monthly repeats expanded);
+  `work` and `personal` profiles; `brief` lines. Windows `kitcal` events now carry `my_response`,
+  `i_organize`, and `show_as`.
+- `kit-library`: scanned PDFs are read with on-device OCR (Apple Vision, `kit-pdftext --ocr`; settings
+  `ocr.pdf` and `ocr.max_pages`); `mirror` copies Kit Output one way to a synced folder (`output.mirror`,
+  for example iCloud Drive) after each delivery; `fetch ID [--to-phone]` stages a cataloged file for
+  sending. KitLibrary.app also runs mirror and fetch. A kind added in a later version now appears in an
+  existing collections.json on its own.
+- Texting Kit: `send N` texts the Nth document of the last `find` or `sermons` list as an attachment
+  (and copies it to the synced "Sent to phone" folder); `kit-textback propose KIND JSON SUMMARY` lets
+  Kit's own jobs ask for a code-confirmed change by text.
+- `kit-library`: collections (folders you choose, each with a name, description, tags, tag rules, and
+  exclusions) cataloged into a full-text index with each document's text (Word, RTF, OpenDocument,
+  PowerPoint, Excel, PDF through the new `kit-pdftext`, web pages, EPUB, Scrivener) and the scripture
+  passages it cites; `search` (phrases, OR, prefixes, `--in`, `--tag`, `--type`, `--year`, `--ref`),
+  `show --text` (agents read Office files from the catalog), `recent`, `tags`. An output folder with kinds
+  (`deliver`: markdown arrives as Word, never overwrites without `--replace`, cataloged on arrival).
+  macOS: KitLibrary.app holds the Documents permission and runs only index, flush, and check; a
+  nightly job and a WatchPaths refresh. Long digit runs are blanked from the stored text.
+- Texting Kit: `week`, `mail`, `find` / `find more`, `sermons on PASSAGE`, `approve CODE ITEMS`; changes
+  confirmed by a one-time code (`event`, `move`, `draft` (a Mail draft only), and plug-in ACTIONS), with
+  `yes CODE` / `no`; `TEXTBACK_PARSE_MODEL` (default haiku) for reading events out of texts; questions by
+  text can search the library.
+- `kitmail inbox` reads Mail's own index (headers only) through KitMessages.app when it has Full Disk
+  Access: allowed accounts only, failing closed when an exclusion can't be verified; otherwise it asks
+  Mail as before. Doctor checks for the library and the quick inbox.
+- `kit_claude.py`: one helper for small headless Claude jobs (budget check, cost record, tool limits,
+  just the MCP servers a job needs).
 - Letters desk (`kit/agents/letters-desk.md`, setup in `memory/context/letters.md`, log in
   `letters/log.md`): formal personal letters from draft to reply, a log of what went out (date,
   method, certified tracking, reply due), and follow-ups. Never sends anything.
@@ -220,6 +259,8 @@ versions follow [semantic versioning](https://semver.org).
   `--allow-plain` (or encryption).
 
 ### Fixed
+- Texting Kit: in `date NAME MM-DD birthday card`, the action word (card, call, gift, note) was read
+  as part of what the date is, because a later setting reused its name.
 - Windows installer: Kit 1.4.0 left every file in `%USERPROFILE%\Claude\Agents\kit` with no access
   entries, so Kit couldn't read its own files and stopped loading, while the installer reported
   success. It applied the kit home's `(OI)(CI)` grant to each file with `/T`, where it can't apply.

@@ -1,0 +1,622 @@
+#!/usr/bin/env python3
+"""kit-meetload: how much of your week goes to meetings, and what to change. Reads the calendar; changes nothing.
+
+  kit-meetload [--weeks 2] [--ahead] [--from DATE] [--profile work|personal] [--json FILE | --ics FILE]
+               [--write] [--holds]
+        the audit, week by week: meetings and hours, the share of working hours, recurring meetings and
+        what they cost each week, back-to-back runs, focus blocks left (90 minutes or more free inside
+        working hours), meetings outside working hours, and double bookings, then suggestions.
+        The window is the last --weeks weeks (this week included); --ahead looks at the coming ones
+  kit-meetload brief [--profile P] [--ahead]
+        two or three lines for the weekly review (a work profile's lines are tagged [work])
+
+  --profile work      meetings are events with other people on them, inside working hours from
+                      memory/context/calendar.md ("Working hours and time zone"; 09:00-17:00 if unset);
+                      your own blocks (holds, focus time) are counted apart. The default on Windows
+  --profile personal  every timed event counts, 07:00 to 21:00 every day; no focus blocks. The default
+                      on a Mac, where the work calendar usually isn't
+  --json FILE         events from a file in kitcal's shape instead of the calendar
+  --ics FILE          events from an .ics export (Outlook, Google, iCloud), for a calendar kitcal can't
+                      read; daily, weekly, and monthly repeats are expanded
+  --write             save the report to briefs/meetload-YYYY-MM-DD.md and deliver it to Kit Output >
+                      Reports (kit-library), when there's an output folder
+  --holds             draft focus-time holds in next week's longest free stretches (kit-holds: .ics files
+                      you open and accept; nothing reaches the calendar until you do)
+
+Declined meetings, events marked free, and all-day events never count. Meeting titles stay on this
+computer: the report is a local file, and the brief lines give counts, not titles. Settings in
+memory/context/calendar.md; MEETLOAD_FOCUS_MIN (default 90) and MEETLOAD_BUFFER_MIN (default 5, the gap
+that still counts as back to back) in Kit's config.
+"""
+import datetime as dt
+import json
+import os
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import kit_daily as kd  # noqa: E402
+
+KIT = kd.KIT
+HERE = pathlib.Path(__file__).resolve().parent
+DAY = dt.timedelta(days=1)
+
+
+class Fail(Exception):
+    pass
+
+
+def setting(key, default):
+    m = re.search(rf'^\s*{key}="?([^"\n]*)"?', kd.read(kd.CONFIG), re.M)
+    return (m.group(1).strip() if m else "") or os.environ.get(key) or default
+
+
+def today():
+    return kd.today()
+
+
+def working_hours():
+    text = kd.setting(kd.read(kd.CONTEXT / "calendar.md"), "Working hours and time zone") or ""
+    m = re.search(r"(\d{1,2}):?(\d{2})?\s*(?:-|–|to)\s*(\d{1,2}):?(\d{2})?", text)
+    if m:
+        return dt.time(int(m.group(1)), int(m.group(2) or 0)), dt.time(int(m.group(3)), int(m.group(4) or 0)), ""
+    return dt.time(9), dt.time(17), "working hours aren't set in memory/context/calendar.md, so 09:00-17:00 is assumed"
+
+
+# ------------------------------------------------------------------ reading events
+def parse_when(s):
+    s = str(s or "").strip()
+    if not s:
+        return None
+    try:
+        t = dt.datetime.fromisoformat(s.replace("Z", "+00:00").replace(" ", "T") if len(s) > 10 else s)
+    except ValueError:
+        return None
+    if isinstance(t, dt.datetime) and t.tzinfo is not None:
+        t = t.astimezone().replace(tzinfo=None)
+    return t
+
+
+def kitcal_cmd():
+    win = KIT / ".install/platform/windows/calendar/kitcal.py"
+    if os.name == "nt" and win.exists():
+        return [sys.executable, str(win)]
+    exe = shutil.which("kitcal") or str(pathlib.Path.home() / ".local/bin/kitcal")
+    if not os.path.exists(exe):
+        raise Fail("kitcal isn't installed, so the calendar can't be read (or give --json or --ics)")
+    return [exe]
+
+
+def from_kitcal(start, end):
+    r = subprocess.run(kitcal_cmd() + ["events", "--from", start.isoformat(), "--to", (end - DAY).isoformat()],
+                       capture_output=True, text=True, timeout=300)
+    if r.returncode != 0:
+        raise Fail(f"the calendar couldn't be read: {(r.stderr or r.stdout).strip()[:200]}")
+    return json.loads(r.stdout or "[]")
+
+
+def unfold(text):
+    return re.sub(r"\r?\n[ \t]", "", text).splitlines()
+
+
+def ics_time(value, params):
+    v = value.strip()
+    if "VALUE=DATE" in params.upper() and len(v) == 8:
+        return dt.datetime.strptime(v, "%Y%m%d"), True
+    utc = v.endswith("Z")
+    t = dt.datetime.strptime(v.rstrip("Z")[:15], "%Y%m%dT%H%M%S")
+    if utc:
+        t = t.replace(tzinfo=dt.timezone.utc).astimezone().replace(tzinfo=None)
+    return t, False
+
+
+def expand(ev, rule, start, end):
+    """Occurrence starts of a repeating event inside [start, end): DAILY, WEEKLY (BYDAY), MONTHLY (the same day
+    of the month), with INTERVAL, COUNT, and UNTIL. Other rules give the first occurrence only."""
+    r = dict(p.split("=", 1) for p in rule.split(";") if "=" in p)
+    freq, step = r.get("FREQ", ""), int(r.get("INTERVAL", "1") or 1)
+    count = int(r["COUNT"]) if r.get("COUNT", "").isdigit() else None
+    until = ics_time(r["UNTIL"], "VALUE=DATE" if len(r["UNTIL"]) == 8 else "")[0] if r.get("UNTIL") else None
+    codes = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"]
+    days = [d[-2:] for d in r.get("BYDAY", "").split(",") if d[-2:] in codes]
+    first, out, n, k, cur = ev["start"], [], 0, 0, ev["start"]
+    if freq not in ("DAILY", "WEEKLY", "MONTHLY"):
+        return [first] if start <= first < end else []
+    for _ in range(5000):
+        if freq == "MONTHLY":
+            y, m = divmod(first.month - 1 + k * step, 12)
+            k += 1
+            try:
+                cur = first.replace(year=first.year + y, month=m + 1)
+            except ValueError:                   # the 31st in a shorter month: no meeting that month
+                continue
+        if freq == "WEEKLY" and days:
+            monday = cur - dt.timedelta(days=cur.weekday())
+            cands = sorted(monday + dt.timedelta(days=codes.index(d)) for d in days)
+        elif freq == "DAILY" and days and codes[cur.weekday()] not in days:
+            cands = []
+        else:
+            cands = [cur]
+        for c in cands:
+            if c < first:
+                continue
+            if (until and c > until) or (count is not None and n >= count) or c >= end:
+                return out
+            n += 1
+            if c >= start:
+                out.append(c)
+        if freq == "DAILY":
+            cur += dt.timedelta(days=step)
+        elif freq == "WEEKLY":
+            cur += dt.timedelta(weeks=step)
+    return out
+
+
+def from_ics(path, start, end):
+    try:
+        lines = unfold(pathlib.Path(path).read_text(encoding="utf-8", errors="replace"))
+    except OSError as e:
+        raise Fail(f"can't read {path}: {e}")
+    events, cur = [], None
+    for line in lines:
+        if line == "BEGIN:VEVENT":
+            cur = {"exdates": []}
+        elif line == "END:VEVENT" and cur is not None:
+            events.append(cur)
+            cur = None
+        elif cur is not None and ":" in line:
+            head, value = line.split(":", 1)
+            name, _, params = head.partition(";")
+            name = name.upper()
+            try:
+                if name == "DTSTART":
+                    cur["start"], cur["all_day"] = ics_time(value, params)
+                elif name == "DTEND":
+                    cur["end"] = ics_time(value, params)[0]
+                elif name == "SUMMARY":
+                    cur["title"] = value.replace("\\,", ",").replace("\\;", ";").replace("\\n", " ").strip()
+                elif name == "RRULE":
+                    cur["rrule"] = value
+                elif name == "EXDATE":
+                    cur["exdates"] += [ics_time(v, params)[0] for v in value.split(",")]
+                elif name == "RECURRENCE-ID":
+                    cur["recurrence_id"] = ics_time(value, params)[0]
+                elif name == "UID":
+                    cur["uid"] = value
+                elif name == "ATTENDEE":
+                    cur["attendees"] = cur.get("attendees", 0) + 1
+                elif name == "TRANSP" and value.strip().upper() == "TRANSPARENT":
+                    cur["show_as"] = "free"
+                elif name == "STATUS" and value.strip().upper() == "CANCELLED":
+                    cur["cancelled"] = True
+            except ValueError:
+                continue
+    moved = {(e.get("uid"), e["recurrence_id"]) for e in events if e.get("recurrence_id")}
+    out = []
+    for e in events:
+        if "start" not in e or e.get("cancelled"):
+            continue
+        length = (e.get("end") or e["start"] + dt.timedelta(hours=1)) - e["start"]
+        starts = expand(e, e["rrule"], start, end) if e.get("rrule") else [e["start"]]
+        for s in starts:
+            if s in e["exdates"] or (e.get("rrule") and (e.get("uid"), s) in moved):
+                continue
+            out.append({"title": e.get("title", ""), "start": s.isoformat(sep=" ", timespec="minutes"),
+                        "end": (s + length).isoformat(sep=" ", timespec="minutes"), "all_day": e.get("all_day", False),
+                        "recurring": bool(e.get("rrule") or e.get("recurrence_id")),
+                        "attendees": e.get("attendees", 0), "show_as": e.get("show_as")})
+    return out
+
+
+TRAVEL = re.compile(r"\b(flights?|fly|rental|pick ?up|drop ?off|reminder|hotel|check[- ]?in|check[- ]?out|travel|"
+                    r"trip|depart|departs|arrive|arrives)\b", re.I)
+LONG = dt.timedelta(hours=12)
+
+
+def normalize(raw, start, end, profile):
+    """Events inside the window that count: (meetings, own blocks, long spans). Each is a dict with s, e, title,
+    and so on. A timed event of 12 hours or more (a trip, a conference) is a span, not a meeting, and the same
+    event on two calendars counts once."""
+    meetings, blocks, spans, seen = [], [], [], set()
+    for ev in raw if isinstance(raw, list) else []:
+        if ev.get("all_day"):
+            continue
+        if str(ev.get("my_response") or "").lower() in ("declined", "decline"):
+            continue
+        if str(ev.get("show_as") or "").lower() == "free":
+            continue
+        s, e = parse_when(ev.get("start")), parse_when(ev.get("end") or ev.get("start"))
+        if not s or not e or e <= s or s >= end or e <= start:
+            continue
+        n = ev.get("attendees")
+        people = len(n) if isinstance(n, list) else int(n or 0)
+        row = {"s": s, "e": e, "title": (ev.get("title") or ev.get("subject") or "").strip() or "(no title)",
+               "recurring": bool(ev.get("recurring")), "people": people,
+               "mine": bool(ev.get("i_organize")) or str(ev.get("my_response") or "").lower() == "organizer"}
+        key = (row["title"].lower(), s)
+        if key in seen:
+            continue
+        seen.add(key)
+        if e - s >= LONG:
+            spans.append(row)
+        elif profile == "work" and people == 0 and not row["mine"]:
+            blocks.append(row)
+        else:
+            meetings.append(row)
+    by = lambda r: r["s"]  # noqa: E731
+    return sorted(meetings, key=by), sorted(blocks, key=by), sorted(spans, key=by)
+
+
+# ------------------------------------------------------------------ the numbers
+def merged(rows):
+    """Busy intervals with overlaps merged."""
+    out = []
+    for r in sorted(rows, key=lambda r: r["s"]):
+        if out and r["s"] <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], r["e"])
+        else:
+            out.append([r["s"], r["e"]])
+    return out
+
+
+def hours(intervals):
+    return sum((b - a).total_seconds() for a, b in intervals) / 3600
+
+
+def day_bounds(d, profile, wh):
+    if profile == "personal":
+        return dt.datetime.combine(d, dt.time(7)), dt.datetime.combine(d, dt.time(21))
+    return dt.datetime.combine(d, wh[0]), dt.datetime.combine(d, wh[1])
+
+
+def work_day(d, profile):
+    return profile == "personal" or d.weekday() < 5
+
+
+def runs(rows, buffer_min):
+    """Back-to-back runs: three or more meetings, or two hours or more, with gaps of buffer_min or less."""
+    out, cur = [], []
+    for r in sorted(rows, key=lambda r: r["s"]):
+        if cur and r["s"] - max(x["e"] for x in cur) <= dt.timedelta(minutes=buffer_min) and r["s"].date() == cur[0]["s"].date():
+            cur.append(r)
+        else:
+            if cur:
+                out.append(cur)
+            cur = [r]
+    if cur:
+        out.append(cur)
+    return [c for c in out if len(c) >= 3 or (max(x["e"] for x in c) - c[0]["s"]) >= dt.timedelta(hours=2) and len(c) >= 2]
+
+
+def gaps(day, busy, profile, wh, minimum):
+    a, b = day_bounds(day, profile, wh)
+    free, t = [], a
+    for s, e in busy:
+        if e <= a or s >= b:
+            continue
+        if s > t and (s - t) >= dt.timedelta(minutes=minimum):
+            free.append((t, s))
+        t = max(t, e)
+    if b > t and (b - t) >= dt.timedelta(minutes=minimum):
+        free.append((t, b))
+    return free
+
+
+def doubles(rows, profile="work"):
+    """Pairs that overlap. On the personal profile, travel and reminders (a flight, a rental pickup) don't count."""
+    out = []
+    for i, a in enumerate(rows):
+        for b in rows[i + 1:]:
+            if b["s"] >= a["e"]:
+                break
+            if profile == "personal" and (TRAVEL.search(a["title"]) or TRAVEL.search(b["title"])):
+                continue
+            if a["title"].lower() == b["title"].lower():          # one event on two calendars
+                continue
+            if b["s"] < a["e"] and a["s"] < b["e"]:
+                out.append((a, b))
+    return out
+
+
+def norm_title(t):
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]+", " ", t.lower())).strip()
+
+
+def audit(meetings, blocks, start, end, profile, wh, spans=()):
+    focus_min = int(setting("MEETLOAD_FOCUS_MIN", "90"))
+    buffer_min = int(setting("MEETLOAD_BUFFER_MIN", "5"))
+    weeks, d = [], start
+    while d < end:
+        w_end = min(d + dt.timedelta(days=7), end)
+        days = [d + dt.timedelta(days=i) for i in range((w_end - d).days)]
+        ms = [m for m in meetings if d <= m["s"].date() < w_end]
+        busy_all = merged(ms + [b for b in blocks if d <= b["s"].date() < w_end])
+        in_hours, avail, focus, outside = [], 0.0, [], []
+        for day in days:
+            a, b = day_bounds(day, profile, wh)
+            if work_day(day, profile):
+                avail += (b - a).total_seconds() / 3600
+                focus += gaps(day, [x for x in busy_all if x[0].date() == day], profile, wh, focus_min)
+            for m in ms:
+                if m["s"].date() != day:
+                    continue
+                if work_day(day, profile):
+                    s, e = max(m["s"], a), min(m["e"], b)
+                    if e > s:
+                        in_hours.append({"s": s, "e": e})
+                if (not work_day(day, profile)) or m["s"] < a or m["e"] > b:
+                    outside.append(m)
+        weeks.append({"start": d, "end": w_end, "meetings": ms, "hours": hours(merged(ms)),
+                      "in_hours": hours(merged(in_hours)), "available": avail,
+                      "runs": runs(ms, buffer_min), "focus": focus, "outside": outside, "doubles": doubles(ms, profile),
+                      "blocks": [b for b in blocks if d <= b["s"].date() < w_end]})
+        d = w_end
+    groups = {}
+    for m in meetings:
+        if m["recurring"]:
+            groups.setdefault(norm_title(m["title"]), []).append(m)
+    n_weeks = max(1, (end - start).days / 7)
+    recurring = []
+    for key, ms in groups.items():
+        mins = sum((m["e"] - m["s"]).total_seconds() / 60 for m in ms)
+        recurring.append({"title": ms[0]["title"], "count": len(ms), "minutes": round(mins / len(ms)),
+                          "weekly_hours": mins / 60 / n_weeks, "mine": any(m["mine"] for m in ms),
+                          "people": max(m["people"] for m in ms)})
+    recurring.sort(key=lambda r: -r["weekly_hours"])
+    return {"weeks": weeks, "recurring": recurring, "focus_min": focus_min, "buffer_min": buffer_min,
+            "spans": list(spans)}
+
+
+def suggestions(a, profile):
+    out = []
+    wk = [w for w in a["weeks"] if (w["end"] - w["start"]).days >= 5] or a["weeks"]
+    if not wk:
+        return out
+    share = sum(w["in_hours"] for w in wk) / max(1, sum(w["available"] for w in wk))
+    rec_h = sum(r["weekly_hours"] for r in a["recurring"])
+    if profile == "work" and share >= 0.5:
+        out.append(f"Meetings fill {share:.0%} of your working hours. Start with the recurring list below: "
+                   "for each, would you miss it? Could it be shorter, less often, or an update in writing?")
+    if rec_h >= 4:
+        top = a["recurring"][:3]
+        out.append(f"Recurring meetings take about {rec_h:.1f} hours a week. The biggest: " +
+                   "; ".join(f"{r['title']} ({r['weekly_hours']:.1f} h)" for r in top) + ".")
+    mine = [r for r in a["recurring"] if r["mine"]]
+    if mine:
+        out.append(f"You run {len(mine)} of them ({', '.join(r['title'] for r in mine[:3])}): try 25- and 50-minute "
+                   "defaults, every other week, or ending early when the agenda's done.")
+    run_n = sum(len(w["runs"]) for w in wk) / len(wk)
+    if run_n >= 2:
+        out.append(f"About {run_n:.0f} back-to-back runs a week. A few minutes between meetings helps: end them "
+                   "five or ten minutes early (Outlook: File > Options > Calendar > Shorten appointments and meetings).")
+    if profile == "work":
+        focus_n = sum(len(w["focus"]) for w in wk) / len(wk)
+        if focus_n < 3:
+            out.append(f"Only about {focus_n:.0f} focus block{'s' if round(focus_n) != 1 else ''} "
+                       f"({a['focus_min']} minutes or more) a week. kit-meetload --holds drafts focus-time holds "
+                       "for next week's longest free stretches.")
+    outside = sum(len(w["outside"]) for w in wk)
+    if outside >= 2 and profile == "work":
+        out.append(f"{outside} meeting{'s' if outside > 1 else ''} outside working hours. If they're with other "
+                   "time zones, ask to rotate the time.")
+    dbl = sum(len(w["doubles"]) for w in wk)
+    if dbl:
+        out.append(f"{dbl} double booking{'s' if dbl > 1 else ''}: decide which to skip, or send someone, before "
+                   "the day.")
+    long_ones = [m for w in wk for m in w["meetings"] if (m["e"] - m["s"]) >= dt.timedelta(minutes=90)]
+    if len(long_ones) >= 3 and profile == "work":
+        out.append(f"{len(long_ones)} meetings of 90 minutes or more. Do they need the whole time?")
+    if profile == "personal":
+        busiest = max(((d, sum(1 for w in wk for m in w["meetings"] if m["s"].date() == d))
+                       for w in wk for d in {m["s"].date() for m in w["meetings"]}), key=lambda x: x[1], default=None)
+        if busiest and busiest[1] >= 4:
+            out.append(f"The busiest day was {busiest[0]:%a %d-%b}, with {busiest[1]} things: leave room around days "
+                       "like that.")
+    return out
+
+
+# ------------------------------------------------------------------ output
+def clock(t):
+    return t.strftime("%I:%M %p").lstrip("0")
+
+
+def report(a, start, end, profile, wh, source, note):
+    lines = [f"# Meeting load, {start:%a %d-%b} to {(end - DAY):%a %d-%b-%Y} ({profile})", "",
+             f"From {source}. " + (f"Working hours {wh[0]:%H:%M}-{wh[1]:%H:%M}" if profile == "work" else
+                                    "07:00 to 21:00 every day") +
+             ". Declined meetings, events marked free, and all-day events don't count." +
+             (f" Note: {note}." if note and profile == "work" else ""), ""]
+    if a.get("spans"):
+        lines += [f"Left out as trips or long events (12 hours or more): " +
+                  "; ".join(f"{x['title'][:40]} ({x['s']:%d-%b})" for x in a["spans"][:6]) + ".", ""]
+    head = ("| Week of | Meetings | Hours | Share of working hours | Back-to-back runs | Focus blocks | Outside hours "
+            "| Double-booked |" if profile == "work" else
+            "| Week of | Events | Hours | Back-to-back runs | Double-booked |")
+    lines += ["## The numbers", "", head, "|" + "---|" * (head.count("|") - 1)]
+    for w in a["weeks"]:
+        if profile == "work":
+            lines.append(f"| {w['start']:%a %d-%b} | {len(w['meetings'])} | {w['hours']:.1f} | "
+                         f"{(w['in_hours'] / w['available']) if w['available'] else 0:.0%} | {len(w['runs'])} | "
+                         f"{len(w['focus'])} | {len(w['outside'])} | {len(w['doubles'])} |")
+        else:
+            lines.append(f"| {w['start']:%a %d-%b} | {len(w['meetings'])} | {w['hours']:.1f} | {len(w['runs'])} | "
+                         f"{len(w['doubles'])} |")
+    if profile == "work":
+        own = sum(len(w["blocks"]) for w in a["weeks"])
+        if own:
+            lines += ["", f"Your own blocks (holds, focus time, appointments with no one else): {own}, "
+                          f"{hours(merged([b for w in a['weeks'] for b in w['blocks']])):.1f} hours. Not counted as meetings."]
+    if a["recurring"]:
+        lines += ["", "## Recurring meetings", "", "| Meeting | Length | Times | Hours a week | People | You run it |",
+                  "|---|---|---|---|---|---|"]
+        for r in a["recurring"][:15]:
+            lines.append(f"| {r['title'][:60].replace('|', '/')} | {r['minutes']} min | {r['count']} | "
+                         f"{r['weekly_hours']:.1f} | {r['people'] or ''} | {'yes' if r['mine'] else ''} |")
+    rs = [c for w in a["weeks"] for c in w["runs"]]
+    if rs:
+        lines += ["", f"## Back-to-back runs (gaps of {a['buffer_min']} minutes or less)", ""]
+        for c in rs[:15]:
+            lines.append(f"- {c[0]['s']:%a %d-%b} {clock(c[0]['s'])} to {clock(max(x['e'] for x in c))}: "
+                         f"{len(c)} meetings")
+    ds = [p for w in a["weeks"] for p in w["doubles"]]
+    if ds:
+        lines += ["", "## Double bookings", ""]
+        for x, y in ds[:15]:
+            lines.append(f"- {x['s']:%a %d-%b} {clock(max(x['s'], y['s']))}: \"{x['title'][:50]}\" and \"{y['title'][:50]}\"")
+    if profile == "work":
+        out = [m for w in a["weeks"] for m in w["outside"]]
+        if out:
+            lines += ["", "## Outside working hours", ""]
+            for m in out[:15]:
+                lines.append(f"- {m['s']:%a %d-%b} {clock(m['s'])} to {clock(m['e'])}: \"{m['title'][:60]}\"")
+        fb = [f for w in a["weeks"] for f in w["focus"]]
+        lines += ["", f"## Focus blocks ({a['focus_min']} minutes or more free)", ""]
+        lines += [f"- {s:%a %d-%b} {clock(s)} to {clock(e)}" for s, e in fb[:20]] or ["None."]
+    sug = suggestions(a, profile)
+    lines += ["", "## Suggestions", ""] + ([f"{i}. {s}" for i, s in enumerate(sug, 1)] or ["Nothing stands out."])
+    return "\n".join(lines) + "\n"
+
+
+def brief_lines(a, profile, ahead):
+    wk = a["weeks"][-1] if a["weeks"] else None
+    if not wk or not wk["meetings"]:
+        return []
+    tag = "[work] " if profile == "work" else ""
+    label = "Next week" if ahead else "This week"
+    if profile == "work":
+        share = wk["in_hours"] / wk["available"] if wk["available"] else 0
+        first = (f"{tag}{label}: {len(wk['meetings'])} meetings, {wk['hours']:.1f} hours ({share:.0%} of working hours), "
+                 f"{len(wk['focus'])} focus block{'s' if len(wk['focus']) != 1 else ''}, "
+                 f"{len(wk['runs'])} back-to-back run{'s' if len(wk['runs']) != 1 else ''}"
+                 + (f", {len(wk['doubles'])} double-booked" if wk["doubles"] else "") + ".")
+    else:
+        days = {}
+        for m in wk["meetings"]:
+            days[m["s"].date()] = days.get(m["s"].date(), 0) + 1
+        busy = max(days.items(), key=lambda x: x[1])
+        first = (f"{label}: {len(wk['meetings'])} things on the calendar, {wk['hours']:.1f} hours; busiest "
+                 f"{busy[0]:%a} ({busy[1]})" + (f"; {len(wk['doubles'])} double-booked" if wk["doubles"] else "") + ".")
+    out = [first]
+    rec_h = sum(r["weekly_hours"] for r in a["recurring"])
+    if rec_h >= 1:
+        out.append(f"{tag}Recurring meetings: about {rec_h:.1f} hours a week (kit-meetload for the list).")
+    return out
+
+
+def deliver(path):
+    lib = HERE / "kit-library"
+    if not lib.exists():
+        return False
+    r = subprocess.run([sys.executable, str(lib), "deliver", str(path), "--kind", "reports", "--replace"],
+                       capture_output=True, text=True, timeout=900)
+    return r.returncode == 0
+
+
+def propose_holds(meetings, blocks, profile, wh, focus_min):
+    nxt = today() + dt.timedelta(days=7 - today().weekday())
+    busy = merged(meetings + blocks)
+    found = []
+    for i in range(5):
+        day = nxt + dt.timedelta(days=i)
+        for s, e in gaps(day, [x for x in busy if x[0].date() == day], profile, wh, max(120, focus_min)):
+            found.append((e - s, s))
+    picks = sorted(found, key=lambda x: -x[0])[:4]
+    if not picks:
+        return "No free stretch of two hours or more next week, so no holds."
+    plan = KIT / "briefs" / f"meetload-holds-{today().isoformat()}.txt"
+    plan.parent.mkdir(parents=True, exist_ok=True)
+    plan.write_text("".join(f"{s:%Y-%m-%d %H:%M} {min(120, int(g.total_seconds() // 60))}m Focus time\n"
+                            for g, s in sorted(picks, key=lambda x: x[1])))
+    holds = HERE / "kit-holds"
+    r = subprocess.run([sys.executable, str(holds), "propose", "--from-plan", str(plan), "--days", "12"],
+                       capture_output=True, text=True, timeout=300)
+    return (r.stdout or r.stderr).strip()
+
+
+def opt(argv, name, default=None):
+    if name in argv:
+        i = argv.index(name)
+        if i + 1 >= len(argv):
+            raise Fail(f"{name} needs a value")
+        v = argv[i + 1]
+        del argv[i:i + 2]
+        return v
+    return default
+
+
+def flag(argv, name):
+    if name in argv:
+        argv.remove(name)
+        return True
+    return False
+
+
+def main(argv):
+    argv = list(argv)
+    if argv and argv[0] in ("-h", "--help", "help"):
+        print(__doc__)
+        return 0
+    try:
+        brief = bool(argv) and argv[0] == "brief"
+        if brief:
+            argv = argv[1:]
+        profile = opt(argv, "--profile") or ("work" if os.name == "nt" else "personal")
+        if profile not in ("work", "personal"):
+            raise Fail("--profile is work or personal")
+        weeks = int(opt(argv, "--weeks", "1" if brief else "2"))
+        frm, js, ics = opt(argv, "--from"), opt(argv, "--json"), opt(argv, "--ics")
+        ahead, write, holds = flag(argv, "--ahead"), flag(argv, "--write"), flag(argv, "--holds")
+        if argv:
+            raise Fail(f"unknown: {' '.join(argv)} (kit-meetload --help)")
+        monday = today() - dt.timedelta(days=today().weekday())
+        if frm:
+            try:
+                start = kd.parse_date(frm) or dt.date.fromisoformat(frm)
+            except ValueError:
+                raise Fail(f"not a date: {frm!r}")
+            start -= dt.timedelta(days=start.weekday())
+        elif ahead:
+            start = monday + dt.timedelta(days=7)
+        else:
+            start = monday - dt.timedelta(days=7 * (weeks - 1))
+        end = start + dt.timedelta(days=7 * weeks)
+        s_dt, e_dt = dt.datetime.combine(start, dt.time()), dt.datetime.combine(end, dt.time())
+        if js:
+            raw, source = json.loads(pathlib.Path(js).read_text(encoding="utf-8")), pathlib.Path(js).name
+        elif ics:
+            raw, source = from_ics(ics, s_dt, e_dt), pathlib.Path(ics).name
+        else:
+            raw, source = from_kitcal(start, end), "the calendar on this computer (kitcal)"
+        wh0, wh1, note = working_hours()
+        wh = (wh0, wh1)
+        meetings, blocks, spans = normalize(raw, s_dt, e_dt, profile)
+        a = audit(meetings, blocks, start, end, profile, wh, spans)
+        if brief:
+            lines = brief_lines(a, profile, ahead)
+            if lines:
+                print("Meeting load" if profile == "work" else "Calendar load")
+                print("\n".join(lines))
+            return 0
+        text = report(a, start, end, profile, wh, source, note)
+        print(text, end="")
+        if write:
+            f = KIT / "briefs" / f"meetload-{today().isoformat()}.md"
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(text, encoding="utf-8")
+            print(f"\nSaved {f}" + (" and delivered it to Kit Output > Reports." if deliver(f) else "."))
+        if holds:
+            if profile != "work":
+                print("\nFocus-time holds are for the work profile (--profile work).")
+            else:
+                print("\n" + propose_holds(meetings, blocks, profile, wh, a["focus_min"]))
+        return 0
+    except Fail as e:
+        print(f"kit-meetload: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

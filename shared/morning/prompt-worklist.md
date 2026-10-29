@@ -29,7 +29,7 @@ the list in his next session, and you work on what he approves there.
    - Last line: "Reply in a Kit session with: approve all, approve 1,3,4, or skip today. From your
      phone, use the approval code added below when this list is delivered."
 6. Write a short version to briefs/worklist-text.txt for the notification: plain text, no
-   markdown, under 400 characters. First line: "Kit work list · " plus the weekday and date. Then
+   markdown, under 400 characters. First line: "Kit · work list · " plus the weekday and date. Then
    the number of items proposed and the total size, with no personal details. Last line: "Full
    list: briefs/worklist-YYYY-MM-DD.md". Write the same text to briefs/worklist-text-work.txt, and
    "Nothing today." under the first line in briefs/worklist-text-personal.txt.

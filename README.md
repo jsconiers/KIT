@@ -110,6 +110,12 @@ The installer links these into `~/.local/bin` (all in `shared/bin/`):
 | `kit-holds` | Draft calendar holds as .ics files you open and save; Kit never writes to the calendar |
 | `kit-oneonone` | One-page prep for your 1:1 with your manager (by role); `--done` records the date |
 | `kit-wins` | Accomplishments log for reviews and 1:1s: collect, this month, report by theme |
+| `kit-feedback` | A private log of feedback on the people you lead (praise, coaching, goals): 1:1 prep, review notes, and who's had no note lately; never shared or texted |
+| `kit-meetload` | Meeting load audit: hours and share of working hours, recurring meetings' weekly cost, back-to-back runs, focus time left, after-hours meetings, double bookings, suggestions; `--holds` drafts focus time; reads the calendar, a JSON file, or an .ics export |
+| `kit-dates` | Important dates (birthdays, anniversaries, work anniversaries), with a to-do and a drafted card or note when one comes up |
+| `kit-touch` | Keep in touch: who you haven't talked to in a while, by your own rhythm for each; calls and meals on the calendar count |
+| `kit-library` | Catalogs folders you choose (collections): tags, full-text and scripture search, scanned PDFs read on the Mac; delivers finished work to an output folder, mirrored to a synced folder if you like |
+| `kit-textback` | macOS: text Kit from your phone ("kit today", "kit find ..."); changes come back with a code to confirm |
 | `kit-letter` | A Word letter from plain text: `build` leaves room for a pen signature; `sign` adds your saved signature, and Claude Code asks you each time |
 | `kit-settings` | How briefs reach you and which app your to-dos sync with, work and personal |
 

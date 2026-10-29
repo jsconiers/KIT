@@ -1,0 +1,443 @@
+#!/usr/bin/env python3
+"""kit-touch: keep in touch. Who you haven't talked to in a while, from your calendar and what you tell Kit.
+
+  kit-touch                          who's due or overdue, with when you last talked
+  kit-touch list [--json]            everyone tracked: rhythm, last contact, next due
+  kit-touch add NAME [--every DAYS] [--how call|text|visit|coffee|lunch] [--group GROUP] [--work]
+                [--alias "Mike,Michael"] [--note TEXT]
+  kit-touch talked NAME [--date YYYY-MM-DD|yesterday|today] [--how call] [--note TEXT]
+  kit-touch snooze NAME [DAYS]       not now; ask again in DAYS (default 7)
+  kit-touch set NAME --every DAYS    change someone's rhythm (also --how, --group, --note, --alias, --work)
+  kit-touch remove NAME
+  kit-touch scan [--days 120] [--add] [--every DAYS]
+                                     read the calendar: "Call with NAME", "Lunch with NAME", "Coffee with
+                                     NAME" (and dinner, breakfast, FaceTime, Zoom, visit) update when you last
+                                     talked; --add starts tracking the people found there
+  kit-touch brief [--weekly]         lines for the brief ("Keep in touch"); the first "Text:" line is for
+                                     the short text
+  kit-touch --check                  one line for kit doctor
+
+Kept in ~/Claude/Agents/kit/touch.json (readable only by you). A past event that names someone counts
+as talking to them; a coming one means it's planned, so they aren't nagged. Work contacts are tagged
+[work] and kept out of personal texts. Nothing is ever sent to anyone: Kit only reminds you.
+"""
+import datetime as dt
+import json
+import os
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+
+KIT = pathlib.Path(os.path.expanduser(os.environ.get("KIT_DIR", "~/Claude/Agents/kit")))
+DATA = KIT / "touch.json"
+HOWS = ("call", "text", "visit", "coffee", "lunch", "dinner", "breakfast", "facetime", "zoom", "email", "card")
+EVENT = re.compile(r"^\s*(?:(?:phone|video|catch[- ]?up)\s+)?(call|lunch|coffee|dinner|breakfast|facetime|zoom|"
+                   r"meeting|visit|chat|walk|golf)\s+(?:with|w/)\s+(.+?)\s*$", re.I)
+DEFAULT_EVERY = 30
+DAY_WORDS = {"today", "yesterday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+             "mon", "tue", "tues", "wed", "thu", "thur", "thurs", "fri", "sat", "sun"}
+
+
+class Fail(Exception):
+    pass
+
+
+def today():
+    s = os.environ.get("KIT_TODAY")
+    return dt.date.fromisoformat(s) if s else dt.date.today()
+
+
+def load():
+    if not DATA.exists():
+        return {"people": [], "lead_days": 0}
+    return json.loads(DATA.read_text())
+
+
+def save(d):
+    tmp = DATA.with_suffix(".tmp")
+    tmp.write_text(json.dumps(d, indent=2, ensure_ascii=False) + "\n")
+    os.chmod(tmp, 0o600)
+    tmp.replace(DATA)
+
+
+def norm(s):
+    return re.sub(r"[^a-z0-9 ]+", "", (s or "").lower()).strip()
+
+
+def find(d, name, required=True):
+    """A tracked person by name, alias, or a first name that fits only one person."""
+    n = norm(name)
+    if not n:
+        raise Fail("which person?")
+    exact = [p for p in d["people"] if n == norm(p["name"]) or n in [norm(a) for a in p.get("aliases", [])]]
+    if exact:
+        return exact[0]
+    first = [p for p in d["people"] if norm(p["name"]).split(" ")[0] == n.split(" ")[0]
+             and (len(n.split()) == 1 or n in norm(p["name"]))]
+    if len(first) == 1:
+        return first[0]
+    if len(first) > 1:
+        raise Fail(f"more than one person matches {name!r}: " + ", ".join(p["name"] for p in first))
+    if required:
+        raise Fail(f"I'm not tracking {name!r} (kit-touch add {name})")
+    return None
+
+
+def parse_day(s):
+    s = (s or "").strip().lower()
+    if s in ("", "today"):
+        return today()
+    if s == "yesterday":
+        return today() - dt.timedelta(days=1)
+    days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+    for i, name in enumerate(days):
+        if name.startswith(s) and len(s) >= 3:
+            back = (today().weekday() - i) % 7 or 7          # the last such day
+            return today() - dt.timedelta(days=back)
+    for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%m/%d/%Y", "%m/%d", "%d-%b"):
+        try:
+            d = dt.datetime.strptime(s, fmt).date()
+            if fmt in ("%m/%d", "%d-%b"):
+                d = d.replace(year=today().year)
+                if d > today():
+                    d = d.replace(year=d.year - 1)
+            return d
+        except ValueError:
+            pass
+    raise Fail(f"not a date: {s!r}")
+
+
+def opt(argv, name, default=None):
+    if name in argv:
+        i = argv.index(name)
+        if i + 1 >= len(argv):
+            raise Fail(f"{name} needs a value")
+        v = argv[i + 1]
+        del argv[i:i + 2]
+        return v
+    return default
+
+
+def flag(argv, name):
+    if name in argv:
+        argv.remove(name)
+        return True
+    return False
+
+
+def due_info(p):
+    """(days since last contact or None, due date or None, status: overdue|due|soon|ok|new|snoozed|planned)."""
+    every = int(p.get("every") or DEFAULT_EVERY)
+    last = dt.date.fromisoformat(p["last"]) if p.get("last") else None
+    planned = dt.date.fromisoformat(p["planned"]) if p.get("planned") else None
+    if planned and planned < today():
+        planned = None
+    snooze = dt.date.fromisoformat(p["snooze"]) if p.get("snooze") else None
+    if not last:
+        return None, None, "planned" if planned else "new"
+    due = last + dt.timedelta(days=every)
+    since = (today() - last).days
+    if planned:
+        return since, due, "planned"
+    if snooze and snooze > today():
+        return since, due, "snoozed"
+    if due < today() - dt.timedelta(days=every // 3 or 1):
+        return since, due, "overdue"
+    if due <= today():
+        return since, due, "due"
+    if due <= today() + dt.timedelta(days=7):
+        return since, due, "soon"
+    return since, due, "ok"
+
+
+def ago(days):
+    if days is None:
+        return "no contact recorded"
+    if days == 0:
+        return "today"
+    if days == 1:
+        return "yesterday"
+    if days < 60:
+        return f"{days} days ago"
+    return f"{days // 30} months ago"
+
+
+def line(p):
+    since, due, status = due_info(p)
+    tag = "[work] " if p.get("work") else ""
+    how = p.get("how") or "call"
+    last = f"last {p.get('last_how') or 'contact'} {ago(since)}" if since is not None else "no contact recorded yet"
+    extra = f"; planned {dt.date.fromisoformat(p['planned']):%a %d-%b}" if status == "planned" and p.get("planned") else ""
+    return f"{tag}{p['name']}{' (' + p['group'] + ')' if p.get('group') else ''}: {last} (every {p.get('every') or DEFAULT_EVERY} days, {how}){extra}"
+
+
+def calendar_events(start, end):
+    exe = shutil.which("kitcal") or str(pathlib.Path.home() / ".local/bin/kitcal")
+    if not os.path.exists(exe) and not shutil.which("kitcal"):
+        raise Fail("kitcal isn't installed, so the calendar can't be read")
+    r = subprocess.run([exe, "events", "--from", start.isoformat(), "--to", end.isoformat()], capture_output=True,
+                       text=True, timeout=180)
+    if r.returncode != 0:
+        raise Fail(f"the calendar couldn't be read: {(r.stderr or r.stdout).strip()[:160]}")
+    return json.loads(r.stdout or "[]")
+
+
+def names_in(title):
+    """The people an event like "Call with Pat" or "Lunch w/ Mike and Sam" names."""
+    m = EVENT.match(title or "")
+    if not m:
+        return None, []
+    rest = re.sub(r"\(.*?\)|\[.*?\]", "", m.group(2))
+    rest = re.split(r"\s+(?:at|@|re:|about|-|–|—)\s+", rest)[0]
+    parts = [x.strip(" .,:;") for x in re.split(r",|\s+and\s+|\s*&\s*", rest) if x.strip(" .,:;")]
+    return m.group(1).lower(), [x for x in parts if 1 <= len(x.split()) <= 4 and not x.lower().startswith(("the ", "team"))]
+
+
+# ------------------------------------------------------------------ commands
+def cmd_due(argv):
+    d = load()
+    rows = [(due_info(p), p) for p in d["people"]]
+    order = {"overdue": 0, "due": 1, "new": 2, "soon": 3}
+    show = sorted([r for r in rows if r[0][2] in order], key=lambda r: (order[r[0][2]], r[0][1] or today()))
+    if not d["people"]:
+        print("No one tracked yet. kit-touch scan --add starts from your calendar; kit-touch add NAME --every 30.")
+        return 0
+    if not show:
+        print("Everyone's in touch. (kit-touch list shows everyone.)")
+        return 0
+    for (since, due, status), p in show:
+        print(f"{status.upper():8} {line(p)}")
+    return 0
+
+
+def cmd_list(argv):
+    as_json = flag(argv, "--json")
+    d = load()
+    if as_json:
+        out = []
+        for p in d["people"]:
+            since, due, status = due_info(p)
+            out.append(dict(p, days_since=since, due=due.isoformat() if due else None, status=status))
+        print(json.dumps(out, indent=2))
+        return 0
+    if not d["people"]:
+        print("No one tracked yet.")
+    for p in sorted(d["people"], key=lambda p: p["name"].lower()):
+        print(f"{due_info(p)[2]:8} {line(p)}")
+    return 0
+
+
+def apply_fields(p, argv):
+    every = opt(argv, "--every")
+    if every is not None:
+        e = int(re.sub(r"\D", "", every) or 0)
+        if not 1 <= e <= 730:
+            raise Fail("--every is a number of days, 1 to 730")
+        p["every"] = e
+    how = opt(argv, "--how")
+    if how:
+        if how.lower() not in HOWS:
+            raise Fail(f"--how is one of: {', '.join(HOWS)}")
+        p["how"] = how.lower()
+    group = opt(argv, "--group")
+    if group:
+        p["group"] = group.strip().lower()[:30]
+    alias = opt(argv, "--alias")
+    if alias is not None:
+        p["aliases"] = [a.strip() for a in alias.split(",") if a.strip()]
+    note = opt(argv, "--note")
+    if note is not None:
+        p["note"] = note.strip()[:200]
+    if flag(argv, "--work"):
+        p["work"] = True
+    if flag(argv, "--personal"):
+        p.pop("work", None)
+
+
+def cmd_add(argv):
+    argv = list(argv)
+    d = load()
+    p = {"name": "", "every": DEFAULT_EVERY, "how": "call", "added": today().isoformat()}
+    apply_fields(p, argv)
+    name = " ".join(argv).strip()
+    if not name:
+        raise Fail("kit-touch add NAME [--every DAYS]")
+    if find(d, name, required=False) and norm(find(d, name, required=False)["name"]) == norm(name):
+        raise Fail(f"already tracking {name} (kit-touch set {name} --every N changes the rhythm)")
+    p["name"] = re.sub(r"\s+", " ", name)[:60]
+    d["people"].append(p)
+    save(d)
+    print(f"Tracking {p['name']}: every {p['every']} days by {p['how']}." + (" [work]" if p.get("work") else ""))
+    return 0
+
+
+def cmd_set(argv):
+    argv = list(argv)
+    d = load()
+    fields = {}
+    p_args = list(argv)
+    apply_fields(fields, p_args)
+    name = " ".join(p_args).strip()
+    p = find(d, name)
+    apply_fields(p, argv)
+    save(d)
+    print(line(p))
+    return 0
+
+
+def cmd_talked(argv):
+    argv = list(argv)
+    when = parse_day(opt(argv, "--date", "today"))
+    how = (opt(argv, "--how") or "").lower() or None
+    note = opt(argv, "--note")
+    words = [w for w in argv if w.lower() not in ("to", "with", "on", "last")]
+    # "talked to Sam yesterday" / "talked Sam 10/25" / "talked with Mike on friday"
+    if words and (not words[-1][0].isalpha() or words[-1].lower().rstrip(".") in DAY_WORDS):
+        when = parse_day(words.pop().rstrip("."))
+    d = load()
+    p = find(d, " ".join(words))
+    if when > today():
+        raise Fail("that date is in the future")
+    if not p.get("last") or when.isoformat() >= p["last"]:
+        p["last"] = when.isoformat()
+        p["last_how"] = how or p.get("how") or "call"
+    p.pop("snooze", None)
+    if note:
+        p["note"] = note[:200]
+    save(d)
+    since, due, _ = due_info(p)
+    print(f"Noted: {p['name']}, {when:%a %d-%b}. Next by {due:%a %d-%b}.")
+    return 0
+
+
+def cmd_snooze(argv):
+    days = 7
+    if argv and argv[-1].isdigit():
+        days = int(argv.pop())
+    d = load()
+    p = find(d, " ".join(argv))
+    p["snooze"] = (today() + dt.timedelta(days=days)).isoformat()
+    save(d)
+    print(f"I'll ask about {p['name']} again after {dt.date.fromisoformat(p['snooze']):%a %d-%b}.")
+    return 0
+
+
+def cmd_remove(argv):
+    d = load()
+    p = find(d, " ".join(argv))
+    d["people"].remove(p)
+    save(d)
+    print(f"Stopped tracking {p['name']}.")
+    return 0
+
+
+def cmd_scan(argv):
+    argv = list(argv)
+    days = int(opt(argv, "--days", "120"))
+    add = flag(argv, "--add")
+    every_default = opt(argv, "--every")
+    quiet = flag(argv, "--quiet")
+    d = load()
+    events = calendar_events(today() - dt.timedelta(days=days), today() + dt.timedelta(days=21))
+    seen = {}
+    for e in events:
+        if e.get("all_day"):
+            continue
+        how, names = names_in(e.get("title", ""))
+        if not names:
+            continue
+        start = e.get("start", "")
+        day = dt.date.fromisoformat(start[:10])
+        # Later today hasn't happened yet (unless KIT_TODAY pins the date, as the tests do).
+        done = day < today() or (day == today() and (bool(os.environ.get("KIT_TODAY"))
+                                                      or start[11:16] <= dt.datetime.now().strftime("%H:%M")))
+        for n in names:
+            seen.setdefault(n, []).append((day, how, done))
+    updated, new = [], []
+    for raw, hits in seen.items():
+        p = find(d, raw, required=False)
+        past = sorted(h for h in hits if h[2])
+        future = sorted(h for h in hits if not h[2])
+        if p is None:
+            if not add or not past:
+                if past:
+                    new.append((raw, len(past), past[-1][0]))
+                continue
+            gaps = [(b[0] - a[0]).days for a, b in zip(past, past[1:]) if (b[0] - a[0]).days > 0]
+            every = int(every_default) if every_default else (
+                14 if gaps and sorted(gaps)[len(gaps) // 2] <= 10 else 30 if not gaps or sorted(gaps)[len(gaps) // 2] <= 35
+                else 60)
+            p = {"name": raw, "every": every, "how": past[-1][1] if past[-1][1] in HOWS else "call",
+                 "added": today().isoformat(), "from_calendar": True}
+            d["people"].append(p)
+            new.append((raw, len(past), past[-1][0]))
+        if past and (not p.get("last") or past[-1][0].isoformat() > p["last"]):
+            p["last"] = past[-1][0].isoformat()
+            p["last_how"] = past[-1][1] if past[-1][1] in HOWS else "call"
+            updated.append(p["name"])
+        p["planned"] = future[0][0].isoformat() if future else None
+        if not p["planned"]:
+            p.pop("planned")
+    save(d)
+    if not quiet:
+        print(f"Calendar, last {days} days: {len(seen)} name(s) in call and meal events; {len(updated)} last-contact "
+              f"date(s) updated.")
+        for raw, n, last in new:
+            print(f"  {'added' if add else 'not tracked'}: {raw} ({n} event(s), last {last:%d-%b})"
+                  + ("" if add else f"  (kit-touch add \"{raw}\")"))
+    return 0
+
+
+def cmd_brief(argv):
+    weekly = flag(argv, "--weekly")
+    d = load()
+    if not d["people"]:
+        return 0
+    rows = [(due_info(p), p) for p in d["people"]]
+    want = ("overdue", "due", "soon") if weekly else ("overdue", "due")
+    show = sorted([r for r in rows if r[0][2] in want], key=lambda r: (r[0][1] or today()))
+    if not show:
+        return 0
+    print("Keep in touch")
+    for (since, due, status), p in show[:8]:
+        tag = "[work] " if p.get("work") else ""
+        print(f"{tag}{p['name']}: last {p.get('last_how') or 'contact'} {ago(since)}; you aim for every "
+              f"{p.get('every') or DEFAULT_EVERY} days" + (" (due this week)" if status == "soon" else "") + ".")
+    personal = [p["name"].split(" ")[0] for (_, _, s), p in show if not p.get("work") and s in ("overdue", "due")][:3]
+    if personal and not weekly:
+        print("Text: Keep in touch: " + ", ".join(personal) + " (kit talked to NAME when you do)")
+    return 0
+
+
+def cmd_check(argv):
+    d = load()
+    over = [p["name"] for p in d["people"] if due_info(p)[2] == "overdue"]
+    print(f"ok {len(d['people'])} people tracked" + (f", {len(over)} overdue" if over else ""))
+    return 0
+
+
+def main(argv):
+    cmds = {"list": cmd_list, "add": cmd_add, "set": cmd_set, "talked": cmd_talked, "spoke": cmd_talked,
+            "snooze": cmd_snooze, "remove": cmd_remove, "scan": cmd_scan, "brief": cmd_brief, "--check": cmd_check}
+    try:
+        if not argv:
+            return cmd_due([])
+        if argv[0] in ("-h", "--help", "help"):
+            print(__doc__)
+            return 0
+        if argv[0] == "--json":
+            return cmd_list(["--json"])
+        fn = cmds.get(argv[0])
+        if not fn:
+            print(__doc__.split("\n\n")[1])
+            return 2
+        return fn(list(argv[1:])) or 0
+    except Fail as e:
+        print(f"kit-touch: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

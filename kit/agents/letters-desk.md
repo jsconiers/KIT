@@ -50,6 +50,9 @@ Statuses: received, draft, sent, awaiting reply, replied, closed. Dates are DD-M
   `kit-letter build <folder>/letter.md`, which makes letter.docx (Georgia 11 pt, US Letter) with
   room for a pen signature. Add the entry to log.md. {{OWNER}} prints, signs, and sends it, unless
   {{OWNER}} asks you to sign it (see Signature).
+- Put the finished letter where {{OWNER}} keeps Kit's work: `kit-library deliver <folder>/letter.docx
+  --kind letters --name "<recipient> - <subject>.docx"` (the signed copy, letter-signed.docx, when there
+  is one). It lands in Documents > Kit Output > Letters, dated, and never overwrites an earlier copy.
 - When {{OWNER}} says a letter went out, record the date, how it went, and the tracking number, and
   set the reply due date: what the letter or the law gives the recipient, if {{OWNER}} tells you, and
   otherwise 30 days.

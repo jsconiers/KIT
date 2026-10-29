@@ -25,6 +25,18 @@ isn't there, and say in one line which steps you skipped.
      days or more.
    - **Letters.** If letters/log.md exists, list letters with a reply due within three days or
      overdue: who it's to, what it's about, and the due date. No account numbers.
+   - **Dates,** only if briefs/dates.txt exists (kit-dates wrote it before this run). Under "Dates",
+     list each line: when, whose date, and the action. Lines starting [work] are work; the rest are
+     personal. Where a line says "Draft needed: <path>", write the draft to that path: for a card,
+     three or four warm, specific sentences in {{OWNER}}'s voice for the card; for a work note, two
+     or three sentences he could send a colleague. Point to the draft; never send anything. Its
+     to-do is already in the queue.
+   - **Renewals,** only if briefs/renewals.txt exists. Under "Renewals", list each line: what, the
+     date, how long is left, and how to renew. Lines starting [work] are work. Each has a to-do in
+     the queue.
+   - **Other sections,** for each briefs/extra-*.txt: a section titled with the file's first line,
+     then the rest of its lines as written, except any line starting "Text:", which goes only in
+     the short text (step 5).
    - **Calendar.** Read memory/context/calendar.md for the calendar command. Run it for today and
      tomorrow, list the events, and flag overlaps, double bookings, back-to-back runs with no
      break, and anything that needs travel time. If it has a free-time or conflicts command, use
@@ -88,11 +100,13 @@ isn't there, and say in one line which steps you skipped.
    screen: to-dos overdue and due today (personal ones counted, never named), today's first
    meeting time and how many meetings, how many emails need him, unconfirmed commitments (count
    only), what's waiting on whom, and,
-   when those steps ran, pastoral follow-ups due (count only) and a one-line trading read. Last
-   line: "Full brief: briefs/YYYY-MM-DD.md".
+   when those steps ran, pastoral follow-ups due (count only), a one-line trading read, dates
+   coming up (count only, like "2 dates this week"), renewals due (count only), and each "Text:"
+   line from the other sections, without the "Text:". Last line: "Full brief: briefs/YYYY-MM-DD.md".
    Then write the same kind of short text twice more, split by kind, because work and personal
    items can be delivered different ways: briefs/latest-text-work.txt with only work items (to-dos
-   tagged [work], work meetings, work mail, audit issues) and briefs/latest-text-personal.txt with
-   everything else (personal to-dos, pastoral follow-ups, the trading read). Same first and last
-   lines; if one side has nothing, write "Nothing today." under the first line.
+   tagged [work], work meetings, work mail, audit issues, [work] dates and renewals) and
+   briefs/latest-text-personal.txt with everything else (personal to-dos, pastoral follow-ups, the
+   trading read, personal dates and renewals, the other sections' "Text:" lines). Same first and
+   last lines; if one side has nothing, write "Nothing today." under the first line.
 6. Finish with one line: "done", or what went wrong.

@@ -45,7 +45,17 @@ MONTHS = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()
 K = "~/Claude/Agents/kit"
 # Kit keeps its own notes without prompting (the owner chose "save facts itself").
 ALLOW = [f"Read({K}/**)", f"Edit({K}/memory/**)", f"Edit({K}/QUEUE.md)", f"Edit({K}/STATUS.md)",
-         "Bash(kit-letter build *)"]
+         "Bash(kit-letter build *)", "Bash(kit-dates *)", "Bash(kit-expiry *)",
+         "Bash(kit-textback status *)", "Bash(kit-textback log *)",
+         # The library: finding and reading cataloged documents, refreshing the catalog, and
+         # delivering finished work to the output folder (which never overwrites without --replace).
+         "Bash(kit-library search *)", "Bash(kit-library find *)", "Bash(kit-library show *)",
+         "Bash(kit-library recent *)", "Bash(kit-library collections *)", "Bash(kit-library tags *)",
+         "Bash(kit-library rules *)", "Bash(kit-library output *)", "Bash(kit-library status *)",
+         "Bash(kit-library --check *)", "Bash(kit-library deliver *)", "Bash(kit-library index *)",
+         "Bash(kit-library flush *)", "Bash(kit-library mirror *)", "Bash(kit-library fetch *)",
+         # Kit's own lists (keep in touch, the private feedback log) and the read-only meeting audit.
+         "Bash(kit-touch *)", "Bash(kit-feedback *)", "Bash(kit-meetload *)"]
 # Always prompt, even if a broader allow rule exists: Kit's rules, Claude Code's own settings,
 # and commands that delete, push or post, install, or change system settings.
 ASK = [
@@ -60,6 +70,13 @@ ASK = [
     "Bash(defaults write *)", "Bash(launchctl *)", "Bash(softwareupdate *)", "Bash(osascript *)",
     # Signing a letter with the saved signature asks every time (kit-letter build is allowed).
     "Bash(kit-letter sign *)",
+    # Answering a text as a test can add to-dos and ask Claude, so it asks first.
+    "Bash(kit-textback test *)",
+    # Changing what the library catalogs (collections, tags, rules, exclusions) asks first.
+    "Bash(kit-library add *)", "Bash(kit-library remove *)", "Bash(kit-library about *)",
+    "Bash(kit-library tag *)", "Bash(kit-library untag *)", "Bash(kit-library rule *)",
+    "Bash(kit-library unrule *)", "Bash(kit-library exclude *)", "Bash(kit-library include *)",
+    "Bash(kit-library define *)",
 ]
 
 
