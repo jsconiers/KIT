@@ -727,6 +727,7 @@ def claude_json(prompt, ctx, allowed=(), timeout=150, parse=True):
         (ctx["cfg"].get("TEXTBACK_MODEL") or "sonnet")
     rc, out = ask_claude(prompt, mode="textback", model=model,
                          allowed=list(allowed), timeout=timeout, log=LOG,
+                         extra_args=("--setting-sources", "project,local"),   # only these rules apply
                          deny=None if allowed else ["Bash", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch",
                                                     "Task", "Agent", "Read", "Glob", "Grep"])
     if rc == 75:
@@ -968,7 +969,9 @@ def ask(question, ctx):
         "confirm in a session. A text can show on a locked screen, so keep sensitive matters (health, "
         "money, legal) to a few words, never include ID or account numbers or passwords, for "
         "pastoral care give first names and actions only, and keep work matters and the team feedback log "
-        "out of texts. If you don't know, say so.\n\nContext:\n"
+        "out of texts. Letters, receipts, the trading journal, and personal notes are closed to text "
+        "questions: if he asks about them, say so and suggest a session. If you don't know, say so."
+        "\n\nContext:\n"
         + "\n".join(context) + f"\n\nHis text: {question}")
     model = cfg.get("TEXTBACK_MODEL") or "sonnet"
     fd, out_path = tempfile.mkstemp(prefix="kit-textback-", suffix=".json")
@@ -978,13 +981,20 @@ def ask(question, ctx):
         rc, tok, _ = run(["security", "find-generic-password", "-s", "kit-claude-token", "-w"], timeout=15)
         if rc == 0 and tok:
             env["CLAUDE_CODE_OAUTH_TOKEN"] = tok
+    # Only the rules named here apply: --setting-sources leaves out ~/.claude/settings.json, whose allow
+    # rules would otherwise add to this list (kit-feedback, kit-visits, kit-touch, kitmail, ...), so Bash
+    # is limited to the two library commands. Letters, receipts, the journal, and personal notes stay
+    # closed to texts (security review K-03, 29-Oct-2026).
     cmd = ["claude", "-p", prompt, "--output-format", "json", "--model", model,
+           "--setting-sources", "project,local",
            "--strict-mcp-config", "--mcp-config", '{"mcpServers": {}}',
            "--allowedTools", "Read(~/Claude/Agents/kit/**)", "Glob", "Grep", "Bash(kit-library search:*)",
            "Bash(kit-library show:*)",
            "--disallowedTools", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Task",
-           "Agent", "Read(~/Claude/Agents/kit/care/**)", "Read(~/Claude/Agents/kit/letters/signature/**)",
-           "Read(~/Claude/Agents/kit/feedback/**)", "Read(~/Claude/Agents/kit/.install/**)"]
+           "Agent", "Read(~/Claude/Agents/kit/care/**)", "Read(~/Claude/Agents/kit/letters/**)",
+           "Read(~/Claude/Agents/kit/feedback/**)", "Read(~/Claude/Agents/kit/.install/**)",
+           "Read(~/Claude/Agents/kit/journal/**)", "Read(~/Claude/Agents/kit/receipts/**)",
+           "Read(~/Claude/Agents/kit/memory/personal/**)"]
     started = time.time()
     try:
         with open(out_path, "w") as f:

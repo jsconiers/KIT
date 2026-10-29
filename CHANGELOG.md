@@ -261,6 +261,11 @@ versions follow [semantic versioning](https://semver.org).
   `--allow-plain` (or encryption).
 
 ### Fixed
+- Texting Kit: questions really are read-only now. The question run, and the small parse and draft
+  runs, start with `--setting-sources project,local`, so the allow rules in `~/.claude/settings.json`
+  no longer add to their tool lists: Bash is limited to `kit-library search` and `show`, and commands
+  such as `kit-feedback`, `kit-visits`, `kit-touch`, and `kitmail` are refused. Letters, receipts, the
+  trading journal, and personal notes are closed to text questions too.
 - Texting Kit: in `date NAME MM-DD birthday card`, the action word (card, call, gift, note) was read
   as part of what the date is, because a later setting reused its name.
 - Windows installer: Kit 1.4.0 left every file in `%USERPROFILE%\Claude\Agents\kit` with no access
