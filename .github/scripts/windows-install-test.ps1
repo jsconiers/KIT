@@ -124,8 +124,8 @@ else { Pass "every command shim sets PYTHONUTF8=1" }
 $queue = Join-Path $kitHome "QUEUE.md"
 $item = "- [ ] Read the " + [char]0x201C + "design" + [char]0x201D + " notes"
 $q = [System.IO.File]::ReadAllText($queue)
-if ($q -notmatch "(?m)^## Testy\r?$") { Fail "QUEUE.md has no ## Testy section" }
-[System.IO.File]::WriteAllText($queue, ($q -replace "(?m)^(## Testy)\r?$", "`$1`n$item"), (New-Object System.Text.UTF8Encoding $false))
+if ($q -notmatch "(?m)^## Kit\r?$") { Fail "QUEUE.md has no ## Kit section" }
+[System.IO.File]::WriteAllText($queue, ($q -replace "(?m)^(## Kit)\r?$", "`$1`n$item"), (New-Object System.Text.UTF8Encoding $false))
 Remove-Item Env:PYTHONUTF8 -ErrorAction SilentlyContinue
 $prev = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
