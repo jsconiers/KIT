@@ -12,7 +12,9 @@
    line), no tracked file matches any of them. Matches are reported by file, line, and pattern
    number, never by the pattern itself. A match ending in ".md" is a Claude Code @-import of a
    file, not an address, and isn't counted. The copyright line in LICENSE names the copyright
-   holder on purpose and isn't scanned; the rest of LICENSE is.
+   holder on purpose and isn't scanned; the rest of LICENSE is. The fourth Gospel's name in a Bible
+   reference (a chapter and verse, a numbered letter, or the name alone in quotes, as in the library's
+   table of books) isn't a person's name and isn't counted either, as in export_public.py.
 
 Exits 1 if anything fails.
 """
@@ -117,6 +119,11 @@ for p in jsons:
 counts["JSON files"] = len(jsons)
 
 # 6. Personal details
+# The fourth Gospel and its letters in Bible references, not a person: a chapter and verse after the name,
+# a numbered letter, or the name alone in quotes (the library's table of books). Spelled in two parts so
+# this line doesn't match the scan itself.
+GOSPEL = "Jo" + "hn"
+BIBLE = re.compile(rf'\b[123]\s+{GOSPEL}\b|\b{GOSPEL}(?=\s+\d)|(?<="){GOSPEL}(?=")|(?<=\'){GOSPEL}(?=\')')
 patterns = [line for line in os.environ.get("SCAN_PATTERNS", "").splitlines() if line.strip()]
 if patterns:
     rxs = [re.compile(x) for x in patterns]
@@ -130,6 +137,7 @@ if patterns:
         for n, line in enumerate([rel(p)] + lines):
             if rel(p) == "LICENSE" and line.startswith("Copyright "):
                 continue   # names the copyright holder on purpose
+            line = BIBLE.sub("BIBLE-BOOK", line)
             for i, rx in enumerate(rxs, 1):
                 if any(not m.group(0).endswith(".md") for m in rx.finditer(line)):
                     fails.append(f"{rel(p)}:{n}: matches personal-details pattern #{i}")

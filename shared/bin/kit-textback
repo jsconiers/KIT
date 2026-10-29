@@ -255,7 +255,7 @@ def today_lines(day, ctx):
 
 
 def owner_items():
-    """John's open items as `todo` lists them: (number, text, overdue_or_today_flag)."""
+    """the owner's open items as `todo` lists them: (number, text, overdue_or_today_flag)."""
     rc, out, _ = run(tool("todo"))
     items, section = [], None
     for line in out.splitlines():
