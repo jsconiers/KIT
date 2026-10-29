@@ -7,6 +7,8 @@ versions follow [semantic versioning](https://semver.org).
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-10-29
+
 ### Fixed
 - `todo` couldn't find your section of QUEUE.md when the config has no `OWNER_NAME` (as on a fresh
   install) or names someone else: it looked for "## Owner", listed none of your items, and refused to
