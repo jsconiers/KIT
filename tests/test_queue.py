@@ -217,9 +217,41 @@ def main():
     r = run(todo, home)
     ok(r.returncode == 0 and "Owner" in r.stdout, "plain todo still lists the sections")
 
+    # --- the owner's section when OWNER_NAME isn't set (a fresh install), or names someone else
+    lines = ["# Queue", "", "## Sprint", "", "## Testy", "- [ ] **Call the bank** (added 01-Oct-2026)", "",
+             "## Kit", "", "## Waiting on others", "", "## Someday", "", "## Done"]
+    ok(q.owner_section(lines) == "Testy" and q.owner_section(lines, "Testy") == "Testy"
+       and q.owner_section(lines, "Alex") == "Testy" and q.owner_section(["## Kit", "## Done"], "Alex") is None,
+       "owner_section: OWNER_NAME when the queue has it, otherwise the queue's own owner section")
+    ok(q.configured_owner('OWNER_NAME="Testy"\n') == "Testy" and q.configured_owner('OWNER_NAME=""\n') is None
+       and q.configured_owner("") is None, "configured_owner reads OWNER_NAME")
+    home3 = tmp / "home3"
+    k3 = home3 / "Claude/Agents/kit"
+    (k3 / "briefs").mkdir(parents=True)
+    (k3 / "QUEUE.md").write_text("\n".join(lines) + "\n")
+    r = run(todo, home3)
+    ok(r.returncode == 0 and "Testy (1)" in r.stdout and "Call the bank" in r.stdout,
+       "with no config, todo lists the queue's owner section", r.stdout + r.stderr)
+    r = run(todo + ["Renew", "the", "passport"], home3)
+    t3 = (k3 / "QUEUE.md").read_text()
+    ok(r.returncode == 0 and "Added for Testy" in r.stdout and "**Renew the passport**" in t3
+       and t3.index("## Testy") < t3.index("**Renew the passport**") < t3.index("## Kit"),
+       "and todo adds to it", r.stdout + r.stderr)
+    (k3 / ".install/shared/morning").mkdir(parents=True)
+    (k3 / ".install/shared/morning/config").write_text('OWNER_NAME="Alex"\n')
+    r = run(todo, home3)
+    ok(r.returncode == 0 and "Testy (2)" in r.stdout, "a config naming someone else falls back the same way",
+       r.stdout + r.stderr)
+    r = run([sys.executable, str(SHARED / "dashboard.py")], home3, timeout=120)
+    page = (k3 / "dashboard.html").read_text() if (k3 / "dashboard.html").exists() else ""
+    ok(r.returncode == 0 and "Call the bank" in page and "Your list is clear" not in page,
+       "the dashboard finds the owner's items the same way", r.stderr[-300:])
+
     # --- starter file and prompts
     starter = (REPO / "kit/QUEUE.md").read_text()
-    ok(starter.index("## Sprint") < starter.index("## {{OWNER}}"), "starter QUEUE.md has Sprint before the owner")
+    own = q.owner_section(starter.splitlines())
+    ok(own and starter.index("## Sprint") < starter.index("## " + own), "starter QUEUE.md has Sprint before the owner",
+       str(own))
     wl = (SHARED / "morning/prompt-worklist.md").read_text()
     ok("Start with the sprint" in wl and "(sprint)" in wl, "work-list prompt proposes sprint items first")
     wk = (SHARED / "morning/prompt-weekly.md").read_text()

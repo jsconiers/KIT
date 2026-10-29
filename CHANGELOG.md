@@ -7,6 +7,12 @@ versions follow [semantic versioning](https://semver.org).
 
 ## [Unreleased]
 
+### Fixed
+- `todo` couldn't find your section of QUEUE.md when the config has no `OWNER_NAME` (as on a fresh
+  install) or names someone else: it looked for "## Owner", listed none of your items, and refused to
+  add one ("QUEUE.md has no '## Owner' section"). It now uses the queue's own section for you, the one
+  the installer named for you; the to-do sync and the dashboard find your items the same way.
+
 ## [1.5.0] - 2026-10-29
 
 ### Added

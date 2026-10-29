@@ -41,11 +41,14 @@ TODAY = dt.date.today()
 
 
 def owner():
-    if CONFIG.exists():
-        m = re.search(r'^OWNER_NAME="?([^"\n]+)"?', CONFIG.read_text(), re.M)
-        if m:
-            return m.group(1).strip()
-    return "Owner"
+    """The owner's section: OWNER_NAME from the config when QUEUE.md has a section by that name, otherwise the
+    queue's own owner section (a fresh install has one before OWNER_NAME is set)."""
+    name = kq.configured_owner(CONFIG.read_text()) if CONFIG.exists() else None
+    try:
+        lines = QUEUE.read_text().splitlines()
+    except OSError:
+        lines = []
+    return kq.owner_section(lines, name) or name or "Owner"
 
 
 def fmt(d):

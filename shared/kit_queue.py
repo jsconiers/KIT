@@ -39,6 +39,27 @@ def heads(lines):
     return {ln[3:].strip(): i for i, ln in enumerate(lines) if ln.startswith("## ")}
 
 
+# The sections every queue has besides the owner's own (which the installer names for the owner).
+SECTIONS = ("Sprint", "Kit", "Waiting on others", "Someday", "Done")
+
+
+def configured_owner(config_text):
+    """OWNER_NAME from the text of the config (shared/morning/config), or None when it isn't set."""
+    m = re.search(r'^OWNER_NAME="?([^"\n]+)"?', config_text or "", re.M)
+    return m.group(1).strip() if m and m.group(1).strip() else None
+
+
+def owner_section(lines, configured=None):
+    """The owner's section of QUEUE.md: `configured` (OWNER_NAME) when the queue has a section by that name,
+    otherwise the queue's own owner section, the first that isn't one of SECTIONS. A fresh install has one
+    named for its owner before OWNER_NAME is set, and a copied config can name someone else. None when the
+    queue has neither."""
+    names = [ln[3:].strip() for ln in lines if ln.startswith("## ")]
+    if configured and configured in names:
+        return configured
+    return next((n for n in names if n not in SECTIONS), None)
+
+
 def section_range(lines, name):
     h = heads(lines)
     if name not in h:

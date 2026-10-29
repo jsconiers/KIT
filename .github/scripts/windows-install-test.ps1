@@ -2,8 +2,9 @@
 # .github/workflows/checks.yml runs it on GitHub's Windows runners, under Windows PowerShell 5.1 and
 # PowerShell 7 (the installer runs under the same one). It changes the current user's Kit and
 # Claude Code settings, so run it on a throwaway machine or account, never your own.
-#   1. A fresh install, then doctor.py, with settings.json saved with a UTF-8 byte-order mark, and todo
-#      through its command shim (UTF-8 mode) on a QUEUE.md with curly quotes.
+#   1. A fresh install, then doctor.py, with settings.json saved with a UTF-8 byte-order mark; todo
+#      through its command shim (UTF-8 mode) on a QUEUE.md with curly quotes; and todo with no
+#      OWNER_NAME set, finding the owner's section on its own.
 #   2. A reinstall over it (so the installer reads that settings.json too).
 #   3. Kit 1.4.0's broken permissions, made with that installer's exact icacls command. Kit's files
 #      must become unreadable (otherwise this test couldn't tell), and a reinstall must repair them.
@@ -140,6 +141,21 @@ if ($shimCode -eq 0 -and $viaShim -match "design" -and $viaShim -notmatch "Trace
     Pass "through its shim, todo reads and lists the item with curly quotes"
 } else {
     Fail "todo through its shim (exit $shimCode): $((($viaShim -split "`r?`n") | Select-Object -Last 4) -join ' / ')"
+}
+
+# A fresh install has no OWNER_NAME in its config: todo finds the owner's section (## Testy) on its own.
+Write-Host ""
+Write-Host "== todo with no OWNER_NAME set"
+$prev = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+$added = (& (Join-Path $binDir "todo.cmd") Renew the passport 2>&1 | Out-String)
+$addCode = $LASTEXITCODE
+$listed = (& (Join-Path $binDir "todo.cmd") 2>&1 | Out-String)
+$ErrorActionPreference = $prev
+if ($addCode -eq 0 -and $added -match "Added for Testy" -and $listed -match "Testy \(1\)" -and $listed -match "Renew the passport") {
+    Pass "todo adds to and lists the owner's section (Testy) with no OWNER_NAME"
+} else {
+    Fail "todo with no OWNER_NAME (exit $addCode): $($added.Trim()) / $((($listed -split "`r?`n") | Where-Object { $_ }) -join ' / ')"
 }
 
 Invoke-Installer "reinstall over an existing install"

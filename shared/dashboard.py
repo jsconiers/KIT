@@ -50,12 +50,13 @@ $audit_banner<div>$hero</div>$lane_you $lane_kit $lane_wait
 
 
 def owner():
+    """The owner's lane: OWNER_NAME when QUEUE.md has a section by that name, otherwise the queue's own owner
+    section, as `todo` finds it."""
     cfg = KIT / ".install/shared/morning/config"
-    if cfg.exists():
-        m = re.search(r'^OWNER_NAME="?([^"\n]+)"?', cfg.read_text(), re.M)
-        if m:
-            return m.group(1).strip()
-    return "You"
+    name = kit_queue.configured_owner(cfg.read_text()) if cfg.exists() else None
+    q = KIT / "QUEUE.md"
+    lines = q.read_text().splitlines() if q.exists() else []
+    return kit_queue.owner_section(lines, name) or name or "You"
 
 
 def parse_queue():
