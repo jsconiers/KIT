@@ -222,7 +222,7 @@ def connector_banner():
     passes again)."""
     path = KIT / "briefs" / "connectors-alerts.json"
     try:
-        alerts = json.loads(path.read_text()) if path.exists() else {}
+        alerts = json.loads(path.read_text(encoding="utf-8-sig")) if path.exists() else {}
     except Exception:  # noqa: BLE001
         return ""
     if not isinstance(alerts, dict) or not alerts:
@@ -249,7 +249,7 @@ def alerts_banner():
     connector-guard integrity), and a generic one for any other monitor kind. Each alert clears itself (next success, projection back under, a new month, or back in sync)."""
     path = KIT / "briefs" / "alerts.json"
     try:
-        alerts = (json.loads(path.read_text()) if path.exists() else {}).get("alerts") or {}
+        alerts = (json.loads(path.read_text(encoding="utf-8-sig")) if path.exists() else {}).get("alerts") or {}
     except Exception:  # noqa: BLE001
         return ""
     if not isinstance(alerts, dict):
@@ -305,7 +305,7 @@ def alerts_banner():
 
 def cost_stop_alert_open():
     try:
-        alerts = json.loads((KIT / "briefs" / "alerts.json").read_text()).get("alerts") or {}
+        alerts = json.loads((KIT / "briefs" / "alerts.json").read_text(encoding="utf-8-sig")).get("alerts") or {}
         return any(isinstance(a, dict) and a.get("kind") == "cost" and a.get("level") == "stop"
                    for a in alerts.values())
     except Exception:  # noqa: BLE001
@@ -324,7 +324,7 @@ def state_banners():
                 'connector calls are stopped; run kit-pause resume to restart.</div>')
     holds_file = KIT / "memory/context/legal-holds.json"
     try:
-        holds = json.loads(holds_file.read_text()) if holds_file.exists() else {}
+        holds = json.loads(holds_file.read_text(encoding="utf-8-sig")) if holds_file.exists() else {}
     except Exception:  # noqa: BLE001
         holds = {"(unreadable holds file)": {}}
     if holds:
@@ -352,7 +352,7 @@ def audit():
     """The banner and the Audit panel, from briefs/audit-status.json (written by kit-audit)."""
     path = KIT / "briefs" / "audit-status.json"
     try:
-        st = json.loads(path.read_text())
+        st = json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception:  # noqa: BLE001
         return "", '<p class="empty">No audit status yet. The morning run writes it with kit-audit --daily.</p>'
     sev_class = {"critical": "fail", "warning": "warn", "info": "ok"}
@@ -472,7 +472,7 @@ def sprint_panel():
     total, done_pts = kit_queue.sprint_points(sp)
     hist_file = KIT / ".install/cache/sprint-history.json"
     try:
-        hist_all = json.loads(hist_file.read_text())
+        hist_all = json.loads(hist_file.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         hist_all = {}
     key = f'{sp["name"]}|{sp["start"]:%Y-%m-%d}'

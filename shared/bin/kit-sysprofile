@@ -66,7 +66,7 @@ def inventory_hits(path, rx, root):
     out = []
     if path.suffix == ".json":
         try:
-            data = json.loads(path.read_text(errors="ignore"))
+            data = json.loads(path.read_text(encoding="utf-8-sig", errors="ignore"))
         except (OSError, ValueError):
             return out
         rows = data if isinstance(data, list) else data.get("items", data.get("rows", []))

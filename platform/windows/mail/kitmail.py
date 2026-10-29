@@ -88,7 +88,7 @@ def flag(name):
 
 def load_exclude():
     try:
-        with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
+        with open(CONFIG_PATH, "r", encoding="utf-8-sig") as fh:
             data = json.load(fh)
         ex = data.get("exclude", [])
         return [x for x in ex if isinstance(x, str)]

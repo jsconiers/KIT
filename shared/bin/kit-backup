@@ -362,7 +362,7 @@ def check(archive):
         mpath = pathlib.Path(tmp, "MANIFEST.json")
         if not mpath.exists():
             return ["no MANIFEST.json"]
-        manifest = json.loads(mpath.read_text())
+        manifest = json.loads(mpath.read_text(encoding="utf-8-sig"))
         for rel, digest in manifest["files"].items():
             p = pathlib.Path(tmp, "files", rel)
             if not p.exists():
@@ -417,7 +417,7 @@ def restore(arg, to):
         except CryptoError as e:
             sys.exit(f"kit-backup: {e}")
         extract(plain, tmp)
-        manifest = json.loads(pathlib.Path(tmp, "MANIFEST.json").read_text())
+        manifest = json.loads(pathlib.Path(tmp, "MANIFEST.json").read_text(encoding="utf-8-sig"))
         dest.mkdir(parents=True, exist_ok=True)
         if os.name != "nt":
             os.chmod(dest, 0o700)

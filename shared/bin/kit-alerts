@@ -50,7 +50,7 @@ def load_run_alerts():
 
 def read_json(path):
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return {}

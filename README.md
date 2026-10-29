@@ -103,7 +103,7 @@ The installer links these into `~/.local/bin` (all in `shared/bin/`):
 |---|---|
 | `todo` | Your to-do list from the shell; shares `QUEUE.md`. Also sprints (`todo sprint ...`). |
 | `kit-queue` | Queue hygiene: stale items, likely duplicates, the trend; applies verdicts you approve |
-| `kit-meetprep` | A prep pack per upcoming meeting: roles, related items, documents, what to decide |
+| `kit-meetprep` | A prep pack per upcoming meeting: roles, related items, documents, what to decide, and a design review's pre-read |
 | `kit-triage` | Suggests reply, decide, delegate, read later, or ignore per inbox message; never acts |
 | `kit-awaiting` | Sent mail that asked for something and got no reply after N days, with draft nudges (needs a mail tool with sent-items commands) |
 | `kit-commitments` | Proposes to-dos from promises in your sent mail or minutes; you confirm |
@@ -132,6 +132,7 @@ The installer links these into `~/.local/bin` (all in `shared/bin/`):
 | `kit-diagram-diff` | What changed between two versions of a draw.io or Visio diagram |
 | `kit-diaglint` | Checks draw.io and Visio diagrams against your team's diagramming standard (a JSON rules file): palette, fonts, title block, legend, line types, connectors, shapes, view labels |
 | `kit-onepager` | One-page executive summary of an IA or GDS (Markdown, .docx, or PDF), every line cited, "not stated" where the document is silent; Markdown, JSON, or Word |
+| `kit-preread` | Before a design review: Kit's red team reads the document (Word, PowerPoint, Excel, PDF) in a closed run and gives the findings that matter most, what it doesn't say, and five questions to ask, each tied to a finding; Claude Code asks before it runs; never texted |
 | `kit-decisions` | Drafts proposed ADRs from architectural decisions in meeting minutes, with the classifying rule shown; never accepts anything |
 | `kit-viewpoints` | DoDAF-style viewpoint drafts (OV-1, SV-1, SV-4, DIV-2) from a GDS, every element cited, with a draw.io file per view in the team style |
 | `kit-coverage` | Framework coverage per design and across the portfolio (CSF 2.0, Zero Trust, Secure by Design, standards, threat models, red team, waivers), filtered by your framework profile; HTML and JSON |

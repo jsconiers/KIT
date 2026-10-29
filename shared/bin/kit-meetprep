@@ -11,8 +11,9 @@
 Each pack goes to briefs/meetprep/<date>-<HHMM>-<slug>.md: the title and time, who's there by role
 (the organizer, invited attendees, and the roles in a matching project's stakeholder map; never
 names or addresses), related queue items, pending meeting actions and commitments, related library
-documents (kit-precedent), and what to decide. All-day events, events you declined, and events with
-no attendees are skipped. A pure script: no Claude run, no network, nothing sent.
+documents (kit-precedent), the pre-read for a design or architecture review (kit-preread, or how to
+make one), and what to decide. All-day events, events you declined, and events with no attendees are
+skipped. A pure script: no Claude run, no network, nothing sent.
 """
 import argparse
 import datetime as dt
@@ -30,6 +31,8 @@ import kit_daily as kd  # noqa: E402
 
 OUT = kd.BRIEFS / "meetprep"
 DECIDE = re.compile(r"\b(decide|decision|approve|approval|sign[- ]?off|choose|go/no-go|vote|confirm)\b", re.I)
+REVIEW = re.compile(r"\b(design|architecture|architectural|solution|technical|gds|ia)\b.{0,40}\breview\b|"
+                    r"\b(arb|review board|change board|design authority)\b", re.I)
 
 
 def load_events(args):
@@ -125,6 +128,18 @@ def documents(title):
     return [f"{pathlib.Path(h['file']).name}:{h['line']}  {kd.clip(h['text'], 110)}" for h in hits]
 
 
+def prereads(title):
+    """Pre-reads made for this meeting (kit-preread --meeting TITLE), newest first."""
+    d = kd.BRIEFS / "preread"
+    want = kd.words(title)
+    out = []
+    for f in sorted(d.glob("*.md"), reverse=True) if d.is_dir() else []:
+        m = re.search(r"^- \*\*For:\*\* (.+)$", kd.read(f), re.M)
+        if m and want and want <= kd.words(m.group(1)):
+            out.append(f"briefs/preread/{f.name}")
+    return out[:2]
+
+
 def pack(e):
     title = kd.mask(e.get("subject") or "(no subject)")
     resp = str(e.get("my_response") or "").lower()
@@ -145,6 +160,12 @@ def pack(e):
     out += [f"- {a}" for a in actions + commits] or ["- none"]
     out += ["", "## Related documents", ""]
     out += [f"- {d}" for d in docs] or ["- none found in the library's indexes"]
+    pre = prereads(title)
+    if pre or REVIEW.search(title):
+        out += ["", "## Pre-read", ""]
+        out += [f"- The red team's pre-read: {p}" for p in pre] or [
+            f"- A design document to read first? `kit-preread FILE --meeting \"{title}\"` gives the red team's "
+            "top findings and five questions to ask."]
     out += ["", "## What to decide", ""]
     out += [f"- {d}" for d in decide] or ["- Set the decision you want from this meeting before it starts."]
     out += ["", f"_Prepared {kd.fmt(kd.today())} by kit-meetprep. Information only; nothing was sent._", ""]

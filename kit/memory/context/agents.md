@@ -242,7 +242,10 @@ computer.
   dependency map.
 - **Routine:** run it on each GDS draft (and an IA with a design) before the reviewer's pass and
   before {{OWNER}} shares it; send its findings to the writer that owns the draft. When it asks for
-  a threat model, brief the threat modeler.
+  a threat model, brief the threat modeler. For someone else's design that {{OWNER}} is reviewing,
+  `kit-preread FILE --meeting "TITLE"` runs its playbook on its own, closed, and writes a pre-read
+  (verdict, top findings, can't-tell items, five questions to ask) to `briefs/preread/`; the
+  meeting's prep pack picks it up.
 - **Setup:** `memory/context/standards.md` (DR tiers, baselines, template), `writing.md`.
 
 ## threat-modeler

@@ -52,12 +52,12 @@ def today():
 def load():
     if not DATA.exists():
         return {"people": [], "lead_days": 0}
-    return json.loads(DATA.read_text())
+    return json.loads(DATA.read_text(encoding="utf-8-sig"))
 
 
 def save(d):
     tmp = DATA.with_suffix(".tmp")
-    tmp.write_text(json.dumps(d, indent=2, ensure_ascii=False) + "\n")
+    tmp.write_text(json.dumps(d, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     os.chmod(tmp, 0o600)
     tmp.replace(DATA)
 
@@ -98,11 +98,12 @@ def parse_day(s):
             return today() - dt.timedelta(days=back)
     for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%m/%d/%Y", "%m/%d", "%d-%b"):
         try:
-            d = dt.datetime.strptime(s, fmt).date()
-            if fmt in ("%m/%d", "%d-%b"):
-                d = d.replace(year=today().year)
+            if fmt in ("%m/%d", "%d-%b"):      # no year: Python 3.15 won't parse a day without one
+                d = dt.datetime.strptime(f"{s} {today().year}", fmt + " %Y").date()
                 if d > today():
                     d = d.replace(year=d.year - 1)
+            else:
+                d = dt.datetime.strptime(s, fmt).date()
             return d
         except ValueError:
             pass

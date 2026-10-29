@@ -75,7 +75,7 @@ def load_schemas(folder=SCHEMA_DIR):
         t = re.sub(r"\.v\d+$", "", name)
         if t not in ALL_TYPES:
             continue
-        sch = json.loads(f.read_text())
+        sch = json.loads(f.read_text(encoding="utf-8-sig"))
         ver = split_version(sch.get("x-kit-version", ""))
         if ver:
             out.setdefault(t, {})[ver[0]] = (ver, sch)
@@ -110,7 +110,7 @@ def _format_ok(value, fmt):
 
 def _check(value, sch, path, folder, lenient, problems):
     if "$ref" in sch:
-        _check(value, json.loads((folder / sch["$ref"]).read_text()), path, folder, lenient, problems)
+        _check(value, json.loads((folder / sch["$ref"]).read_text(encoding="utf-8-sig")), path, folder, lenient, problems)
     for sub in sch.get("allOf", []):
         _check(value, sub, path, folder, lenient, problems)
     where = path or "record"

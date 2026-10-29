@@ -43,7 +43,7 @@ def main(argv):
     args = ap.parse_args(argv)
 
     try:
-        v = json.loads((INSTALL / "VERSION.json").read_text(encoding="utf-8"))
+        v = json.loads((INSTALL / "VERSION.json").read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         v = {}
     out = {"installed": {k: v.get(k) for k in ("version", "commit", "installed")} if v else None,

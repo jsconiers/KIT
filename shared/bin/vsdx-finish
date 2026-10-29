@@ -78,10 +78,10 @@ GENERIC = {
 
 def load_settings(path, report):
     if path:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8-sig") as f:
             given = json.load(f)
     elif os.path.exists(DEFAULT_CONFIG):
-        with open(DEFAULT_CONFIG, encoding="utf-8") as f:
+        with open(DEFAULT_CONFIG, encoding="utf-8-sig") as f:
             given = json.load(f)
     else:
         report.append("note: no settings file found, so generic built-in settings were used")

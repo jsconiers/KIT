@@ -116,11 +116,11 @@ def summary(ctl, params):
 
 
 def build_nist(d, date):
-    cat = json.loads((d / "NIST_SP-800-53_rev5_catalog.json").read_text())["catalog"]
+    cat = json.loads((d / "NIST_SP-800-53_rev5_catalog.json").read_text(encoding="utf-8-sig"))["catalog"]
     baselines = {}
     for name in ("LOW", "MODERATE", "HIGH", "PRIVACY"):
         f = d / f"NIST_SP-800-53_rev5_{name}-baseline_profile.json"
-        prof = json.loads(f.read_text())["profile"]
+        prof = json.loads(f.read_text(encoding="utf-8-sig"))["profile"]
         ids = set()
         for imp in prof.get("imports", []):
             for inc in imp.get("include-controls", []):
@@ -185,7 +185,7 @@ def ext_id(o):
 
 
 def build_attack(path, date):
-    b = json.loads(pathlib.Path(path).read_text())
+    b = json.loads(pathlib.Path(path).read_text(encoding="utf-8-sig"))
     objs = b["objects"]
     live = lambda o: not o.get("revoked") and not o.get("x_mitre_deprecated")
     tactics, by_stix_t, by_stix_m, techniques, mitigations = [], {}, {}, {}, {}
@@ -273,7 +273,7 @@ def build_attack(path, date):
 
 
 def build_ctid(path, date, known=None):
-    d = json.loads(pathlib.Path(path).read_text())
+    d = json.loads(pathlib.Path(path).read_text(encoding="utf-8-sig"))
     md = d["metadata"]
     mp = {}
     non = []

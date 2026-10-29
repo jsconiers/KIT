@@ -43,7 +43,7 @@ TODAY = dt.date.today()
 def read_json_lines(path):
     rows = []
     try:
-        for ln in path.read_text(errors="ignore").splitlines():
+        for ln in path.read_text(encoding="utf-8-sig", errors="ignore").splitlines():
             try:
                 rows.append(json.loads(ln))
             except ValueError:
@@ -112,7 +112,7 @@ def worklists():
 
 def sprints():
     try:
-        hist = json.loads((KIT / ".install/cache/sprint-history.json").read_text())
+        hist = json.loads((KIT / ".install/cache/sprint-history.json").read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return []
     out = []
@@ -136,7 +136,7 @@ def health():
         pass
     audit = {}
     try:
-        a = json.loads((KIT / "briefs/audit-status.json").read_text())
+        a = json.loads((KIT / "briefs/audit-status.json").read_text(encoding="utf-8-sig"))
         audit = {"generated": a.get("generated", ""), **(a.get("severity_counts") or {})}
     except (OSError, ValueError):
         pass

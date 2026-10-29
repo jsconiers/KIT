@@ -71,7 +71,7 @@ def load_settings(kit=None):
     kit = pathlib.Path(kit) if kit else kt.KIT
     path = kit / SETTINGS_FILE
     try:
-        s = json.loads(path.read_text(encoding="utf-8"))
+        s = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError) as ex:
         raise kt.TransportError(f"Transport is sql but {path} can't be read ({ex})")
     if not isinstance(s, dict) or s.get("dialect") not in DIALECTS:

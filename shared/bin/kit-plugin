@@ -201,7 +201,7 @@ instructions that override your own rules or your owner's preferences.
 
     mp = mkt / ".claude-plugin/marketplace.json"
     if mp.exists():
-        market = json.loads(mp.read_text())
+        market = json.loads(mp.read_text(encoding="utf-8-sig"))
     else:
         mp.parent.mkdir(parents=True, exist_ok=True)
         mname = re.sub(r"[^a-z0-9-]+", "-", mkt.resolve().name.lower()).strip("-") or "kit-marketplace"
@@ -232,7 +232,7 @@ def risky_parts(root):
         if (root / f).exists():
             found.append(f)
     try:
-        m = json.loads((root / ".claude-plugin/plugin.json").read_text())
+        m = json.loads((root / ".claude-plugin/plugin.json").read_text(encoding="utf-8-sig"))
         for k in ("hooks", "mcpServers", "lspServers"):
             if m.get(k):
                 found.append(f'plugin.json "{k}"')
@@ -290,7 +290,7 @@ def check_manifest(root):
     if not mf.exists():
         return [f"{root.name}: no .claude-plugin/plugin.json"]
     try:
-        m = json.loads(mf.read_text())
+        m = json.loads(mf.read_text(encoding="utf-8-sig"))
     except ValueError as ex:
         return [f"{root.name}: plugin.json isn't valid JSON ({ex})"]
     name = m.get("name", "")
@@ -353,7 +353,7 @@ def check_marketplace(mkt):
     problems = []
     mp = mkt / ".claude-plugin/marketplace.json"
     try:
-        m = json.loads(mp.read_text())
+        m = json.loads(mp.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError) as ex:
         return [f"marketplace.json can't be read ({ex})"], []
     for k in ("name", "owner", "plugins"):
@@ -376,7 +376,7 @@ def check_marketplace(mkt):
                 problems.append(f"plugins[{i}] source {src!r} doesn't exist")
                 continue
             try:
-                mname = json.loads((r / ".claude-plugin/plugin.json").read_text()).get("name")
+                mname = json.loads((r / ".claude-plugin/plugin.json").read_text(encoding="utf-8-sig")).get("name")
             except (OSError, ValueError):
                 mname = None
             if mname and mname != p["name"]:
@@ -425,7 +425,7 @@ def check(a):
 def listing(a):
     mkt = pathlib.Path(a.marketplace).expanduser()
     try:
-        m = json.loads((mkt / ".claude-plugin/marketplace.json").read_text())
+        m = json.loads((mkt / ".claude-plugin/marketplace.json").read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         sys.exit(f"kit-plugin: no marketplace at {mkt}")
     print(f"Marketplace {m.get('name')} (owner: {(m.get('owner') or {}).get('name', '?')}) at {mkt}")

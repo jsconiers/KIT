@@ -35,7 +35,7 @@ BACKUPS = q.KIT / ".install/backups"
 
 def ignored():
     try:
-        return set(json.loads(IGNORE.read_text()))
+        return set(json.loads(IGNORE.read_text(encoding="utf-8-sig")))
     except (OSError, ValueError):
         return set()
 
@@ -166,7 +166,7 @@ def touch(lines, r, log, note=None):
 
 def apply(args):
     try:
-        saved = json.loads(SAVED.read_text())
+        saved = json.loads(SAVED.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         sys.exit("kit-queue: no saved hygiene list (briefs/hygiene.json); run: kit-queue hygiene --json")
     entries = {e["id"]: e for e in saved.get("entries", [])}

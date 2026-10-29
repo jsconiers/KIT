@@ -50,7 +50,7 @@ DOING = {"card": "Send a card to", "gift": "Get a gift for", "call": "Call", "no
 def load():
     if not LIST.exists():
         return {"lead_days": 7, "items": []}
-    return json.loads(LIST.read_text())
+    return json.loads(LIST.read_text(encoding="utf-8-sig"))
 
 
 def save(cfg):

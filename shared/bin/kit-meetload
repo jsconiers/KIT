@@ -585,7 +585,7 @@ def main(argv):
         end = start + dt.timedelta(days=7 * weeks)
         s_dt, e_dt = dt.datetime.combine(start, dt.time()), dt.datetime.combine(end, dt.time())
         if js:
-            raw, source = json.loads(pathlib.Path(js).read_text(encoding="utf-8")), pathlib.Path(js).name
+            raw, source = json.loads(pathlib.Path(js).read_text(encoding="utf-8-sig")), pathlib.Path(js).name
         elif ics:
             raw, source = from_ics(ics, s_dt, e_dt), pathlib.Path(ics).name
         else:

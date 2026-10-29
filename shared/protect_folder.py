@@ -83,7 +83,7 @@ def main(argv):
     data = {}
     if path.exists():
         try:
-            data = json.loads(path.read_text() or "{}")
+            data = json.loads(path.read_text(encoding="utf-8-sig") or "{}")
         except json.JSONDecodeError as e:
             print(f"{path} isn't valid JSON ({e}). Fix it first.")
             return 1

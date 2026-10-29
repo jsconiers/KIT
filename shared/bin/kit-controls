@@ -89,7 +89,7 @@ HINTS = [
 def load(kind, need=True):
     p = DATA / FILES[kind]
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
+        return json.loads(p.read_text(encoding="utf-8-sig"))
     except FileNotFoundError:
         if need:
             print(f"kit-controls: missing data file {p}", file=sys.stderr)

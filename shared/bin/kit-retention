@@ -60,13 +60,13 @@ def now():
 def load_rules():
     if not RULES.exists():
         return {"default": "keep", "rules": []}
-    cfg = json.loads(RULES.read_text())
+    cfg = json.loads(RULES.read_text(encoding="utf-8-sig"))
     cfg.setdefault("rules", [])
     return cfg
 
 
 def load_holds():
-    return json.loads(HOLDS.read_text()) if HOLDS.exists() else {}
+    return json.loads(HOLDS.read_text(encoding="utf-8-sig")) if HOLDS.exists() else {}
 
 
 def save_holds(holds):
@@ -172,7 +172,7 @@ def cmd_dispose(yes):
         sys.exit("kit-retention: dispose needs --yes. Run kit-retention report first and read it.")
     if not REPORT.exists():
         sys.exit("kit-retention: no report yet; run kit-retention report first")
-    rep = json.loads(REPORT.read_text())
+    rep = json.loads(REPORT.read_text(encoding="utf-8-sig"))
     made = datetime.datetime.fromisoformat(rep["made"])
     if (now() - made).total_seconds() > 86400:
         sys.exit("kit-retention: the last report is more than a day old; run kit-retention report again")

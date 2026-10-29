@@ -88,7 +88,7 @@ def load_config():
     default_calendar = None
     exclude_names = set()
     try:
-        with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
+        with open(CONFIG_PATH, "r", encoding="utf-8-sig") as fh:
             data = json.load(fh)
         if isinstance(data, dict):
             d = data.get("default")

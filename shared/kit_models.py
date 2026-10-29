@@ -61,7 +61,7 @@ def load(kit=None):
     cfg = {}
     if path.exists():
         try:
-            cfg = json.loads(path.read_text(encoding="utf-8"))
+            cfg = json.loads(path.read_text(encoding="utf-8-sig"))
         except ValueError as e:
             raise ConfigError(f"{path} isn't valid JSON: {e}")
         if not isinstance(cfg, dict):
@@ -71,7 +71,7 @@ def load(kit=None):
     if folder.is_dir():
         for f in sorted(folder.glob("*.json")):
             try:
-                data = json.loads(f.read_text(encoding="utf-8"))
+                data = json.loads(f.read_text(encoding="utf-8-sig"))
             except ValueError as e:
                 raise ConfigError(f"{f} isn't valid JSON: {e}")
             if not isinstance(data, dict):

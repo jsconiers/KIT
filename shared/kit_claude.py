@@ -10,10 +10,16 @@
   path of an MCP config file (only the servers in it; see mcp_config_for).
 - Cost: kit-cost record --mode MODE afterward, so the job shows in Kit's spend like any run.
 - rc 142 means it hit the time limit. The text is Claude's final answer ("result" in the JSON output).
+- A long prompt (a whole document) goes on standard input with prompt_stdin=True: Windows caps a command
+  line at 32,767 characters.
+- agent_prompt(NAME) is the playbook of one of Kit's staff (~/.claude/agents/NAME.md, without its header),
+  for a job that runs that agent's work closed, with the playbook in the prompt.
 """
 import json
 import os
 import pathlib
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -29,8 +35,8 @@ DENY = ["Bash", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Task"
 
 
 def environment():
-    env = dict(os.environ, PATH=PATH)
-    if not env.get("CLAUDE_CODE_OAUTH_TOKEN"):
+    env = dict(os.environ) if os.name == "nt" else dict(os.environ, PATH=PATH)
+    if not env.get("CLAUDE_CODE_OAUTH_TOKEN") and sys.platform == "darwin":
         try:
             r = subprocess.run(["security", "find-generic-password", "-s", "kit-claude-token", "-w"],
                                capture_output=True, text=True, timeout=15)
@@ -52,15 +58,21 @@ def budget_stopped(mode):
         return False
 
 
+def claude_command():
+    """The claude executable: found on the PATH Kit's runs use (on Windows, claude.exe or claude.cmd)."""
+    path = None if os.name == "nt" else PATH
+    return shutil.which("claude", path=path) or "claude"
+
+
 def ask_claude(prompt, mode, allowed=(), deny=None, model=None, timeout=600, cwd=None, mcp=False, log=None,
-               extra_args=()):
+               extra_args=(), prompt_stdin=False):
     """(rc, final text). rc 75: skipped for the budget; 142: time limit; otherwise claude's exit code."""
     if budget_stopped(mode):
         return 75, ""
     deny = list(DENY if deny is None else deny)
     allowed = list(allowed)
     deny = [d for d in deny if d not in allowed and not any(a.startswith(d + "(") for a in allowed)]
-    cmd = ["claude", "-p", prompt, "--output-format", "json"]
+    cmd = [claude_command(), "-p"] + ([] if prompt_stdin else [prompt]) + ["--output-format", "json"]
     if model:
         cmd += ["--model", model]
     if isinstance(mcp, (str, os.PathLike)):
@@ -76,14 +88,17 @@ def ask_claude(prompt, mode, allowed=(), deny=None, model=None, timeout=600, cwd
     os.close(fd)
     started = time.time()
     try:
-        with open(out_path, "w") as f:
-            r = subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE, text=True, timeout=timeout,
-                               cwd=str(cwd or KIT), env=environment(), stdin=subprocess.DEVNULL)
+        with open(out_path, "w", encoding="utf-8") as f:
+            feed = {"input": prompt} if prompt_stdin else {"stdin": subprocess.DEVNULL}
+            r = subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
+                               timeout=timeout, cwd=str(cwd or KIT), env=environment(), **feed)
         rc = r.returncode
         err = (r.stderr or "").strip()
     except subprocess.TimeoutExpired:
         rc, err = 142, "time limit"
-    raw = pathlib.Path(out_path).read_text(errors="replace")
+    except OSError as e:                                  # claude isn't installed, or isn't on the PATH
+        rc, err = 127, str(e)
+    raw = pathlib.Path(out_path).read_text(encoding="utf-8", errors="replace")
     if COST.exists():
         args = [sys.executable, str(COST), "record", "--mode", mode, "--rc", str(rc), "--json-file", out_path]
         if log:
@@ -130,7 +145,7 @@ def mcp_config_for(*names):
     configuration, so a job loads only what it needs and no key is written into Kit's own files. The caller
     deletes it. None if none of the servers is configured."""
     try:
-        servers = json.loads((HOME / ".claude.json").read_text()).get("mcpServers", {})
+        servers = json.loads((HOME / ".claude.json").read_text(encoding="utf-8-sig")).get("mcpServers", {})
     except (OSError, ValueError):
         return None
     chosen = {n: servers[n] for n in names if n in servers}
@@ -141,3 +156,15 @@ def mcp_config_for(*names):
     os.close(fd)
     os.chmod(path, 0o600)
     return path
+
+
+def agent_prompt(name):
+    """The playbook of one of Kit's staff: ~/.claude/agents/NAME.md without its header, or "" when that agent
+    isn't installed. A closed job (one that leaves the user's settings and agents out) puts it at the top of
+    its prompt instead of loading the agent."""
+    try:
+        text = (HOME / ".claude" / "agents" / f"{name}.md").read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    m = re.match(r"^---\s*\n.*?\n---\s*\n", text, re.S)
+    return (text[m.end():] if m else text).strip()

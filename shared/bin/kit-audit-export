@@ -72,7 +72,7 @@ def cred_hits(text):
 
 def read_json(path):
     try:
-        return json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+        return json.loads(pathlib.Path(path).read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return None
 
@@ -344,7 +344,7 @@ def collect(source, pack, dest, start, end, snapshot_ok):
     if src == "approvals":
         _copy(pack / "approvals", dest / "approvals")
         n = len([x for x in (pack / "approvals/kit-run-audit.jsonl").read_text().splitlines() if x.strip()])
-        n += len(json.loads((pack / "approvals/kit-team-sent.json").read_text() or "[]"))
+        n += len(json.loads((pack / "approvals/kit-team-sent.json").read_text(encoding="utf-8-sig") or "[]"))
         pa = pack / "approvals/phone-approvals.md"
         if pa.exists():
             n += sum(1 for ln in pa.read_text().splitlines() if (d := kc.parse_date(ln)) and start <= d <= end)

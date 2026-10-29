@@ -118,7 +118,7 @@ def _hash(code, salt):
 def _load_codes(kit=None):
     p = _paths(kit)["codes"]
     try:
-        return json.loads(p.read_text())
+        return json.loads(p.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return []
 

@@ -189,7 +189,7 @@ def load_config(kit):
     if not p.exists():
         return {}
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
+        return json.loads(p.read_text(encoding="utf-8-sig"))
     except ValueError as e:
         raise Refused(f"kit-run.json isn't valid JSON: {e}") from None
 

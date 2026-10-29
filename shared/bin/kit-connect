@@ -46,7 +46,7 @@ PROBE_PROMPT = ("Connection check. Call the one tool you're allowed to call exac
 
 def guard_config():
     try:
-        return json.loads(GUARD.read_text(encoding="utf-8"))
+        return json.loads(GUARD.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return {}
 
@@ -103,7 +103,7 @@ def audit_outcome(tool, since):
     """'ok', an error summary, or '' from the connector guard's audit log for this tool since
     `since`. Reads only tool names, times, and error flags."""
     try:
-        cfg = json.loads((KIT / "memory/context/connector-guard.json").read_text())
+        cfg = json.loads((KIT / "memory/context/connector-guard.json").read_text(encoding="utf-8-sig"))
         d = pathlib.Path(os.path.expanduser(cfg.get("audit_dir", "")))
     except (OSError, ValueError):
         return ""

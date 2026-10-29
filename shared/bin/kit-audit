@@ -176,7 +176,7 @@ class Audit:
         self.findings, self.notes = [], []
         self.prev = {}
         try:
-            with open(os.path.join(self.out, "audit-status.json"), encoding="utf-8") as f:
+            with open(os.path.join(self.out, "audit-status.json"), encoding="utf-8-sig") as f:
                 self.prev = json.load(f)
         except (OSError, ValueError):
             self.prev = {}
@@ -224,7 +224,7 @@ class Audit:
                      f"{self.guard_path} doesn't exist, so the guard blocks every connector call and logs nothing.")
         else:
             try:
-                with open(self.guard_path, encoding="utf-8") as f:
+                with open(self.guard_path, encoding="utf-8-sig") as f:
                     g = json.load(f)
                 if not isinstance(g.get("allowed_servers"), list):
                     raise ValueError("allowed_servers isn't a list")

@@ -359,7 +359,7 @@ def load_rules(path):
     if not p.exists():
         raise RulesError(f"rules file {p} not found")
     try:
-        rules = json.loads(p.read_text(encoding="utf-8"))
+        rules = json.loads(p.read_text(encoding="utf-8-sig"))
     except json.JSONDecodeError as e:
         raise RulesError(f"rules file {p} isn't valid JSON: {e}")
     if not isinstance(rules, dict):

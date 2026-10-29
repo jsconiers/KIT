@@ -65,6 +65,20 @@ r = run()
 ok(r.returncode != 0, "no source refused")
 r = run("--from-config")
 ok(r.returncode != 0 and "CALENDAR_JSON_CMD" in r.stderr, "--from-config without a command explains")
+(kit / "briefs/preread").mkdir(parents=True, exist_ok=True)
+(kit / "briefs/preread/2026-10-19-payments-gds.md").write_text("# Pre-read: payments-gds.docx\n\n- **For:** Payments design review, 19-Oct-2026\n")
+cal2 = [{"start": "2026-10-19T10:00:00", "end": "2026-10-19T11:00:00", "all_day": False, "subject": "Payments design review",
+         "location": "", "organizer": "x", "has_attendees": True, "my_response": "accepted"},
+        {"start": "2026-10-19T10:30:00", "end": "2026-10-19T11:30:00", "all_day": False, "subject": "Architecture review board",
+         "location": "", "organizer": "x", "has_attendees": True, "my_response": "accepted"}]
+(tmp / "cal2.json").write_text(json.dumps(cal2))
+r = run("--json", str(tmp / "cal2.json"))
+t = (kit / "briefs/meetprep/2026-10-19-1000-payments-design-review.md").read_text()
+ok("## Pre-read" in t and "briefs/preread/2026-10-19-payments-gds.md" in t, "a design review links its pre-read")
+t = (kit / "briefs/meetprep/2026-10-19-1030-architecture-review-board.md").read_text()
+ok("## Pre-read" in t and 'kit-preread FILE --meeting "Architecture review board"' in t, "a review with no pre-read says how to make one")
+t = (kit / "briefs/meetprep/2026-10-19-1000-payments-upgrade-review.md").read_text()
+ok("## Pre-read" not in t, "an ordinary review gets no pre-read section")
 plist = repo / "platform/mac/morning/com.USER.kit.meetprep.plist.template"
 pt = plist.read_text()
 ok(pt.count("<dict><key>Weekday") == 115 and "kit-meetprep" in pt and "PAUSED" in pt, "launchd template: weekdays 07:00-18:00 every 30 min, honours pause")

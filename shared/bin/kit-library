@@ -62,7 +62,11 @@ plain text and markdown, and Scrivener projects. Pages, Keynote, audio, and vide
 name, folder, and date. Pictures are left out unless a collection says --images.
 """
 import datetime as dt
-import fcntl
+try:
+    import fcntl
+except ImportError:              # Windows: the index lock is a byte locked with msvcrt instead
+    fcntl = None
+    import msvcrt
 import fnmatch
 import html
 import json
@@ -218,7 +222,7 @@ def load_config():
     if not CONFIG.exists():
         return json.loads(json.dumps(DEFAULT_CONFIG))
     try:
-        cfg = json.loads(CONFIG.read_text())
+        cfg = json.loads(CONFIG.read_text(encoding="utf-8-sig"))
     except ValueError as e:
         raise Fail(f"{tilde(CONFIG)} isn't valid JSON ({e}); fix it or restore it from git")
     for k, v in DEFAULT_CONFIG.items():
@@ -240,7 +244,7 @@ def save_config(cfg):
     LIBRARY.mkdir(parents=True, exist_ok=True)
     cfg.pop("_pairs", None)
     tmp = CONFIG.with_suffix(".tmp")
-    tmp.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n")
+    tmp.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     tmp.replace(CONFIG)
 
 
@@ -848,14 +852,24 @@ class IndexLock:
         STATE.mkdir(parents=True, exist_ok=True)
         self.f = open(LOCK, "w")
         try:
-            fcntl.flock(self.f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if fcntl:
+                fcntl.flock(self.f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            else:
+                msvcrt.locking(self.f.fileno(), msvcrt.LK_NBLCK, 1)
         except OSError:
             self.f.close()
             raise Fail("another index run is going; try again when it finishes")
         return self
 
     def __exit__(self, *exc):
-        fcntl.flock(self.f, fcntl.LOCK_UN)
+        if fcntl:
+            fcntl.flock(self.f, fcntl.LOCK_UN)
+        else:
+            try:
+                self.f.seek(0)
+                msvcrt.locking(self.f.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
         self.f.close()
 
 
@@ -1660,7 +1674,7 @@ def flush(cfg):
                 shutil.rmtree(job, ignore_errors=True)       # a delivery that never finished writing
             continue
         try:
-            m = json.loads(mf.read_text())
+            m = json.loads(mf.read_text(encoding="utf-8-sig"))
             parts = [check_part(p) for p in m["dir"].split("/") if p]
             dest_dir = root.joinpath(*parts)
             dest_dir.mkdir(parents=True, exist_ok=True)

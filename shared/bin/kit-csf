@@ -31,7 +31,7 @@ KINDS = ("yes", "partial", "no", "na", "blank")
 
 
 def load_data():
-    d = json.loads(DATA.read_text())
+    d = json.loads(DATA.read_text(encoding="utf-8-sig"))
     funcs, cats = {}, {}
     for f in d["functions"]:
         funcs[f["id"]] = f["name"]

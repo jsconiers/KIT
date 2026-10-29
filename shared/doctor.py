@@ -72,7 +72,7 @@ def check_import():
 def check_settings():
     p = HOME / ".claude/settings.json"
     try:
-        s = json.loads(p.read_text())
+        s = json.loads(p.read_text(encoding="utf-8-sig"))
     except Exception as e:  # noqa: BLE001
         add("FAIL", "Claude Code settings", f"can't read {p}: {e}")
         return
@@ -95,7 +95,11 @@ def check_index():
     listed = set()
     for ix in [MEM / "INDEX.md", MEM / "personal/INDEX.md"]:
         if not ix.exists():
-            problems.append(f"{ix.relative_to(KIT)} missing")
+            if ix.parent.name == "personal":     # optional until there are personal notes to index
+                add("warn", "Personal notes index", "memory/personal/INDEX.md is missing; re-run the installer "
+                    "to add it")
+            else:
+                problems.append(f"{ix.relative_to(KIT).as_posix()} missing")
             continue
         for path in re.findall(r"^- `([^`]+)`", ix.read_text(), re.M):
             listed.add(path)
@@ -111,6 +115,10 @@ def check_index():
 
 
 def check_jobs():
+    if os.name == "nt":
+        return check_tasks()
+    if sys.platform != "darwin":
+        return                                   # launchd is macOS only
     uid = os.getuid()
     for name in LABELS:
         plist = HOME / f"Library/LaunchAgents/{label(name)}.plist"
@@ -119,6 +127,21 @@ def check_jobs():
         code, _ = run(["launchctl", "print", f"gui/{uid}/{label(name)}"])
         check(code == 0, f"Scheduled {name} run", "loaded",
               f"not loaded; run: launchctl bootstrap gui/$(id -u) {plist}")
+
+
+def check_tasks():
+    """Windows: Kit's scheduled tasks (Task Scheduler folder \\Kit\\, from register-tasks.ps1); a disabled one warns."""
+    import csv
+    import io
+    code, out = run(["schtasks", "/Query", "/FO", "CSV", "/NH"])
+    if code != 0:
+        return
+    for row in csv.reader(io.StringIO(out)):
+        if len(row) >= 3 and row[0].startswith("\\Kit\\"):
+            name, status = row[0].rsplit("\\", 1)[-1], row[2].strip()
+            check(status.lower() != "disabled", f"Scheduled task {name}", status or "ready",
+                  "disabled; enable it in Task Scheduler (folder Kit), or run "
+                  "platform\\windows\\morning\\register-tasks.ps1 again", "warn")
 
 
 def check_runs():
@@ -199,7 +222,7 @@ def check_textback():
     if not cfg.exists() or not re.search(r'^TEXTBACK="?on"?\s*$', cfg.read_text(errors="ignore"), re.M):
         return
     try:
-        st = _json.loads((KIT / ".install/textback/state.json").read_text())
+        st = _json.loads((KIT / ".install/textback/state.json").read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         add("warn", "Texting Kit", "hasn't run yet (see: kit-textback status)")
         return
@@ -269,7 +292,7 @@ def check_offsite():
     if not st.exists():
         return
     try:
-        data = _json.loads(st.read_text())
+        data = _json.loads(st.read_text(encoding="utf-8-sig"))
         last = dt.datetime.fromisoformat(data["last_ok"])
     except Exception:  # noqa: BLE001
         add("warn", "Off-computer backup", "its status file can't be read")
@@ -294,9 +317,44 @@ def check_secrets():
 
 
 def check_permissions():
+    if os.name == "nt":
+        return check_acl()
     mode = KIT.stat().st_mode & 0o777
     check(mode & 0o077 == 0, "Kit's folder is private", "only you can read it",
           f"permissions are {oct(mode)}; run: chmod 700 ~/Claude/Agents/kit", "warn")
+
+
+def acl_entries(text, folder):
+    """The access entries in icacls output for one folder: [(who, rights)]."""
+    out = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.lower().startswith("successfully processed"):
+            continue
+        if line.lower().startswith(str(folder).lower()):
+            line = line[len(str(folder)):].strip()
+        who, sep, rights = line.rpartition(":(")
+        if sep and who:
+            out.append((who.strip(), "(" + rights))
+    return out
+
+
+def check_acl():
+    """Windows: file modes don't show who can open a folder (Python reports 0o777 for every one), so read its
+    access list. The installer leaves exactly one entry, your own account, inherited by everything inside."""
+    code, out = run(["icacls", str(KIT)])
+    entries = acl_entries(out, KIT) if code == 0 else []
+    if not entries:
+        add("warn", "Kit's folder is private", f"couldn't read its access list ({out.strip()[:120]})")
+        return
+    me = os.environ.get("USERNAME", "").lower()
+    others = sorted({who for who, _ in entries if who.lower().rsplit("\\", 1)[-1] != me})
+    inherited = any("(I)" in rights for _, rights in entries)
+    fix = ("re-run the installer (it locks the folder to your account), or run: icacls "
+           "\"%USERPROFILE%\\Claude\\Agents\\kit\" /inheritance:r /grant:r \"%USERNAME%\":(OI)(CI)F")
+    check(not others and not inherited, "Kit's folder is private", "only your account can open it",
+          ("others can open it: " + ", ".join(others[:4]) if others else "it takes its access from the folder above")
+          + "; " + fix, "warn")
 
 
 def agent_drift(kit=None, home=None):
@@ -368,7 +426,7 @@ def check_outlook():
 def check_holds():
     f = KIT / "memory/context/legal-holds.json"
     try:
-        holds = json.loads(f.read_text()) if f.exists() else {}
+        holds = json.loads(f.read_text(encoding="utf-8-sig")) if f.exists() else {}
     except Exception:  # noqa: BLE001
         add("warn", "Legal holds", f"{f} can't be read; treat every project as held until it's fixed")
         return
@@ -400,7 +458,7 @@ def check_version():
     """Installed Kit version, and whether the install matches the repo clone's commit."""
     import json as _json
     try:
-        v = _json.loads((KIT / ".install/VERSION.json").read_text(encoding="utf-8"))
+        v = _json.loads((KIT / ".install/VERSION.json").read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         add("warn", "Kit version", "not recorded yet (rerun the installer)")
         return
@@ -488,7 +546,7 @@ def check_connectors_quick():
     """Connector credentials by name (no claude call, no network): which allowed servers name a
     credential variable that isn't set. The full check is: kit-connect test."""
     try:
-        cfg = json.loads((KIT / "memory/context/connector-guard.json").read_text())
+        cfg = json.loads((KIT / "memory/context/connector-guard.json").read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return
     missing = [f"{s} ({v})" for s in cfg.get("allowed_servers") or []
@@ -610,7 +668,7 @@ def check_guard():
     cfgp = HOME / "Claude/MCP/scalper-bot/guard.json"
     if not cfgp.exists():
         return
-    cfg = _json.loads(cfgp.read_text())
+    cfg = _json.loads(cfgp.read_text(encoding="utf-8-sig"))
     armed = False
     try:
         with open(HOME / f"Library/LaunchAgents/{label('guard')}.plist", "rb") as f:
@@ -654,7 +712,7 @@ CAUSES = {"setup": "setup fields not set", "setup-missing": "setup file missing"
 
 def _read(path):
     try:
-        return pathlib.Path(path).read_text(encoding="utf-8", errors="replace")
+        return pathlib.Path(path).read_text(encoding="utf-8-sig", errors="replace")
     except OSError:
         return None
 

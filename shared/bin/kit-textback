@@ -99,7 +99,7 @@ def log(msg):
 
 def load_state():
     try:
-        return json.loads(STATE.read_text())
+        return json.loads(STATE.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return {}
 
@@ -666,7 +666,7 @@ CODE_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 
 def pending_load():
     try:
-        return {k: v for k, v in json.loads(PENDING.read_text()).items() if v.get("expires", 0) > time.time()}
+        return {k: v for k, v in json.loads(PENDING.read_text(encoding="utf-8-sig")).items() if v.get("expires", 0) > time.time()}
     except (OSError, ValueError):
         return {}
 
@@ -738,7 +738,7 @@ def claude_json(prompt, ctx, allowed=(), timeout=150, parse=True):
 def kit_calendars():
     """{short name: kitcal calendar} for the calendars texts may change: the default and the secondary."""
     try:
-        cfg = json.loads((INSTALL / "calendar/config.json").read_text())
+        cfg = json.loads((INSTALL / "calendar/config.json").read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return {}
     out = {}
@@ -969,8 +969,8 @@ def ask(question, ctx):
         "confirm in a session. A text can show on a locked screen, so keep sensitive matters (health, "
         "money, legal) to a few words, never include ID or account numbers or passwords, for "
         "pastoral care give first names and actions only, and keep work matters and the team feedback log "
-        "out of texts. Letters, receipts, the trading journal, and personal notes are closed to text "
-        "questions: if he asks about them, say so and suggest a session. If you don't know, say so."
+        "out of texts. Letters, receipts, the trading journal, board minutes, and personal notes are closed "
+        "to text questions: if he asks about them, say so and suggest a session. If you don't know, say so."
         "\n\nContext:\n"
         + "\n".join(context) + f"\n\nHis text: {question}")
     model = cfg.get("TEXTBACK_MODEL") or "sonnet"
@@ -983,8 +983,8 @@ def ask(question, ctx):
             env["CLAUDE_CODE_OAUTH_TOKEN"] = tok
     # Only the rules named here apply: --setting-sources leaves out ~/.claude/settings.json, whose allow
     # rules would otherwise add to this list (kit-feedback, kit-visits, kit-touch, kitmail, ...), so Bash
-    # is limited to the two library commands. Letters, receipts, the journal, and personal notes stay
-    # closed to texts (security review K-03, 29-Oct-2026).
+    # is limited to the two library commands. Letters, receipts, the journal, board minutes (church/), and
+    # personal notes stay closed to texts (security review K-03, 29-Oct-2026).
     cmd = ["claude", "-p", prompt, "--output-format", "json", "--model", model,
            "--setting-sources", "project,local",
            "--strict-mcp-config", "--mcp-config", '{"mcpServers": {}}',
@@ -994,7 +994,7 @@ def ask(question, ctx):
            "Agent", "Read(~/Claude/Agents/kit/care/**)", "Read(~/Claude/Agents/kit/letters/**)",
            "Read(~/Claude/Agents/kit/feedback/**)", "Read(~/Claude/Agents/kit/.install/**)",
            "Read(~/Claude/Agents/kit/journal/**)", "Read(~/Claude/Agents/kit/receipts/**)",
-           "Read(~/Claude/Agents/kit/memory/personal/**)"]
+           "Read(~/Claude/Agents/kit/church/**)", "Read(~/Claude/Agents/kit/memory/personal/**)"]
     started = time.time()
     try:
         with open(out_path, "w") as f:
@@ -1060,7 +1060,7 @@ def fetch(since, chats, wait):
         subprocess.run(["/usr/bin/open", "-W", "-n", "-g", str(APP), "--args", "--out", out, "--since", str(since),
                         "--chats", ",".join(chats), "--wait", str(wait), "--every", "2"],
                        capture_output=True, timeout=wait + 60)
-        data = json.loads(pathlib.Path(out).read_text())
+        data = json.loads(pathlib.Path(out).read_text(encoding="utf-8-sig"))
     except (OSError, ValueError, subprocess.SubprocessError) as e:
         return None, [], f"KitMessages gave no answer ({str(e)[:80]})"
     finally:

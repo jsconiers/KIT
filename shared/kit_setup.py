@@ -77,6 +77,8 @@ ASK = [
     "Bash(kit-library tag *)", "Bash(kit-library untag *)", "Bash(kit-library rule *)",
     "Bash(kit-library unrule *)", "Bash(kit-library exclude *)", "Bash(kit-library include *)",
     "Bash(kit-library define *)",
+    # A pre-read runs the red team on a document with Claude (a paid run), so it asks first.
+    "Bash(kit-preread *)",
 ]
 
 
@@ -238,7 +240,7 @@ def load_settings():
     if not SETTINGS.exists():
         return {}, False
     try:
-        data = json.loads(real(SETTINGS).read_text(encoding="utf-8"))
+        data = json.loads(real(SETTINGS).read_text(encoding="utf-8-sig"))
     except ValueError as exc:
         raise Fail(f"{SETTINGS} isn't valid JSON ({exc}). Nothing was changed; fix it and run this again.")
     if not isinstance(data, dict):
@@ -273,7 +275,7 @@ def new_manifest():
 
 def read_manifest():
     try:
-        data = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        data = json.loads(MANIFEST.read_text(encoding="utf-8-sig"))
         return data if isinstance(data, dict) else None
     except (OSError, ValueError):
         return None
@@ -301,8 +303,8 @@ def cmd_scaffold(args):
     KIT.mkdir(parents=True, exist_ok=True)
     if os.name != "nt":
         os.chmod(KIT, 0o700)
-    for folder in ("memory/people", "memory/projects", "memory/context", "lessons", "preferences",
-                   ".install/backups"):
+    for folder in ("memory/people", "memory/projects", "memory/context", "memory/personal",
+                   "memory/personal/decisions", "lessons", "preferences", ".install/backups"):
         (KIT / folder).mkdir(parents=True, exist_ok=True)
     date = today()
     before = kit_version.inventory(INSTALL_DIR)     # what the last install had, for release notes
@@ -379,7 +381,7 @@ def install_skills(src=None, dest_root=None):
         want = _skill_hash(folder)
         if dest.exists():
             try:
-                mark = json.loads((dest / SKILL_MARK).read_text(encoding="utf-8"))
+                mark = json.loads((dest / SKILL_MARK).read_text(encoding="utf-8-sig"))
             except (OSError, ValueError):
                 mark = None
             if not isinstance(mark, dict) or mark.get("sha256") != _skill_hash(dest):

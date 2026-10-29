@@ -73,7 +73,7 @@ def from_lifecycle(radar):
     if not f.exists():
         return out
     try:
-        s = json.loads(f.read_text(encoding="utf-8"))
+        s = json.loads(f.read_text(encoding="utf-8-sig"))
     except ValueError:
         return out
     for i in s.get("items", []):

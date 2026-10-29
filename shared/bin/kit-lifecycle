@@ -107,7 +107,7 @@ def read_rows(path):
     if path.suffix.lower() != ".json":
         with path.open(newline="", encoding="utf-8-sig") as f:
             return list(csv.DictReader(f)), {}
-    data = json.loads(path.read_text(encoding="utf-8"))
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
     if not isinstance(data, dict):
         return list(data), {}
     if "rows" in data and "columns" in data:
@@ -169,7 +169,7 @@ def os_aliases(radar):
     m = dict(OS_ALIASES)
     f = radar / "os-aliases.json" if radar else None
     if f and f.exists():
-        m.update({kr.norm(k): v for k, v in json.loads(f.read_text(encoding="utf-8")).items()})
+        m.update({kr.norm(k): v for k, v in json.loads(f.read_text(encoding="utf-8-sig")).items()})
     return m
 
 
@@ -196,7 +196,7 @@ def import_export(path, aliases, source, today):
 
 
 def load_eol(path):
-    data = json.loads(path.read_text(encoding="utf-8"))
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
     entries = data.get("entries", data) if isinstance(data, dict) else data
     out = []
     for e in entries:

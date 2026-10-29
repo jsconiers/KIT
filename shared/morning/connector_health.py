@@ -241,7 +241,7 @@ def track(results, out_dir, kit, todo, n_streak, today):
     history = record(load_history(hist_path), results, today)
     save_json_lines(hist_path, history)
     try:
-        with open(alerts_path, encoding="utf-8") as f:
+        with open(alerts_path, encoding="utf-8-sig") as f:
             alerts = json.load(f)
         if not isinstance(alerts, dict):
             alerts = {}

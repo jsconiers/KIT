@@ -74,7 +74,7 @@ def plan():
 
 def installed_version():
     try:
-        return json.loads((KIT / ".install/VERSION.json").read_text(encoding="utf-8"))
+        return json.loads((KIT / ".install/VERSION.json").read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return {}
 

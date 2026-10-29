@@ -8,6 +8,18 @@ versions follow [semantic versioning](https://semver.org).
 ## [Unreleased]
 
 ### Added
+- `kit-preread`: a pre-read for a design or architecture review. Kit's red team reads the document (Word,
+  PowerPoint, Excel, OpenDocument, text, or PDF) in a closed run: its text goes in the prompt with the
+  red team's playbook and the team's standards, with no shell, web, MCP servers, or your own permission
+  rules (a PDF Kit can't turn into text is read from a temporary copy, with private folders denied). It
+  writes briefs/preread/: a verdict, the five findings that matter most, what the document doesn't say,
+  and five questions to ask, each tied to a finding. `--meeting`, `--date`, `--deliver` (Kit Output >
+  Reports > Pre-reads), `--dry-run`, `--list`. Work content: never texted. Claude Code asks before it
+  runs (it's a paid run).
+- `kit-meetprep`: a design or architecture review's pack links its pre-read, or says how to make one.
+- `kit_claude`: `prompt_stdin=True` sends a long prompt on standard input (Windows caps a command line at
+  32,767 characters); `agent_prompt(NAME)` gives a closed job one of Kit's staff playbooks; a missing
+  `claude` command is exit 127 instead of a crash; on Windows the PATH is left as it is.
 - `kit-touch`: keep in touch. Who you haven't talked to in a while, each with their own rhythm; past
   calls and meals on the calendar ("Call with NAME", "Lunch with NAME") count as talking, coming ones
   mean it's planned; `talked`, `snooze`, `scan [--add]`, and brief lines (work contacts tagged [work]).
@@ -261,6 +273,21 @@ versions follow [semantic versioning](https://semver.org).
   `--allow-plain` (or encryption).
 
 ### Fixed
+- Windows: `doctor.py` stopped with an error at the scheduled-jobs check, because Windows has no
+  `os.getuid`. It now checks Kit's tasks in Task Scheduler (`\Kit\`) and warns on a disabled one.
+- Windows: `doctor.py` warned that the Kit folder was open to everyone (0o777), a file mode Windows
+  doesn't keep. It now reads the folder's access list with icacls and warns on another account's entry
+  or an inherited one, with the command that fixes it.
+- A clean install now makes `memory/personal/`, with its `INDEX.md` and `decisions/`, so `doctor.py`
+  no longer fails on a missing personal index right after the install; on an older install it's a
+  warning that says to run the installer again.
+- JSON saved with a UTF-8 byte-order mark (Windows PowerShell 5.1's `-Encoding UTF8` writes one) was
+  refused. Everywhere Kit reads JSON now accepts one, and Kit's own writers say utf-8 explicitly.
+- `kit-library`, and the tools that use it, load on Windows: the index lock uses msvcrt where there's
+  no fcntl. `kit_claude` finds `claude` through the PATH (`claude.cmd` too) and looks in the Keychain
+  only on macOS.
+- `kit-touch` and `kit-feedback`: a date without a year ("26-Oct", "10/26") works again. Python 3.15 no
+  longer reads a day and month on their own, so the year is added before the date is read.
 - Texting Kit: questions really are read-only now. The question run, and the small parse and draft
   runs, start with `--setting-sources project,local`, so the allow rules in `~/.claude/settings.json`
   no longer add to their tool lists: Bash is limited to `kit-library search` and `show`, and commands

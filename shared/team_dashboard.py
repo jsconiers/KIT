@@ -70,7 +70,7 @@ def load(sources, schemas):
             try:
                 if f.stat().st_size > MAX_BYTES:
                     raise ValueError("file too large")
-                rec = json.loads(f.read_text())
+                rec = json.loads(f.read_text(encoding="utf-8-sig"))
             except (OSError, ValueError) as ex:
                 warnings.append(("file", where, f"unreadable: {ex}"))
                 continue

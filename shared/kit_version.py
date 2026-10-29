@@ -41,7 +41,7 @@ def package_commit(repo):
 def load(install_dir):
     p = Path(install_dir) / "VERSION.json"
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
+        return json.loads(p.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return {}
 

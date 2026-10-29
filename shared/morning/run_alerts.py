@@ -338,7 +338,7 @@ COST_CLEARS = {"warn": "the projection falls back under or the month ends",
 
 def load_state(path):
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8-sig") as f:
             st = json.load(f)
         if isinstance(st, dict) and isinstance(st.get("alerts", {}), dict):
             st.setdefault("alerts", {})

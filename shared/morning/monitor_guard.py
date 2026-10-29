@@ -148,7 +148,7 @@ def config_problems(kit, any_guarded, dry_run):
         return ([f"guard settings missing ({path}), so the guard blocks every connector call"]
                 if any_guarded else []), None
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8-sig") as f:
             cfg = json.load(f)
         if not isinstance(cfg, dict) or not isinstance(cfg.get("allowed_servers"), list):
             raise ValueError("allowed_servers isn't a list")

@@ -54,7 +54,7 @@ def parse(pairs, file):
     vals = {k: v for k, (v, _) in INPUTS.items()}
     given = {}
     if file:
-        given.update(json.loads(pathlib.Path(file).read_text()))
+        given.update(json.loads(pathlib.Path(file).read_text(encoding="utf-8-sig")))
     for p in pairs:
         if "=" not in p:
             raise SystemExit(f"kit-sizing: expected key=value, got {p!r} (see --keys)")

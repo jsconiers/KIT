@@ -74,7 +74,7 @@ def settings(a):
     if a.timeout <= a.min_left * 60:
         return "the run's time limit is too short", [], ""
     try:
-        with open(a.guard, encoding="utf-8") as f:
+        with open(a.guard, encoding="utf-8-sig") as f:
             cfg = json.load(f)
     except (OSError, ValueError):
         return "connector-guard.json can't be read", [], ""

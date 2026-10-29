@@ -36,7 +36,7 @@ def call(args, timeout=60):
     try:
         subprocess.run(["/usr/bin/open", "-W", "-n", "-g", str(APP), "--args", "--out", out, *args],
                        capture_output=True, timeout=timeout)
-        data = json.loads(pathlib.Path(out).read_text())
+        data = json.loads(pathlib.Path(out).read_text(encoding="utf-8-sig"))
     except (OSError, ValueError, subprocess.SubprocessError) as e:
         return None, f"no answer from KitMessages ({str(e)[:80]})"
     finally:

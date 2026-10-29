@@ -185,7 +185,7 @@ def load_policy(kit=None):
         pol["_source"] = "defaults (no sharing-policy.json)"
         return pol
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
         if not isinstance(data, dict):
             raise ValueError("not a JSON object")
     except (OSError, ValueError) as ex:
@@ -343,7 +343,7 @@ class FolderTransport:
 
     def read_path(self, path):
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            return json.loads(path.read_text(encoding="utf-8-sig"))
         except (OSError, ValueError):
             return None
 
@@ -689,7 +689,7 @@ def sharing_settings(kit=KIT):
     md = _setting_lines(kit / "memory/context/sharing.md")
     js = {}
     try:
-        js = json.loads((kit / "memory/context/sharing.json").read_text())
+        js = json.loads((kit / "memory/context/sharing.json").read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         pass
     pick = lambda key, jkey: md.get(key) if not _unset(md.get(key)) else (js.get(jkey) or "")  # noqa: E731
@@ -742,14 +742,14 @@ def team_retention(kit=None):
     kit = pathlib.Path(kit) if kit else KIT
     days, holds = None, {}
     try:
-        rules = json.loads((kit / "memory/context/retention.json").read_text())
+        rules = json.loads((kit / "memory/context/retention.json").read_text(encoding="utf-8-sig"))
         days = (rules.get("team_cache") or {}).get("older_than_days")
     except (OSError, ValueError, AttributeError):
         days = None
     hp = kit / "memory/context/legal-holds.json"
     if hp.exists():
         try:
-            holds = json.loads(hp.read_text())
+            holds = json.loads(hp.read_text(encoding="utf-8-sig"))
             if not isinstance(holds, dict):
                 holds = {"all": {"reason": "holds file isn't an object"}}
         except (OSError, ValueError):
