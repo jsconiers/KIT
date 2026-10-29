@@ -111,6 +111,9 @@ if ($Delivery.Trim() -eq "") {
 }
 
 # --- Locate Python (prefer the "py -3" launcher; fall back to "python") ----------------------
+# Every Python this run starts, and the Kit tools Claude starts during it, run in UTF-8 mode: Kit's files are
+# UTF-8, and before Python 3.15 Windows reads and writes text in the ANSI code page (as the command shims do).
+$env:PYTHONUTF8 = "1"
 function Resolve-Python {
     if (Get-Command py -ErrorAction SilentlyContinue)     { return @{ Exe = "py";     Args = @("-3") } }
     if (Get-Command python -ErrorAction SilentlyContinue) { return @{ Exe = "python"; Args = @() } }

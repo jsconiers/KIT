@@ -283,6 +283,11 @@ versions follow [semantic versioning](https://semver.org).
   warning that says to run the installer again.
 - JSON saved with a UTF-8 byte-order mark (Windows PowerShell 5.1's `-Encoding UTF8` writes one) was
   refused. Everywhere Kit reads JSON now accepts one, and Kit's own writers say utf-8 explicitly.
+- Windows: Kit's command shims, its scheduled runs (`run.ps1`, `preflight.ps1`, and the backup and sync
+  tasks), and the installer run Python in UTF-8 mode (`PYTHONUTF8=1`). Before Python 3.15, Python on
+  Windows reads and writes text in the ANSI code page, so a curly quote or an emoji in a note could stop
+  a tool (`todo` couldn't read a QUEUE.md with a closing curly quote in it). After updating, run
+  `register-tasks.ps1` again so the backup and sync tasks get the setting too.
 - `kit-library`, and the tools that use it, load on Windows: the index lock uses msvcrt where there's
   no fcntl. `kit_claude` finds `claude` through the PATH (`claude.cmd` too) and looks in the Keychain
   only on macOS.

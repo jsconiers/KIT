@@ -17,6 +17,9 @@
 #   Kit Trade Journal     weekdays (Mon-Fri)  16:20   -> run.ps1 journal   (optional; see note)
 #   Kit Login Check       daily               06:45, 15:45 -> preflight.ps1
 #
+# Every Python these tasks start runs in UTF-8 mode (PYTHONUTF8=1): run.ps1 and preflight.ps1 set it, and
+# the backup and sync tasks set it in their command, since Kit's files are UTF-8.
+#
 # The post-open read and the trade journal are optional extras for a trading setup. If you don't
 # trade, set $RegisterOpen and $RegisterJournal to $false below. (The journal has no launchd plist
 # on the Mac; run.sh documents a 16:20 journal run.)
@@ -99,7 +102,7 @@ $backupPy = Join-Path $KitHome ".install\shared\bin\kit-backup"
 Register-KitTask -Name "Kit Backup" `
     -Description "Kit's daily backup of its folder and history (port of com.USER.kit.backup)." `
     -Trigger (New-ScheduledTaskTrigger -Daily -At "12:30pm") `
-    -ActionArgs @("-NoProfile", "-WindowStyle", "Hidden", "-Command", "`"python '$backupPy'`"")
+    -ActionArgs @("-NoProfile", "-WindowStyle", "Hidden", "-Command", "`"`$env:PYTHONUTF8='1'; python '$backupPy'`"")
 
 # --- Kit Reminders Sync: every 15 minutes + at logon -----------------------------------------
 # Mirrors com.USER.kit.sync (StartInterval 900, RunAtLoad true). A repeating "Once" trigger gives
@@ -111,7 +114,7 @@ Register-KitTask -Name "Kit Reminders Sync" `
     -Description "Kit's to-do <-> reminders sync (port of com.USER.kit.sync)." `
     -Trigger @($syncRepeat, $syncAtLogon) `
     -ActionArgs @("-ExecutionPolicy", "Bypass", "-NoProfile", "-WindowStyle", "Hidden", "-Command",
-                  "& { py -3 `"$SyncPy`" ; if (`$LASTEXITCODE -ne 0) { python `"$SyncPy`" } }")
+                  "`$env:PYTHONUTF8='1'; & { py -3 `"$SyncPy`" ; if (`$LASTEXITCODE -ne 0) { python `"$SyncPy`" } }")
 
 # --- Kit Trade Journal: weekdays 16:20 (optional extra for a trading setup; no Mac plist) -----
 if ($RegisterJournal) {

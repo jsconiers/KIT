@@ -139,6 +139,11 @@ if (-not $pyExe) {
     Die "Python not found. Install Python 3.8+ from the work software catalogue, then run this installer again."
 }
 
+# Kit's files are UTF-8. Before Python 3.15, Python on Windows reads and writes text in the ANSI code page unless
+# it runs in UTF-8 mode, so a curly quote or an emoji in a note could stop a tool. The installer's own Python runs
+# use UTF-8 mode, and so does every command shim below (and the scheduled runs, in run.ps1 and preflight.ps1).
+$env:PYTHONUTF8 = "1"
+
 # Confirm it actually runs and is >= 3.8 (same gate as install.sh).
 & $pyExe @pyArgs -c "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)" 2>$null
 if ($LASTEXITCODE -ne 0) {
@@ -196,12 +201,16 @@ $pyCmd  = if ($pyExe -eq "py") { "py -3" } else { "python" }
 $binDir = Join-Path $kitHome ".install\platform\windows\bin"
 $mailPy = Join-Path $kitHome ".install\platform\windows\mail\kitmail.py"
 $calPy  = Join-Path $kitHome ".install\platform\windows\calendar\kitcal.py"
+function Write-Shim([string]$name, [string]$script) {
+    # Each shim runs its tool in Python's UTF-8 mode (PYTHONUTF8=1, which the tools it starts inherit); setlocal
+    # keeps the setting out of the console the command was typed in.
+    Set-Content -LiteralPath (Join-Path $binDir "$name.cmd") -Encoding ASCII `
+        -Value "@echo off`r`nsetlocal`r`nset PYTHONUTF8=1`r`n$pyCmd `"$script`" %*`r`n"
+}
 try {
     New-Item -ItemType Directory -Force -Path $binDir | Out-Null
-    Set-Content -LiteralPath (Join-Path $binDir "kitmail.cmd") -Encoding ASCII `
-        -Value "@echo off`r`n$pyCmd `"$mailPy`" %*`r`n"
-    Set-Content -LiteralPath (Join-Path $binDir "kitcal.cmd") -Encoding ASCII `
-        -Value "@echo off`r`n$pyCmd `"$calPy`" %*`r`n"
+    Write-Shim "kitmail" $mailPy
+    Write-Shim "kitcal" $calPy
     # The everyday commands from shared\bin (the Mac links the same ones into ~/.local/bin).
     # kit-outlook is macOS-only, so it has no shim here.
     $sharedBin = Join-Path $kitHome ".install\shared\bin"
@@ -210,8 +219,7 @@ try {
                         "kit-models", "kit-labcheck", "kit-refarch", "kit-sysprofile", "kit-onepager", "kit-sizing", "kit-diagram-diff", "kit-diaglint", "kit-wins", "kit-oneonone", "kit-meetprep", "kit-triage", "kit-awaiting", "kit-plugin", "kit-quality", "kit-commitments", "kit-connect", "kit-evals", "kit-lifecycle", "kit-roadmap", "kit-metrics", "kit-project", "kit-delegate", "kit-run", "kit-audit-export", "kit-exceptions", "kit-pbc", "kit-holds", "kit-degraded", "kit-reliability", "kit-alerts", "kit-csf", "kit-controls", "kit-trace", "kit-decisions", "kit-stakeholders", "kit-viewpoints", "kit-coverage", "kit-questions", "kit-templatecheck", "kit-letter", "kit-expiry", "kit-dates", "kit-touch", "kit-feedback", "kit-meetload", "kit-preread")) {
         $toolPy = Join-Path $sharedBin $tool
         if (Test-Path -LiteralPath $toolPy) {
-            Set-Content -LiteralPath (Join-Path $binDir "$tool.cmd") -Encoding ASCII `
-                -Value "@echo off`r`n$pyCmd `"$toolPy`" %*`r`n"
+            Write-Shim $tool $toolPy
         }
     }
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")

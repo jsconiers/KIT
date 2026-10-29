@@ -2,7 +2,8 @@
 # .github/workflows/checks.yml runs it on GitHub's Windows runners, under Windows PowerShell 5.1 and
 # PowerShell 7 (the installer runs under the same one). It changes the current user's Kit and
 # Claude Code settings, so run it on a throwaway machine or account, never your own.
-#   1. A fresh install, then doctor.py, with settings.json saved with a UTF-8 byte-order mark.
+#   1. A fresh install, then doctor.py, with settings.json saved with a UTF-8 byte-order mark, and todo
+#      through its command shim (UTF-8 mode) on a QUEUE.md with curly quotes.
 #   2. A reinstall over it (so the installer reads that settings.json too).
 #   3. Kit 1.4.0's broken permissions, made with that installer's exact icacls command. Kit's files
 #      must become unreadable (otherwise this test couldn't tell), and a reinstall must repair them.
@@ -109,6 +110,37 @@ if ($dout -match "can't read .*settings\.json") { Fail "doctor.py can't read set
 else { Pass "doctor.py reads settings.json with a byte-order mark" }
 $crashed = @($dlines | Where-Object { $_ -match "check crashed" })
 if ($crashed.Count) { Write-Host "    note: other checks crashed: $($crashed -join ' / ')" }
+
+# The command shims run Python in UTF-8 mode (PYTHONUTF8=1). Before Python 3.15, Python on Windows reads text in
+# the ANSI code page, where a closing curly quote's last byte (0x9D) is no character, so todo couldn't read a
+# QUEUE.md with one in it.
+Write-Host ""
+Write-Host "== UTF-8 in the command shims"
+$binDir = Join-Path $kitHome ".install\platform\windows\bin"
+$noUtf8 = @(Get-ChildItem -LiteralPath $binDir -Filter "*.cmd" |
+            Where-Object { (Get-Content -LiteralPath $_.FullName -Raw) -notmatch "(?m)^set PYTHONUTF8=1\r?$" })
+if ($noUtf8.Count) { Fail "$($noUtf8.Count) command shims don't set PYTHONUTF8=1, e.g. $($noUtf8[0].Name)" }
+else { Pass "every command shim sets PYTHONUTF8=1" }
+$queue = Join-Path $kitHome "QUEUE.md"
+$item = "- [ ] Read the " + [char]0x201C + "design" + [char]0x201D + " notes"
+$q = [System.IO.File]::ReadAllText($queue)
+if ($q -notmatch "(?m)^## Testy\r?$") { Fail "QUEUE.md has no ## Testy section" }
+[System.IO.File]::WriteAllText($queue, ($q -replace "(?m)^(## Testy)\r?$", "`$1`n$item"), (New-Object System.Text.UTF8Encoding $false))
+Remove-Item Env:PYTHONUTF8 -ErrorAction SilentlyContinue
+$prev = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+$plain = (& python (Join-Path $kitHome ".install\shared\bin\todo") 2>&1 | Out-String)
+$plainCode = $LASTEXITCODE
+$viaShim = (& (Join-Path $binDir "todo.cmd") 2>&1 | Out-String)
+$shimCode = $LASTEXITCODE
+$ErrorActionPreference = $prev
+if ($plainCode -ne 0 -and $plain -match "UnicodeDecodeError") { Pass "without UTF-8 mode, todo can't read the curly quote (the bug)" }
+else { Write-Host "    note: without UTF-8 mode this Python read the curly quote anyway (exit $plainCode)" }
+if ($shimCode -eq 0 -and $viaShim -match "design" -and $viaShim -notmatch "Traceback") {
+    Pass "through its shim, todo reads and lists the item with curly quotes"
+} else {
+    Fail "todo through its shim (exit $shimCode): $((($viaShim -split "`r?`n") | Select-Object -Last 4) -join ' / ')"
+}
 
 Invoke-Installer "reinstall over an existing install"
 Test-Kit "reinstall"

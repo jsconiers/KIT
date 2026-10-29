@@ -27,6 +27,8 @@ if (Test-Path -LiteralPath $cfgPath) {
     }
 }
 
+# Python runs in UTF-8 mode here too, as in run.ps1 and the command shims.
+$env:PYTHONUTF8 = "1"
 function Resolve-Python {
     if (Get-Command py -ErrorAction SilentlyContinue)     { return @{ Exe = "py";     Args = @("-3") } }
     if (Get-Command python -ErrorAction SilentlyContinue) { return @{ Exe = "python"; Args = @() } }
