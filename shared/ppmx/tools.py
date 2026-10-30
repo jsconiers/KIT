@@ -1,11 +1,15 @@
-"""The read-only tools, shared by both servers. Each takes a Context (the client, the settings, the code
-tables, the caller's token) and its arguments, and returns a dict ready for JSON.
+"""The tools, shared by both servers: reads (get_, list_) and, unless the server is read-only
+(PPMX_WRITES=off), creates and updates (create_, update_, set_). Each takes a Context (the client, the
+settings, the code tables, the caller's token) and its arguments, and returns a dict ready for JSON.
 
-Every tool name starts with a read word (get, list): Kit's connector guard lets a connector tool through
-only when its name reads as read-only. Lists come back a page at a time: total, offset, limit, sort, and
-next_offset while there are more.
+Read tool names start with a read word and write tool names with a write word, so Kit's connector guard
+lets Kit's agents read and stops them writing: a change comes only from a person's own session, where
+the client asks before each one. Lists come back a page at a time: total, offset, limit, sort, and
+next_offset while there are more. PPM Express's API has no delete, and neither do these tools.
 """
 import datetime
+import json
+import re
 
 from . import codes as codes_mod
 from .client import PARAMS, UUID, records
@@ -36,11 +40,28 @@ SUMMARY = {
     "tasks": ["name", "status", "assignee", "start", "due", "progress"],
     "key_dates": ["name", "type", "date", "status"],
     "ideas": ["name", "stage", "status"],
+    "challenges": ["name", "status"],
     "resources": ["name", "email"],
 }
 ENTITIES = ["Project", "Program", "Portfolio", "Task", "KeyDate", "Idea", "Challenge", "Resource"]
+# The kind of record each endpoint holds, for code tables that apply to one kind ("KeyDate.Type").
+ENTITY_OF = {"portfolios": "Portfolio", "portfolio": "Portfolio", "programs": "Program", "program": "Program",
+             "projects": "Project", "project": "Project", "tasks": "Task", "task": "Task", "tasks_bulk": "Task",
+             "key_dates": "KeyDate", "key_date": "KeyDate", "ideas": "Idea", "idea": "Idea", "idea_stage": "Idea",
+             "challenges": "Challenge", "challenge": "Challenge", "resources": "Resource", "resource": "Resource"}
 DATE_ROLES = ("start", "finish", "due", "date")
 DONE_WORDS = ("complete", "done", "closed", "finished", "cancel")
+# Fields that name people or other records take a list of {"search": a name or email} or {"id": an ID}
+# (PPM Express's format); plain text is turned into that. Tags take "#tag" text.
+PEOPLE = {"Manager", "Managers", "ProjectManager", "Owner", "Owners", "AssignedTo", "Sponsor", "Sponsors",
+          "Resource", "Resources"}
+LINKS = {"Portfolios", "Programs", "Predecessor", "Predecessors"}
+FIELD_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_ .-]{0,79}$")
+# Record kinds the general create_record and update_record tools take: (list endpoint, item endpoint,
+# entity).
+RECORDS = {"portfolio": ("portfolios", "portfolio", "Portfolio"), "program": ("programs", "program", "Program"),
+           "resource": ("resources", "resource", "Resource"), "challenge": ("challenges", "challenge", "Challenge")}
+READ_ONLY = "This PPM Express server is read-only (PPMX_WRITES is off), so it makes no changes."
 
 
 class ToolError(Exception):
@@ -62,7 +83,16 @@ class Context:
         return self.client.get(self.token, name, params, **parts)
 
     def rows(self, name, params=None, **parts):
-        return [codes_mod.decode(r, self.tables) for r in records(self.fetch(name, params, **parts))]
+        entity = ENTITY_OF.get(name)
+        return [codes_mod.decode(r, self.tables, entity) for r in records(self.fetch(name, params, **parts))]
+
+    def write(self, method, name, body, params=None, **parts):
+        """POST or PATCH to PPM Express; refused when the server is read-only."""
+        if not self.settings.writes:
+            raise ToolError(READ_ONLY)
+        if not self.token:
+            raise ToolError(self.hint or "no personal access token")
+        return self.client.send(self.token, method, name, body, params, **parts)
 
 
 # ---------------------------------------------------------------- helpers
@@ -103,23 +133,32 @@ def role_day(row, role):
 
 
 def is_done(row):
-    """True or False when the record says; None when it can't be told (a code with no label yet)."""
+    """True when the status or the progress says finished (Done, Completed, Canceled); False when they
+    say otherwise; None when it can't be told (only codes with no label)."""
+    told = False
     for role in ("status", "progress"):
         key, value = pick(row, role)
         if value is None:
             continue
         if isinstance(value, bool):
-            return value
-        if isinstance(value, (int, float)):
+            if value:
+                return True
+            told = True
+        elif isinstance(value, (int, float)):
             if key == "PercentComplete":
-                return value >= 100
-            continue                                  # a code: codes.py has no label for it yet
-        text = text_of(value).lower()
-        if text:
-            return any(w in text for w in DONE_WORDS)
+                if value >= 100:
+                    return True
+                told = True
+            # otherwise a code the tables have no label for: it tells nothing
+        elif text_of(value):
+            if any(w in text_of(value).lower() for w in DONE_WORDS):
+                return True
+            told = True
+    if row.get("IsCompleted") is True:
+        return True
     if isinstance(row.get("IsCompleted"), bool):
-        return row["IsCompleted"]
-    return None
+        told = True
+    return False if told else None
 
 
 def open_rows(rows):
@@ -258,6 +297,11 @@ def t_ideas(ctx, args):
     return page(rows, args, ctx, "name", SUMMARY["ideas"])
 
 
+def t_challenges(ctx, args):
+    rows = [r for r in ctx.rows("challenges") if matches(r, "name", args.get("name_contains"))]
+    return page(rows, args, ctx, "name", SUMMARY["challenges"])
+
+
 def t_resources(ctx, args):
     rows = [r for r in ctx.rows("resources") if matches(r, "name", args.get("name_contains"))]
     return page(rows, args, ctx, "name", SUMMARY["resources"])
@@ -275,6 +319,133 @@ def t_fields(ctx, args):
     return {"entity": args["entity"], "fields": fields}
 
 
+
+
+# ---------------------------------------------------------------- writes
+
+def _ref(value):
+    """A reference to a person or record: its ID, or text PPM Express searches for (a name or email)."""
+    if isinstance(value, str):
+        text = value.strip()
+        return {"id": text} if UUID.match(text) else {"search": text}
+    return value
+
+
+def attributes(ctx, entity, fields, name=None):
+    """The fields to send, in PPM Express's terms: coded labels as their numbers, people and linked
+    records as references, tags with their #. A name given on its own wins over one in fields."""
+    out = {}
+    for key, value in (fields or {}).items():
+        if key in PEOPLE or key in LINKS:
+            items = value if isinstance(value, list) else [value]
+            value = [_ref(v) for v in items if v not in (None, "")]
+        elif key == "Group" and isinstance(value, str):
+            value = _ref(value)
+        elif key == "Tags":
+            items = value if isinstance(value, list) else str(value).split(",")
+            value = ["#" + str(t).strip().lstrip("#") for t in items if str(t).strip().lstrip("#")]
+        else:
+            value = codes_mod.encode(key, value, ctx.tables, entity)
+        out[key] = value
+    if name is not None:
+        out["Name"] = name
+    return out
+
+
+def changes(ctx, entity, fields):
+    upd = attributes(ctx, entity, fields)
+    if not upd:
+        raise ToolError("fields must name at least one field to change")
+    return upd
+
+
+def written(ctx, action, kind, value, sent, entity, known_id=None):
+    """What a write tool returns: what happened, to which record, the field names sent (never their
+    values, which the audit log leaves out too), and the record as PPM Express now has it."""
+    recs = records(value) if value is not None else []
+    rec = codes_mod.decode(recs[0], ctx.tables, entity) if recs else {}
+    out = {"result": action, "kind": kind, "id": rec.get("id") or known_id, "fields": sorted(sent)}
+    if rec:
+        out["record"] = rec
+    return out
+
+
+def t_create_project(ctx, args):
+    attrs = attributes(ctx, "Project", args.get("fields"), args["name"])
+    return written(ctx, "created", "project", ctx.write("POST", "projects", {"attributes": attrs}), attrs, "Project")
+
+
+def t_update_project(ctx, args):
+    upd = changes(ctx, "Project", args["fields"])
+    value = ctx.write("PATCH", "project", {"updates": upd}, id=args["project_id"])
+    return written(ctx, "updated", "project", value, upd, "Project", args["project_id"])
+
+
+def t_create_task(ctx, args):
+    attrs = attributes(ctx, "Task", args.get("fields"), args["name"])
+    if args.get("parent_task_id"):
+        value = ctx.write("POST", "tasks_bulk", [{"ParentID": args["parent_task_id"], "attributes": attrs}],
+                          id=args["project_id"])
+    else:
+        value = ctx.write("POST", "tasks", {"attributes": attrs}, id=args["project_id"])
+    return written(ctx, "created", "task", value, attrs, "Task")
+
+
+def t_update_task(ctx, args):
+    upd = changes(ctx, "Task", args["fields"])
+    value = ctx.write("PATCH", "task", {"updates": upd}, id=args["project_id"], task_id=args["task_id"])
+    return written(ctx, "updated", "task", value, upd, "Task", args["task_id"])
+
+
+def t_create_key_date(ctx, args):
+    fields = dict(args.get("fields") or {}, Date=args["date"])
+    if args.get("type") is not None:
+        fields["Type"] = args["type"]
+    attrs = attributes(ctx, "KeyDate", fields, args["name"])
+    value = ctx.write("POST", "key_dates", {"attributes": attrs}, id=args["project_id"])
+    return written(ctx, "created", "key_date", value, attrs, "KeyDate")
+
+
+def t_update_key_date(ctx, args):
+    upd = changes(ctx, "KeyDate", args["fields"])
+    value = ctx.write("PATCH", "key_date", {"updates": upd}, id=args["project_id"], key_date_id=args["key_date_id"])
+    return written(ctx, "updated", "key_date", value, upd, "KeyDate", args["key_date_id"])
+
+
+def t_create_idea(ctx, args):
+    attrs = attributes(ctx, "Idea", args.get("fields"), args["name"])
+    params = {PARAMS["challenge"]: args["challenge_id"]} if args.get("challenge_id") else None
+    return written(ctx, "created", "idea", ctx.write("POST", "ideas", {"attributes": attrs}, params), attrs, "Idea")
+
+
+def t_update_idea(ctx, args):
+    upd = changes(ctx, "Idea", args["fields"])
+    value = ctx.write("PATCH", "idea", {"updates": upd}, id=args["idea_id"])
+    return written(ctx, "updated", "idea", value, upd, "Idea", args["idea_id"])
+
+
+def t_idea_stage(ctx, args):
+    stage = codes_mod.encode("Stage", str(args["stage"]), ctx.tables, "Idea")
+    if isinstance(stage, bool) or not isinstance(stage, int):
+        table = codes_mod.table_for(ctx.tables, "Stage", "Idea") or {}
+        raise ToolError("stage must be one of: " + ", ".join(table.values()) + " (or its number)")
+    value = ctx.write("POST", "idea_stage", {"Stage": stage}, id=args["idea_id"])
+    return written(ctx, "updated", "idea", value, ["Stage"], "Idea", args["idea_id"])
+
+
+def t_create_record(ctx, args):
+    plural, _, entity = RECORDS[args["kind"]]
+    attrs = attributes(ctx, entity, args.get("fields"), args["name"])
+    return written(ctx, "created", args["kind"], ctx.write("POST", plural, {"attributes": attrs}), attrs, entity)
+
+
+def t_update_record(ctx, args):
+    _, single, entity = RECORDS[args["kind"]]
+    upd = changes(ctx, entity, args["fields"])
+    value = ctx.write("PATCH", single, {"updates": upd}, id=args["record_id"])
+    return written(ctx, "updated", args["kind"], value, upd, entity, args["record_id"])
+
+
 # ---------------------------------------------------------------- definitions
 
 def _paging(sorts):
@@ -289,41 +460,59 @@ def _paging(sorts):
     }
 
 
-def _text(desc):
-    return {"type": "string", "maxLength": 200, "description": desc}
+def _text(desc, longest=200):
+    return {"type": "string", "maxLength": longest, "description": desc}
 
 
-ID = {"type": "string", "format": "uuid", "maxLength": 36, "description": "The project's PPM Express ID."}
+def _id(desc):
+    return {"type": "string", "format": "uuid", "maxLength": 36, "description": desc}
+
+
+ID = _id("The project's PPM Express ID.")
+NAME = _text("The name (or title).", 255)
+CHANGES = ("The fields by their keys (get_fields lists a tenant's keys, custom fields included), for example "
+           '{"Description": "...", "StartDate": "2026-11-02", "Status": "At Risk", "Manager": "alex@example.com"}. '
+           "Coded fields (Status, Progress, Priority, Risk, and the like) take their label or number; people "
+           "(Manager, AssignedTo) take a name, an email, or an ID; Portfolios and Programs take names or IDs; "
+           "Tags take text. Dates are YYYY-MM-DD.")
+CONFIRM = " Changes PPM Express: say what you'll do and get the user's go-ahead first."
+
+
+def _fields(required):
+    return {"type": "object", "maxProperties": 50, "minProperties": 1 if required else 0,
+            "description": CHANGES if required else "Other fields to set. " + CHANGES}
+
 
 TOOLS = [
-    {"name": "get_current_user", "title": "PPM Express: who the token belongs to",
+    {"name": "get_current_user", "title": "PPM Express: who the token belongs to", "kind": "read",
      "description": "Who the personal access token belongs to in PPM Express, and the token's name, scopes, "
-                    "and expiry date. Use it first to check the connection.",
+                    "and expiry date. Use it first to check the connection, and to see whether the token can "
+                    "write.",
      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
      "handler": t_current_user},
-    {"name": "list_portfolios", "title": "PPM Express: portfolios",
+    {"name": "list_portfolios", "title": "PPM Express: portfolios", "kind": "read",
      "description": "Portfolios the token can see, filtered by name or manager, a page at a time.",
      "inputSchema": {"type": "object", "additionalProperties": False, "properties": {
          "name_contains": _text("Part of the portfolio's name."), "manager": _text("Part of the manager's name."),
          **_paging(["name", "manager", "status"])}},
      "handler": t_portfolios},
-    {"name": "list_programs", "title": "PPM Express: programs",
+    {"name": "list_programs", "title": "PPM Express: programs", "kind": "read",
      "description": "Programs the token can see, filtered by name, portfolio, or manager.",
      "inputSchema": {"type": "object", "additionalProperties": False, "properties": {
          "name_contains": _text("Part of the program's name."), "portfolio": _text("Part of a portfolio's name."),
          "manager": _text("Part of the manager's name."), **_paging(["name", "manager", "status"])}},
      "handler": t_programs},
-    {"name": "list_projects", "title": "PPM Express: projects",
+    {"name": "list_projects", "title": "PPM Express: projects", "kind": "read",
      "description": "Projects the token can see, filtered by name, portfolio, program, manager, or status, "
-                    "sorted and a page at a time. Status and progress are labels when the code tables know "
-                    "them, numbers otherwise.",
+                    "sorted and a page at a time. Coded fields (status, progress) come as labels, with the "
+                    "numbers under codes.",
      "inputSchema": {"type": "object", "additionalProperties": False, "properties": {
          "name_contains": _text("Part of the project's name."), "portfolio": _text("Part of a portfolio's name."),
          "program": _text("Part of a program's name."), "manager": _text("Part of the manager's name."),
          "status": _text("A status label (or code)."),
          **_paging(["name", "status", "manager", "start", "finish"])}},
      "handler": t_projects},
-    {"name": "get_project", "title": "PPM Express: one project",
+    {"name": "get_project", "title": "PPM Express: one project", "kind": "read",
      "description": "One project's details, optionally with its key dates and its tasks (open ones unless "
                     "open_tasks_only is false).",
      "inputSchema": {"type": "object", "additionalProperties": False, "required": ["project_id"], "properties": {
@@ -334,7 +523,7 @@ TOOLS = [
          "limit_each": {"type": "integer", "minimum": 1, "maximum": 5000,
                         "description": "Rows of key dates and of tasks (default 25)."}}},
      "handler": t_project},
-    {"name": "list_tasks", "title": "PPM Express: a project's tasks",
+    {"name": "list_tasks", "title": "PPM Express: a project's tasks", "kind": "read",
      "description": "A project's tasks, filtered by name, assignee, open, overdue, or due within some days. "
                     "Tasks synced from Jira or Azure DevOps are included (read-only in PPM Express).",
      "inputSchema": {"type": "object", "additionalProperties": False, "required": ["project_id"], "properties": {
@@ -346,8 +535,9 @@ TOOLS = [
                              "description": "Only tasks due between today and this many days from now."},
          **_paging(["due", "start", "name", "status", "assignee"])}},
      "handler": t_tasks},
-    {"name": "list_key_dates", "title": "PPM Express: a project's key dates",
-     "description": "A project's key dates (milestones), filtered to upcoming or overdue ones.",
+    {"name": "list_key_dates", "title": "PPM Express: a project's key dates", "kind": "read",
+     "description": "A project's key dates (key dates, milestones, releases), filtered to upcoming or overdue "
+                    "ones.",
      "inputSchema": {"type": "object", "additionalProperties": False, "required": ["project_id"], "properties": {
          "project_id": ID,
          "upcoming_days": {"type": "integer", "minimum": 0, "maximum": 3650,
@@ -355,40 +545,131 @@ TOOLS = [
          "overdue_only": {"type": "boolean", "description": "Only key dates in the past that aren't finished."},
          **_paging(["date", "name", "status", "type"])}},
      "handler": t_key_dates},
-    {"name": "list_ideas", "title": "PPM Express: ideas",
+    {"name": "list_ideas", "title": "PPM Express: ideas", "kind": "read",
      "description": "Ideas (the demand pipeline), optionally for one challenge, filtered by stage or name.",
      "inputSchema": {"type": "object", "additionalProperties": False, "properties": {
-         "challenge_id": {"type": "string", "format": "uuid", "maxLength": 36,
-                          "description": "Only ideas for this challenge (its PPM Express ID)."},
+         "challenge_id": _id("Only ideas for this challenge (its PPM Express ID)."),
          "stage": _text("A stage label (or code)."), "name_contains": _text("Part of the idea's name."),
          **_paging(["name", "stage", "status"])}},
      "handler": t_ideas},
-    {"name": "list_resources", "title": "PPM Express: resources",
+    {"name": "list_challenges", "title": "PPM Express: challenges", "kind": "read",
+     "description": "Challenges, the campaigns ideas are collected under, filtered by name.",
+     "inputSchema": {"type": "object", "additionalProperties": False, "properties": {
+         "name_contains": _text("Part of the challenge's name."), **_paging(["name", "status"])}},
+     "handler": t_challenges},
+    {"name": "list_resources", "title": "PPM Express: resources", "kind": "read",
      "description": "Resources (people and roles), filtered by name.",
      "inputSchema": {"type": "object", "additionalProperties": False, "properties": {
          "name_contains": _text("Part of the resource's name."), **_paging(["name", "email"])}},
      "handler": t_resources},
-    {"name": "get_fields", "title": "PPM Express: an entity's fields",
-     "description": "The fields of one kind of record (key, label, type, read-only), custom fields included. "
-                    "Use it to learn which attribute names a tenant uses.",
+    {"name": "get_fields", "title": "PPM Express: an entity's fields", "kind": "read",
+     "description": "The fields of one kind of record (key, label, type, read-only, options), custom fields "
+                    "included. Use it to learn which keys to read and to send in a create or update.",
      "inputSchema": {"type": "object", "additionalProperties": False, "required": ["entity"], "properties": {
          "entity": {"type": "string", "enum": ENTITIES, "description": "Which kind of record."}}},
      "handler": t_fields},
+    # ---- writes
+    {"name": "create_project", "title": "PPM Express: create a project", "kind": "create",
+     "description": "Create a project, with any fields." + CONFIRM,
+     "inputSchema": {"type": "object", "additionalProperties": False, "required": ["name"], "properties": {
+         "name": NAME, "fields": _fields(False)}},
+     "handler": t_create_project},
+    {"name": "update_project", "title": "PPM Express: update a project", "kind": "update",
+     "description": "Change fields of a project (only the ones given). A status set by auto-calculation can't "
+                    "be changed here." + CONFIRM,
+     "inputSchema": {"type": "object", "additionalProperties": False, "required": ["project_id", "fields"],
+                     "properties": {"project_id": ID, "fields": _fields(True)}},
+     "handler": t_update_project},
+    {"name": "create_task", "title": "PPM Express: create a task", "kind": "create",
+     "description": "Create a task in a project, optionally as a sub-task of another task." + CONFIRM,
+     "inputSchema": {"type": "object", "additionalProperties": False, "required": ["project_id", "name"],
+                     "properties": {"project_id": ID, "name": NAME, "fields": _fields(False),
+                                    "parent_task_id": _id("Make it a sub-task of this task.")}},
+     "handler": t_create_task},
+    {"name": "update_task", "title": "PPM Express: update a task", "kind": "update",
+     "description": "Change fields of a task (only the ones given): status, progress, dates, assignee, and so "
+                    "on. Tasks synced from Jira or Azure DevOps can't be changed here." + CONFIRM,
+     "inputSchema": {"type": "object", "additionalProperties": False,
+                     "required": ["project_id", "task_id", "fields"],
+                     "properties": {"project_id": ID, "task_id": _id("The task's PPM Express ID."),
+                                    "fields": _fields(True)}},
+     "handler": t_update_task},
+    {"name": "create_key_date", "title": "PPM Express: create a key date", "kind": "create",
+     "description": "Create a key date, milestone, or release in a project." + CONFIRM,
+     "inputSchema": {"type": "object", "additionalProperties": False, "required": ["project_id", "name", "date"],
+                     "properties": {
+                         "project_id": ID, "name": NAME,
+                         "date": {"type": "string", "format": "date", "maxLength": 10, "description": "YYYY-MM-DD."},
+                         "type": {"type": "string", "enum": ["Key Date", "Milestone", "Release"],
+                                  "description": "What it is (default: a key date)."},
+                         "fields": _fields(False)}},
+     "handler": t_create_key_date},
+    {"name": "update_key_date", "title": "PPM Express: update a key date", "kind": "update",
+     "description": "Change fields of a key date (only ones created in PPM Express can be changed)." + CONFIRM,
+     "inputSchema": {"type": "object", "additionalProperties": False,
+                     "required": ["project_id", "key_date_id", "fields"],
+                     "properties": {"project_id": ID, "key_date_id": _id("The key date's PPM Express ID."),
+                                    "fields": _fields(True)}},
+     "handler": t_update_key_date},
+    {"name": "create_idea", "title": "PPM Express: create an idea", "kind": "create",
+     "description": "Create an idea, optionally under a challenge." + CONFIRM,
+     "inputSchema": {"type": "object", "additionalProperties": False, "required": ["name"], "properties": {
+         "name": NAME, "challenge_id": _id("The challenge it belongs to."), "fields": _fields(False)}},
+     "handler": t_create_idea},
+    {"name": "update_idea", "title": "PPM Express: update an idea", "kind": "update",
+     "description": "Change fields of an idea (only the ones given). Its stage changes with set_idea_stage."
+                    + CONFIRM,
+     "inputSchema": {"type": "object", "additionalProperties": False, "required": ["idea_id", "fields"],
+                     "properties": {"idea_id": _id("The idea's PPM Express ID."), "fields": _fields(True)}},
+     "handler": t_update_idea},
+    {"name": "set_idea_stage", "title": "PPM Express: move an idea to a stage", "kind": "update",
+     "description": "Move an idea to another stage: Draft, Proposed, Active, Selected, Not Selected, or "
+                    "Archived. PPM Express allows only its own order of stages and says so when a move "
+                    "isn't allowed." + CONFIRM,
+     "inputSchema": {"type": "object", "additionalProperties": False, "required": ["idea_id", "stage"],
+                     "properties": {"idea_id": _id("The idea's PPM Express ID."),
+                                    "stage": {"type": ["string", "integer"], "maxLength": 40,
+                                              "description": "The stage's name or number."}}},
+     "handler": t_idea_stage},
+    {"name": "create_record", "title": "PPM Express: create a portfolio, program, resource, or challenge",
+     "kind": "create",
+     "description": "Create a portfolio, program, resource, or challenge (projects, tasks, key dates, and "
+                    "ideas have their own tools)." + CONFIRM,
+     "inputSchema": {"type": "object", "additionalProperties": False, "required": ["kind", "name"], "properties": {
+         "kind": {"type": "string", "enum": sorted(RECORDS), "description": "What to create."},
+         "name": NAME, "fields": _fields(False)}},
+     "handler": t_create_record},
+    {"name": "update_record", "title": "PPM Express: update a portfolio, program, resource, or challenge",
+     "kind": "update",
+     "description": "Change fields of a portfolio, program, resource, or challenge (only the ones given)."
+                    + CONFIRM,
+     "inputSchema": {"type": "object", "additionalProperties": False, "required": ["kind", "record_id", "fields"],
+                     "properties": {"kind": {"type": "string", "enum": sorted(RECORDS), "description": "What it is."},
+                                    "record_id": _id("Its PPM Express ID."), "fields": _fields(True)}},
+     "handler": t_update_record},
 ]
 BY_NAME = {t["name"]: t for t in TOOLS}
-ANNOTATIONS = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+WRITE_TOOLS = [t["name"] for t in TOOLS if t["kind"] != "read"]
+ANNOTATIONS = {
+    "read": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
+    "create": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
+    "update": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": True},
+}
 
 
-def public_tools():
-    """The tool definitions as MCP's tools/list gives them."""
+def public_tools(writes=True):
+    """The tool definitions as MCP's tools/list gives them; the reads only when writes are off."""
     return [{"name": t["name"], "title": t["title"], "description": t["description"],
-             "inputSchema": t["inputSchema"], "annotations": ANNOTATIONS} for t in TOOLS]
+             "inputSchema": t["inputSchema"], "annotations": ANNOTATIONS[t["kind"]]}
+            for t in TOOLS if writes or t["kind"] == "read"]
 
 
 def run_tool(name, args, ctx):
     tool = BY_NAME.get(name)
     if tool is None:
         raise ToolError(f"unknown tool {name!r}")
+    if tool["kind"] != "read" and not ctx.settings.writes:
+        raise ToolError(READ_ONLY)
     args = validate(tool["inputSchema"], dict(args or {}))
     return tool["handler"](ctx, args)
 
@@ -399,7 +680,8 @@ def validate(schema, args):
         if key not in props:
             raise ToolError(f"unknown argument {key!r}")
     for key in schema.get("required", []):
-        if args.get(key) in (None, ""):
+        if args.get(key) in (None, "") or (isinstance(args.get(key), dict) and not args[key]
+                                           and props[key].get("minProperties")):
             raise ToolError(f"{key} is required")
     for key, value in list(args.items()):
         spec = props[key]
@@ -413,6 +695,14 @@ def _check(name, spec, value):
     kind = spec.get("type")
     if value is None:
         return
+    if isinstance(kind, list):                        # either type will do
+        for k in kind:
+            try:
+                return _check(name, dict(spec, type=k), value)
+            except ToolError:
+                pass
+        raise ToolError(f"{name} must be " + " or ".join({"string": "text", "integer": "a whole number"}.get(k, k)
+                                                         for k in kind))
     if kind == "string":
         if not isinstance(value, str):
             raise ToolError(f"{name} must be text")
@@ -420,6 +710,11 @@ def _check(name, spec, value):
             raise ToolError(f"{name} is too long")
         if spec.get("format") == "uuid" and not UUID.match(value):
             raise ToolError(f"{name} must be a PPM Express ID (a UUID)")
+        if spec.get("format") == "date":
+            try:
+                datetime.date.fromisoformat(value)
+            except ValueError:
+                raise ToolError(f"{name} must be a date, YYYY-MM-DD") from None
         if "enum" in spec and value not in spec["enum"]:
             raise ToolError(f"{name} must be one of: {', '.join(spec['enum'])}")
     elif kind == "integer":
@@ -437,3 +732,19 @@ def _check(name, spec, value):
             raise ToolError(f"{name} has too many items")
         for item in value:
             _check(name, spec.get("items", {}), item)
+    elif kind == "object":
+        if not isinstance(value, dict):
+            raise ToolError(f"{name} must be an object of field keys and values")
+        if len(value) > spec.get("maxProperties", 50):
+            raise ToolError(f"{name} has too many fields")
+        if len(value) < spec.get("minProperties", 0):
+            raise ToolError(f"{name} must name at least one field")
+        for key in value:
+            if not FIELD_KEY.match(key):
+                raise ToolError(f"{name}: {key[:40]!r} isn't a field key (get_fields lists them)")
+        try:
+            size = len(json.dumps(value, ensure_ascii=False))
+        except (TypeError, ValueError):
+            raise ToolError(f"{name} must hold only text, numbers, true or false, lists, and objects") from None
+        if size > 65536:
+            raise ToolError(f"{name} is too large")

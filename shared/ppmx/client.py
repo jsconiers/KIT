@@ -1,9 +1,12 @@
-"""A small read-only client for PPM Express's public REST API, shared by the stdio and HTTP servers.
+"""A small client for PPM Express's public REST API, shared by the stdio and HTTP servers: GET to read,
+POST to create, PATCH to update. PPM Express's API has no delete.
 
 Every request carries the caller's personal access token (Authorization: Bearer). Answers are cached per
-caller, never shared between callers, and each caller's requests are paced (PPMX_RATE_PER_MINUTE).
-Redirects aren't followed, so a token never goes to another address. Errors come back as PPMXError with
-a message that's safe to show: never the token, and at most a short excerpt of what PPM Express said.
+caller, never shared between callers, and a caller's write clears their cache. Each caller's requests
+are paced (PPMX_RATE_PER_MINUTE). Redirects aren't followed, so a token never goes to another address.
+A write is retried only when PPM Express said it didn't take it (429 or 503), never after a timeout or
+a dropped connection, so nothing is created twice. Errors come back as PPMXError with a message that's
+safe to show: never the token, and at most a short excerpt of what PPM Express said.
 """
 import collections
 import copy
@@ -19,20 +22,31 @@ import urllib.request
 
 from . import __version__
 
-# Paths under the tenant's base URL (https://<host>/@<tenant>/v1.0), from PPM Express's published API
-# description. PROVISIONAL: check each against your tenant's endpoint reference (PPM Express >
-# Automation > Swagger) before live use. This table is the one place to correct them.
+# Paths under the tenant's base URL (https://<host>/@<tenant>/v1.0), from PPM Express's Public API article
+# and Microsoft's PPM Express connector reference. PROVISIONAL: check each against your tenant's
+# endpoint reference (PPM Express > Automation > Swagger) before live use. This table is the one place to
+# correct them. Reads use GET; the same paths take POST (a new record, under "attributes") and PATCH (a
+# change, under "updates").
 ENDPOINTS = {
     "me": "Me",
     "portfolios": "Portfolios",
+    "portfolio": "Portfolios/{id}",
     "programs": "Programs",
+    "program": "Programs/{id}",
     "projects": "Projects",
     "project": "Projects/{id}",
     "tasks": "Projects/{id}/Tasks",
+    "task": "Projects/{id}/Tasks/{task_id}",
+    "tasks_bulk": "Projects/{id}/Tasks/bulk",          # sub-tasks: a list of {ParentID, attributes}
     "key_dates": "Projects/{id}/KeyDates",
+    "key_date": "Projects/{id}/KeyDates/{key_date_id}",
     "ideas": "Ideas",
+    "idea": "Ideas/{id}",
+    "idea_stage": "Ideas/{id}/Stage",                  # body {"Stage": n}
     "challenges": "Challenges",
+    "challenge": "Challenges/{id}",
     "resources": "Resources",
+    "resource": "Resources/{id}",
     "fields": "Fields/{entity}",
 }
 # Query parameter names, equally provisional.
@@ -42,6 +56,8 @@ UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}
 ENTITY = re.compile(r"^[A-Za-z]{1,40}$")
 TOKEN = re.compile(r"^[\x21-\x7e]{8,4096}$")        # printable, no spaces: nothing that could split a header
 RETRY_STATUS = {429, 502, 503, 504}
+WRITE_RETRY_STATUS = {429, 503}                      # PPM Express said it didn't take the request
+MAX_BODY = 262144                                    # the largest create or update this client sends
 MAX_PAGES = 50
 MAX_REPLY = 16 * 1048576
 CACHE_ENTRIES = 1000
@@ -84,7 +100,7 @@ class Client:
         template = ENDPOINTS[name]
         for key, value in parts.items():
             value = str(value)
-            if key == "id" and not UUID.match(value):
+            if (key == "id" or key.endswith("_id")) and not UUID.match(value):
                 raise PPMXError(400, f"{value!r} isn't a PPM Express ID (a UUID)")
             if key == "entity" and not ENTITY.match(value):
                 raise PPMXError(400, f"{value!r} isn't an entity name")
@@ -92,9 +108,7 @@ class Client:
         return template
 
     # ---- requests
-    def get(self, token, name, params=None, **parts):
-        """The JSON PPM Express returns for one endpoint. A list that pages is followed through its
-        next links on the same base URL (up to MAX_PAGES) and returned as one {"data": [...]}."""
+    def _url(self, token, name, params, parts):
         if not self.settings.ready:
             raise PPMXError(503, self.settings.problem or "the server isn't configured")
         if not valid_token(token):
@@ -102,6 +116,12 @@ class Client:
         url = f"{self.settings.base_url}/{self.path(name, **parts)}"
         if params:
             url += "?" + urllib.parse.urlencode(params)
+        return url
+
+    def get(self, token, name, params=None, **parts):
+        """The JSON PPM Express returns for one endpoint. A list that pages is followed through its
+        next links on the same base URL (up to MAX_PAGES) and returned as one {"data": [...]}."""
+        url = self._url(token, name, params, parts)
         key = (token_key(token), url)
         hit = self._cached(key)
         if hit is not None:
@@ -120,24 +140,51 @@ class Client:
         self._store(key, value)
         return copy.deepcopy(value)
 
-    def _request(self, token, url):
+    def send(self, token, method, name, body, params=None, **parts):
+        """POST (create) or PATCH (update) one endpoint with a JSON body; the JSON PPM Express answers
+        with (None when it sends nothing back). The caller's cached answers are dropped either way."""
+        if method not in ("POST", "PATCH"):
+            raise PPMXError(400, f"{method} isn't a write this client makes")
+        url = self._url(token, name, params, parts)
+        data = json.dumps(body, ensure_ascii=False, default=str).encode("utf-8")
+        if len(data) > MAX_BODY:
+            raise PPMXError(413, "that change is too large to send")
+        try:
+            return self._request(token, url, method, data)
+        finally:
+            self.forget(token)
+
+    def forget(self, token):
+        """Drop one caller's cached answers (after a write, so the next read sees it)."""
         tk = token_key(token)
+        with self._lock:
+            for key in [k for k in self._cache if k[0] == tk]:
+                del self._cache[key]
+
+    def _request(self, token, url, method="GET", data=None):
+        tk = token_key(token)
+        write = method != "GET"
         for attempt in range(4):
             self._pace(tk)
-            req = urllib.request.Request(url, headers={
-                "Authorization": f"Bearer {token}", "Accept": "application/json",
-                "User-Agent": f"ppmx-mcp/{__version__}"})
+            headers = {"Authorization": f"Bearer {token}", "Accept": "application/json",
+                       "User-Agent": f"ppmx-mcp/{__version__}"}
+            if data is not None:
+                headers["Content-Type"] = "application/json"
+            req = urllib.request.Request(url, data=data, headers=headers, method=method)
             try:
                 with self._lock:
                     self.requests += 1
                 with self._open(req, timeout=self.settings.timeout) as r:
                     body = r.read(MAX_REPLY + 1)
             except urllib.error.HTTPError as e:
-                if e.code in RETRY_STATUS and attempt < 3:
+                if e.code in (WRITE_RETRY_STATUS if write else RETRY_STATUS) and attempt < 3:
                     self._sleep(retry_after(e.headers.get("Retry-After") if e.headers else None, attempt))
                     continue
                 raise PPMXError(e.code, http_message(e)) from None
             except (urllib.error.URLError, TimeoutError, OSError) as e:
+                if write:                             # it may have arrived: never send it twice
+                    raise PPMXError(504, f"couldn't confirm PPM Express made the change ({reason(e)}); check "
+                                         "there before trying again") from None
                 if attempt < 2:
                     self._sleep(2 ** attempt)
                     continue
@@ -147,6 +194,9 @@ class Client:
             try:
                 return json.loads(body.decode("utf-8-sig") or "null")
             except (ValueError, UnicodeDecodeError):
+                if write:
+                    raise PPMXError(502, "PPM Express accepted the change but its reply isn't JSON; check "
+                                         "there") from None
                 raise PPMXError(502, "PPM Express sent a reply that isn't JSON") from None
         raise PPMXError(503, "PPM Express kept asking to wait; try again shortly")
 
@@ -245,7 +295,8 @@ def http_message(e):
         return ("PPM Express rejected the token: it may have expired or been revoked. Create a new personal "
                 "access token in PPM Express > Automation.")
     if code == 403:
-        return "PPM Express refused: the token's scopes or your PPM Express permissions don't allow this."
+        return ("PPM Express refused: the token's scopes or your PPM Express permissions don't allow this "
+                "(a change needs a token with write scopes, such as Write Projects).")
     if code == 404:
         return "PPM Express has no such item, or this tenant doesn't offer that endpoint."
     if code == 429:

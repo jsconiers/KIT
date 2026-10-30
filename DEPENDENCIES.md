@@ -42,12 +42,12 @@ For installing and configuring, see INSTALL.md; for how the pieces fit, see DESI
 | `kit-labcheck` | Python 3.8 | Same code | The lab planner reads requests and runbooks against the data rule by hand |
 | `kit-metrics` | Python 3.8 | Same code (opens the page with the platform's opener) | No metrics page; the data files are still kept |
 | `kit-project` | Python 3.8 | Same code | Create project folders by hand from `memory/context/project-types.md` |
-| `kit-delegate` | Python 3.8; a provider's API reachable, and its credential by env-var or Keychain name | Same code; Keychain on macOS only (Windows: env var) | No delegate tool; Claude Code agents keep their own model |
+| `kit-delegate` | Python 3.8; a provider's API reachable, and its credential by env-var or credential-store name | Same code; the Keychain on macOS, Credential Manager on Windows | No delegate tool; Claude Code agents keep their own model |
 | `kit-run` | Python 3.8; as kit-delegate; for connectors, each MCP server's own runtime (for example node), named in kit-run.json | Same code; experimental; hooks run through the platform shell | Agents run only inside Claude Code |
 | `kit-lifecycle` | Python 3.8; an inventory export and eol.json in the radar folder | Same code | The planner joins inventory and dates by hand |
 | `kit-roadmap` | Python 3.8 | Same code | The planner drafts the roadmap by hand from the template |
 | `kit-connect` | Python 3.8; Claude Code (`claude mcp list`; `claude -p --agent gateway` for --read) | Same code; Keychain name check on macOS only | No connector report; check with `claude mcp list` by hand |
-| `kit-ppmx` | Python 3.8; a PPM Express tenant's API address (`PPMX_BASE_URL`) and a personal access token with read scopes, from an environment variable or a Keychain entry, by name; Claude Code for `serve` | Same code; Keychain on macOS only (Windows: a user environment variable) | No PPM Express connector; read PPM Express in its own web app |
+| `kit-ppmx` | Python 3.8; a PPM Express tenant's API address (`PPMX_BASE_URL`) and a personal access token (read scopes to read, write scopes to make changes), from an environment variable or the credential store, by name; Claude Code or Claude Desktop for `serve` | Same code; the token in the Keychain on macOS, Credential Manager on Windows; its tests run on Windows in GitHub's checks | No PPM Express connector; use PPM Express in its own web app |
 | `kit-evals` | Python 3.8; Claude Code for --live | Same code | Agent changes and model moves go unchecked |
 | `kit-commitments` | Python 3.8 | Same code | Commitments aren't proposed; add them with `todo` yourself |
 | `kit-quality` | Python 3.8 | Same code | Recurring findings are spotted by hand |
@@ -116,7 +116,7 @@ For installing and configuring, see INSTALL.md; for how the pieces fit, see DESI
 | `shared/reminders_sync.py` | `osascript` and Apple Reminders | Optional | Supported | Not supported; Windows uses `platform/windows/reminders/reminders_sync_win.py` (Outlook Tasks over COM, untested adapter) |
 | `shared/protect_folder.py` | Python stdlib; `git` when the folder is a repo | Recommended for work folders | Supported | Same code |
 | `shared/bin/connector-guard` | Python stdlib; runs as a Claude Code hook | Required for agents that reach outside systems | Supported | Untested: hook commands call `python3` and `$HOME` |
-| `shared/ppmx/` (the PPM Express MCP server) | Python stdlib for Kit's connector (stdio). The standalone service adds gunicorn, pinned in `shared/ppmx/requirements.txt` and installed only in its container image (a UBI Python 3.12 base), built with podman or docker and run on OpenShift | Optional | Supported (stdio) | Same code (stdio) |
+| `shared/ppmx/` (the PPM Express MCP server) | Python stdlib for Kit's connector (stdio). The standalone service adds gunicorn, pinned in `shared/ppmx/requirements.txt` and installed only in its container image (a UBI Python 3.12 base), built with podman or docker (from macOS, Linux, or Windows) and run on OpenShift: `shared/ppmx/openshift/INSTALL.md` | Optional | Supported (stdio) | Same code (stdio), tested on Windows |
 | `shared/bin/vsdx-finish` | Python stdlib; a `.vsdx` made from a stencil with title-block and legend masters; settings in `vsdx-finish.json` | Optional (diagrammer) | Supported | Same code; pass `--author`, since the default uses the POSIX `id` command |
 | `shared/bin/kit-drawio` | Python stdlib for JSON specs; `python-pptx` only for PowerPoint input | Optional (diagrammer) | Supported | Same code |
 | `shared/bin/kit-grammar` | LanguageTool (folder with `languagetool-commandline.jar`) and Java (17+ for LanguageTool 6+); `pdftotext` for PDFs | Optional (reviewer) | Supported | Same code (looks in Program Files, AppData, and Scoop) |
@@ -547,9 +547,11 @@ A failed sign-in can count against a shared account: the gateway stops after one
 - The backup passphrase's Keychain entry name (BACKUP_KEY_KEYCHAIN) or environment variable name
   (BACKUP_KEY_ENV).
 - A PPM Express personal access token: the environment variable `PPMX_TOKEN` (or the name in
-  `PPMX_TOKEN_ENV`) or, on a Mac, the Keychain entry `PPMX_TOKEN` (or the name in
-  `PPMX_TOKEN_KEYCHAIN`). The standalone service holds none: each caller sends their own with every
-  request.
+  `PPMX_TOKEN_ENV`), or the entry `PPMX_TOKEN` (or the name in `PPMX_TOKEN_KEYCHAIN`) in the Mac
+  Keychain or Windows Credential Manager (`cmdkey /generic:PPMX_TOKEN /user:kit /pass`). The standalone
+  service holds none: each caller sends their own with every request.
+- Any `keychain_entry` (models.json, sharing-db.json, kit-ppmx) is read from Windows Credential Manager on
+  Windows: a generic credential with that name.
 
 ## 6. Check it
 
@@ -644,10 +646,13 @@ Claude Code uses for hooks, on every machine.
   reaches outside the computer; the inventory never leaves.
 - Sharing policy: closed (a policy file that can't be read refuses all sharing).
 - kit-connect --read: off by default; one read-only tool per server, run as the gateway under the guard.
-- kit-ppmx and the PPM Express server: closed (no address or no token means no call; the tools only
-  read; redirects aren't followed, so a token goes only to `PPMX_BASE_URL`; a token in Kit's config
-  is ignored; tokens are never stored, printed, or logged; the HTTP server refuses browser origins
-  not listed in `PPMX_ALLOWED_ORIGINS`).
+- kit-ppmx and the PPM Express server: closed (no address or no token means no call; redirects aren't
+  followed, so a token goes only to `PPMX_BASE_URL`; a token in Kit's config is ignored; tokens are never
+  stored, printed, or logged; the HTTP server refuses browser origins not listed in
+  `PPMX_ALLOWED_ORIGINS`). Changes: `PPMX_WRITES=off` refuses them before anything is sent; in Claude
+  Code every create and update asks (Kit's rules), so a scheduled run never makes one; the connector
+  guard denies them to Kit's agents; a change that times out is never resent; every call is audited
+  without values.
 - Phone approvals: closed (unknown, expired, used, or wrong-scope codes and any payload naming a
   medium- or high-tier action are refused and recorded; a code is single-use and works only on the
   day it's issued).

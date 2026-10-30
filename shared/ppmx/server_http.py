@@ -7,10 +7,12 @@ or, for a quick local try, `python -m ppmx http` (the standard library's server,
 
 Each caller sends their own PPM Express personal access token on every request, in the X-PPMX-Token
 header, or as Authorization: Bearer when nothing in front of the server uses that header. The server
-passes it to PPM Express and never stores or logs it. Answers are cached per caller, never across
-callers. The audit log (standard error, one JSON line per message) records who (a one-way hash of the
-token), which method and tool, the argument names (not their values), the outcome, rows returned, and
-the time taken.
+passes it to PPM Express and never stores or logs it, so each person can read and change only what their
+own token and PPM Express permissions allow. Answers are cached per caller, never across callers.
+PPMX_WRITES=off makes the whole server read-only. The audit log (standard error, one JSON line per
+message) records who (a one-way hash of the token), which method and tool, the argument names (not their
+values), the outcome, rows returned, the time taken, and for a change, its kind, the record's ID, and the
+field names sent.
 
   POST /mcp     MCP messages (one, or a batch)
   GET  /healthz the process is up
@@ -19,7 +21,6 @@ the time taken.
 """
 import datetime
 import json
-import sys
 import time
 import uuid
 
@@ -27,19 +28,15 @@ from .client import Client, token_key, valid_token
 from .codes import load as load_codes
 from .config import Settings
 from .mcp_core import PROTOCOL_VERSIONS, Dispatcher, error
+from .server_stdio import stderr_log
 from .tools import Context
 
-HINT = ("No personal access token came with this request: send yours in the X-PPMX-Token header "
+HINT =("No personal access token came with this request: send yours in the X-PPMX-Token header "
         "(create one in PPM Express > Automation).")
 BAD_TOKEN = "The personal access token in this request isn't valid."
 REASONS = {200: "OK", 202: "Accepted", 400: "Bad Request", 403: "Forbidden", 404: "Not Found",
            405: "Method Not Allowed", 406: "Not Acceptable", 413: "Payload Too Large",
            415: "Unsupported Media Type", 503: "Service Unavailable"}
-
-
-def stderr_log(entry):
-    sys.stderr.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
-    sys.stderr.flush()
 
 
 def caller_token(environ):
@@ -109,7 +106,7 @@ def make_app(settings=None, client=None, log=None):
             return respond(start_response, 400, error(None, -32700, "parse error"))
 
         token, hint = caller_token(environ)
-        dispatcher = Dispatcher(lambda t: Context(client, settings, tables, t, hint=hint))
+        dispatcher = Dispatcher(lambda t: Context(client, settings, tables, t, hint=hint), writes=settings.writes)
         who = f"u:{token_key(token)[:12]}" if token else "-"
         rid = (environ.get("HTTP_X_REQUEST_ID") or uuid.uuid4().hex[:12])[:64]
         ip = (environ.get("HTTP_X_FORWARDED_FOR") or environ.get("REMOTE_ADDR") or "").split(",")[0].strip()

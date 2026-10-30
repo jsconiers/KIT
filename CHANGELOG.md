@@ -8,18 +8,31 @@ versions follow [semantic versioning](https://semver.org).
 ## [Unreleased]
 
 ### Added
-- PPM Express, read-only (`shared/ppmx/`, version 0.1.0; a stub until a tenant's endpoints are
-  confirmed): one MCP server package with ten read-only tools (who you are, portfolios, programs,
-  projects, a project, its tasks and key dates, ideas, resources, and a tenant's fields), run two
-  ways. `kit-ppmx serve` is Kit's connector, started by Claude Code with your own personal access
-  token from the environment or the Keychain; `kit-ppmx check`, `tools`, `call`, and `setup` (the
-  steps to connect it, changing nothing). The standalone service runs the same tools over Streamable
-  HTTP for a team, each caller sending their own token with every request: a container image
-  (`shared/ppmx/Containerfile`: non-root, read-only filesystem) and OpenShift files
-  (`shared/ppmx/openshift/`: deployment, service, HTTPS route, network policy). Tokens are passed
-  through, never stored, printed, or logged. Tested against a fake PPM Express
-  (`tests/test_ppmx.py`, `tests/ppmx_container_smoke.py`); GitHub's checks build the image and run it
-  the way OpenShift does.
+- PPM Express (`shared/ppmx/`, version 0.2.0; a stub until a tenant's endpoints are confirmed): one MCP
+  server package that reads portfolios, programs, projects, tasks, key dates, ideas, challenges, and
+  resources, and creates and updates them (PPM Express's API has no delete), run two ways.
+  - `kit-ppmx`, Kit's connector, for Claude Code and Claude Desktop on macOS or Windows, with your own
+    personal access token from the Mac Keychain, Windows Credential Manager, or the environment:
+    `serve`, `check` (whose token, its scopes, whether it can make changes), `tools`, `call`, `desktop`
+    (adds the server to Claude Desktop's config, after a backup; `--remove`, `--print`), and `setup`.
+    In Claude Code every create and update asks you first, and Kit's agents and scheduled runs never
+    make one. Every call is recorded without its values in Kit's audit folder (`ppmx-YYYY-MM.jsonl`).
+  - The standalone service for a team: the same tools over Streamable HTTP, each caller sending their own
+    token with every request; a container image (non-root, read-only filesystem; `PIP_INDEX_URL` for a
+    package mirror) and OpenShift files, with their own install guide, `shared/ppmx/openshift/INSTALL.md`.
+  - PPM Express's published codes (status, progress, ratings, idea stage, key date type) both ways:
+    labels when reading, labels or numbers when writing. `PPMX_WRITES=off` makes either one read-only.
+    A change is never sent twice: it's retried only when PPM Express says it didn't take it.
+  - Tested against a fake PPM Express (`tests/test_ppmx.py`, `tests/ppmx_container_smoke.py`) on Linux
+    and Windows; GitHub's checks also build the image and run it the way OpenShift does.
+- A credential's `keychain_entry` (in models.json, sharing-db.json, or for kit-ppmx) is read from Windows
+  Credential Manager on Windows: a generic credential with that name.
+- INSTALL.md: setting up the PPM Express connector, under Connectors.
+
+### Changed
+- KIT.md's ask-first rule now covers changing a record in an outside system: Kit changes PPM Express
+  only when you ask in the session, after saying exactly what it will create or change, and only on
+  your yes; never from a scheduled run, a text, or another agent.
 
 ## [1.5.1] - 2026-10-29
 

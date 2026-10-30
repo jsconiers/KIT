@@ -1,5 +1,5 @@
-# The standalone PPM Express MCP server on OpenShift. Fill in the REPLACE values (the namespace, the image,
-# your tenant's API address in configmap.yaml), then:
+# The standalone PPM Express MCP server on OpenShift (INSTALL.md, next to this, has every step). Fill in the
+# REPLACE values (the namespace, the image, your tenant's API address in configmap.yaml), then:
 #
 #   oc apply -k shared/ppmx/openshift          (or kubectl kustomize shared/ppmx/openshift to see it first)
 #
@@ -16,4 +16,4 @@ resources:
 images:
   - name: ppmx-mcp
     newName: REPLACE-registry/REPLACE-namespace/ppmx-mcp
-    newTag: "0.1.0"
+    newTag: "0.2.0"

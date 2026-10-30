@@ -172,7 +172,7 @@ The installer links these into `~/.local/bin` (all in `shared/bin/`):
 |---|---|
 | `kit-pause` | Kill switch: stops scheduled runs and connector calls until `kit-pause resume` |
 | `kit-connect` | Connector check: guard, credential variables by name, Claude Code health |
-| `kit-ppmx` | PPM Express, read-only (a stub until a tenant's endpoints are confirmed): `serve` is the MCP server Claude Code starts; `check`, `tools`, `call`, and `setup` (the steps, changing nothing). The same package runs as a standalone service on OpenShift: `shared/ppmx/README.md` |
+| `kit-ppmx` | PPM Express from Claude Code or Claude Desktop, on macOS or Windows: reads portfolios, projects, tasks, key dates, ideas, and resources, and creates or updates them, asking you before each change (a stub until a tenant's endpoints are confirmed). `serve` (the MCP server), `check`, `tools`, `call`, `desktop` (adds it to Claude Desktop), and `setup` (the steps, changing nothing). The same package runs as a team service on OpenShift: `shared/ppmx/openshift/INSTALL.md` |
 | `kit-backup` | Checked archive of Kit's folder and history to a folder you choose (local or shared), encrypted on request; `verify`, `restore` |
 | `kit-audit-export` | A dated evidence pack of Kit's controls for a compliance or security review; `--controls` organises it by control for an audit request, with gaps listed |
 | `kit-retention` | Retention rules with legal holds; reports, and only moves files with `--yes` |
@@ -208,12 +208,14 @@ copies them into `~/.claude/skills` only where no skill of that name exists, and
 - **Read-only connectors.** Agents reach outside systems through MCP servers. The connector guard
   (a Claude Code hook) allows only listed servers and read tools, denies writes, and records every
   call, result, and failure in an audit log. `kit-audit` reviews the log daily and weekly, and flags
-  searches whose filter a system may have silently ignored.
+  searches whose filter a system may have silently ignored. The one system you can change through Kit
+  is PPM Express (`kit-ppmx`), from your own session: Claude Code asks before every create or update,
+  agents and scheduled runs never make one, and each call is audited without its values.
 - **Kill switch.** `kit-pause` stops every scheduled run and every connector call at once.
 - **Information, not instructions.** Text Kit reads in files, mail, web pages, other Kits'
   records, or phone requests is never treated as an order.
-- **Credentials by name.** Kit refers to credentials by environment-variable or Keychain entry
-  name; it never stores or prints a value.
+- **Credentials by name.** Kit refers to credentials by environment-variable or credential-store
+  entry name (the Mac Keychain, Windows Credential Manager); it never stores or prints a value.
 - **Backups are encrypted where they leave home.** `kit-backup --encrypt` uses AES-256 with an
   integrity check verified before anything decrypts; the passphrase comes from a Keychain entry or
   environment variable you create. Unencrypted backups are refused in shared or synced folders.

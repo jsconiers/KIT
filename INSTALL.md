@@ -352,6 +352,64 @@ Claude Code's docs). Then:
 
 The health check (`doctor.py`) also warns about missing credential variables by name.
 
+### PPM Express (kit-ppmx)
+
+Kit ships its own PPM Express connector, `kit-ppmx`: an MCP server that reads portfolios, programs,
+projects, tasks, key dates, ideas, challenges, and resources, and creates and updates them (PPM Express's
+API has no delete). It runs on your computer, macOS or Windows, for Claude Code and Claude Desktop, with
+your own personal access token. `kit-ppmx setup` prints these steps with this computer's paths filled in,
+and changes nothing.
+
+1. **A token.** In PPM Express > Automation, create a personal access token: read scopes to look, and
+   write scopes (such as Write Projects) if Kit should make the changes you approve. Store it where only
+   you can read it; each command asks for the token, so it never lands in your shell history:
+
+   ```bash
+   security add-generic-password -s PPMX_TOKEN -a "$USER" -w     # macOS: the Keychain
+   ```
+
+   ```powershell
+   cmdkey /generic:PPMX_TOKEN /user:kit /pass                    # Windows: Credential Manager
+   ```
+
+   An environment variable `PPMX_TOKEN` works too, but Claude Desktop doesn't see variables set in a
+   terminal.
+2. **The address.** In Kit's config (`~/Claude/Agents/kit/.install/shared/morning/config`), add your
+   tenant's API address from PPM Express > Automation:
+
+   ```bash
+   PPMX_BASE_URL="https://<host>/@<tenant>/v1.0"
+   ```
+
+   Changes are on. `PPMX_WRITES="off"` on another line makes the connector read-only.
+3. **Claude Code.** Add the server for your user (`kit-ppmx setup` prints the line with your Python and
+   path):
+
+   ```bash
+   claude mcp add --scope user --env PYTHONUTF8=1 ppmx -- python3 ~/Claude/Agents/kit/.install/shared/bin/kit-ppmx serve
+   ```
+
+   On Windows, use the full path to `python.exe` and to `kit-ppmx` under `%USERPROFILE%`.
+4. **Claude Desktop** (optional). Run `kit-ppmx desktop`: it adds the same server to Desktop's config
+   (`~/Library/Application Support/Claude/claude_desktop_config.json` on a Mac,
+   `%APPDATA%\Claude\claude_desktop_config.json` on Windows) after saving a copy of it, keeping every
+   other server. Quit and reopen Desktop. `kit-ppmx desktop --remove` takes it out again.
+5. **Kit's agents.** So Kit's agents can read PPM Express through the gateway, add `ppmx` to
+   `allowed_servers` in `memory/context/connector-guard.json`, with `"credential_env": {"ppmx":
+   ["PPMX_TOKEN"]}` and `"probe_tools": {"ppmx": "mcp__ppmx__get_current_user"}`, and list PPM Express
+   under Systems in `connectors.md`. The guard never lets an agent make a change.
+6. **Check:** `kit-ppmx check` (who the token belongs to, its scopes, whether it can make changes, when it
+   expires), then `kit-connect test ppmx`.
+
+How changes stay yours: in Claude Code, Kit's permission rules make every `create_` and `update_` tool ask
+you first, even if you allow the rest of the server, and a scheduled run can't answer, so it never makes a
+change. Claude Desktop asks before each tool runs unless you tell it to always allow one; leave the
+`create_` and `update_` tools on asking. Before a change, Claude says what it will create or change. Every
+call, from either app, is recorded without its values in Kit's audit folder (`ppmx-YYYY-MM.jsonl`).
+Rerun Kit's installer after an update so Claude Code picks up new rules.
+
+For a team, the same server also runs as a service on OpenShift: `shared/ppmx/openshift/INSTALL.md`.
+
 ## 9. Model routing
 
 `~/Claude/Agents/kit/models.json` maps agents and scheduled runs to profiles: `deep` (Opus, the

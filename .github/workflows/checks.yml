@@ -5,7 +5,8 @@
 #                    See .github/scripts/checks.py.
 #   windows-install: the Windows installer, run for real on GitHub's Windows runners under Windows
 #                    PowerShell 5.1 and PowerShell 7: install, reinstall, and the repair of an install
-#                    whose files lost their permissions. See .github/scripts/windows-install-test.ps1.
+#                    whose files lost their permissions (.github/scripts/windows-install-test.ps1), and
+#                    the PPM Express connector's tests on Windows, Credential Manager included.
 #   ppmx:            the PPM Express MCP server (shared/ppmx): its tests against a fake PPM Express, the
 #                    OpenShift files rendered with kustomize, and the container image built and run the
 #                    way OpenShift runs it (a random non-root user, a read-only root filesystem, no
@@ -65,6 +66,8 @@ jobs:
         env:
           KIT_OWNER: Testy
         run: .\.github\scripts\windows-install-test.ps1
+      - name: PPM Express MCP tests on Windows
+        run: python tests/test_ppmx.py
 
   ppmx:
     runs-on: ubuntu-latest

@@ -17,7 +17,8 @@ DEFAULTS = {
     "PPMX_ALLOWED_ORIGINS": "",     # browser origins the HTTP server accepts; a request from any other is refused
     "PPMX_MAX_BODY": "1048576",     # the largest request body the HTTP server reads, in bytes
     "PPMX_CODES_FILE": "",          # optional JSON file of code tables (see codes.py)
-    "PPMX_AUDIT": "on",             # the HTTP server's audit lines on standard error ("off" stops them)
+    "PPMX_WRITES": "on",            # "off" makes the server read-only: no create or update tools at all
+    "PPMX_AUDIT": "on",             # audit lines on standard error, one per message ("off" stops them)
     "PPMX_TODAY": "",               # tests only: the date to treat as today (YYYY-MM-DD)
 }
 
@@ -40,6 +41,7 @@ class Settings:
                                 if o.strip()}
         self.max_body = int(_number(get("PPMX_MAX_BODY"), 1048576, 1024, 16 * 1048576))
         self.codes_file = get("PPMX_CODES_FILE")
+        self.writes = get("PPMX_WRITES").lower() not in ("off", "0", "false", "no")
         self.audit = get("PPMX_AUDIT").lower() not in ("off", "0", "false", "no")
         try:
             self.today = datetime.date.fromisoformat(get("PPMX_TODAY")) if get("PPMX_TODAY") else None

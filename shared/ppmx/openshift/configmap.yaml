@@ -8,6 +8,9 @@ metadata:
     app.kubernetes.io/part-of: kit
 data:
   PPMX_BASE_URL: "https://REPLACE-host/@REPLACE-tenant/v1.0"
+  # "on": the create and update tools are offered (each caller's token and PPM Express permissions still
+  # decide what they can change). "off": a read-only service.
+  PPMX_WRITES: "on"
   PPMX_CACHE_SECONDS: "60"
   PPMX_RATE_PER_MINUTE: "90"
   PPMX_PAGE_SIZE: "25"

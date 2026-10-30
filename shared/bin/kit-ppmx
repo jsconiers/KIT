@@ -1,23 +1,30 @@
 #!/usr/bin/env python3
-"""kit-ppmx: Kit's PPM Express connector (an MCP server Claude Code starts on this computer) and its checks.
-Read-only. A stub until the tenant's endpoints are confirmed (shared/ppmx/README.md).
+"""kit-ppmx: PPM Express from Claude Code or Claude Desktop: read projects, tasks, key dates, and ideas,
+and create or update them, each change approved by you.
 
-  kit-ppmx serve              run the MCP server on standard input and output; Claude Code starts it
-                              (`kit-ppmx setup` gives the command that adds it)
-  kit-ppmx check              whose token it is in PPM Express, its scopes, and when it expires; exit 0
-                              when PPM Express answers
-  kit-ppmx tools              the tools it offers
-  kit-ppmx call TOOL [JSON]   run one tool and print the result, for testing; agents use the MCP tools,
-                              which go through the connector guard and its audit log, not this
-  kit-ppmx setup              the steps to connect it on this computer: the token, the address, Claude
-                              Code, and Kit's connector guard. It changes nothing.
+  kit-ppmx serve              the MCP server on standard input and output; Claude Code or Claude Desktop
+                              starts it (kit-ppmx setup gives the commands)
+  kit-ppmx check              whose token it is in PPM Express, its scopes (can it make changes?), and
+                              when it expires; exit 0 when PPM Express answers
+  kit-ppmx tools              the tools it offers, the ones that change PPM Express marked
+  kit-ppmx call TOOL [JSON]   run one tool and print the result, for testing (a create_ or update_ tool
+                              changes PPM Express); Claude Code asks before it runs this
+  kit-ppmx desktop            add Kit's PPM Express server to Claude Desktop's config, after a backup
+                              (--remove takes it out; --print shows the entry and changes nothing)
+  kit-ppmx setup              the steps for this computer: the token, the address, Claude Code, Claude
+                              Desktop, and Kit's connector guard. It changes nothing.
 
-Settings: PPMX_BASE_URL (https://<host>/@<tenant>/v1.0, from PPM Express > Automation) and the other
-PPMX_* settings in shared/ppmx/README.md, from the environment or Kit's config
-(~/Claude/Agents/kit/.install/shared/morning/config). The personal access token: the environment variable
-PPMX_TOKEN (PPMX_TOKEN_ENV names another) or, on a Mac, the Keychain entry PPMX_TOKEN (PPMX_TOKEN_KEYCHAIN
-names another, or "off"). It's never written to a file, printed, or logged, and a token in Kit's config is
-ignored.
+Works on macOS and Windows. Settings: PPMX_BASE_URL (https://<host>/@<tenant>/v1.0, from PPM Express >
+Automation) and the other PPMX_* settings in shared/ppmx/README.md, from the environment or Kit's config
+(~/Claude/Agents/kit/.install/shared/morning/config); PPMX_WRITES="off" there makes it read-only. The
+personal access token: the environment variable PPMX_TOKEN (PPMX_TOKEN_ENV names another), or the Mac
+Keychain or Windows Credential Manager entry PPMX_TOKEN (PPMX_TOKEN_KEYCHAIN names another, or "off").
+It's never written to a file, printed, or logged, and a token in Kit's config is ignored.
+
+Changes: in Claude Code, Kit's permission rules make every create or update ask you first, and scheduled
+runs and Kit's agents never make one (the connector guard stops the agents). Claude Desktop asks before a
+tool runs unless you've told it to always allow that tool. Every tool call is recorded, without its
+values, in Kit's audit folder (ppmx-YYYY-MM.jsonl) and on standard error.
 
 Exit codes: 0 fine, 1 PPM Express refused or failed, 2 not set up (no address or no token) or bad input.
 """
@@ -34,21 +41,24 @@ SHARED = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SHARED))
 import kit_secrets  # noqa: E402
 from ppmx import __version__  # noqa: E402
-from ppmx.client import Client, PPMXError  # noqa: E402
+from ppmx.client import Client, token_key  # noqa: E402
 from ppmx.codes import CodesError, load as load_codes  # noqa: E402
 from ppmx.config import Settings  # noqa: E402
 from ppmx.mcp_core import Dispatcher  # noqa: E402
 from ppmx.server_stdio import serve  # noqa: E402
-from ppmx.tools import TOOLS, Context, ToolError, run_tool  # noqa: E402
+from ppmx.tools import TOOLS, Context  # noqa: E402
 
 KIT = pathlib.Path(os.path.expanduser(os.environ.get("KIT_DIR", "~/Claude/Agents/kit")))
 CONFIG = KIT / ".install/shared/morning/config"
+GUARD = KIT / "memory/context/connector-guard.json"
 SETTING = re.compile(r'^\s*(PPMX_[A-Z_]+)="?([^"\n]*)"?\s*$')
+WINDOWS = os.name == "nt"
+STORE = "Credential Manager entry" if WINDOWS else "Keychain entry"
 
 
 def kit_env():
     """The environment, plus PPMX_* settings from Kit's config where the environment has none. A token
-    there is ignored: tokens live in the environment or the Keychain, never in a file."""
+    there is ignored: tokens live in the environment or the credential store, never in a file."""
     env = dict(os.environ)
     try:
         text = CONFIG.read_text(encoding="utf-8-sig")
@@ -62,10 +72,10 @@ def kit_env():
 
 
 def token_places(env):
-    """(environment variable, Keychain entry or None) the token is read from. PPMX_TOKEN_KEYCHAIN names a
-    different Keychain entry, or "off" for none."""
+    """(environment variable, credential store entry or None) the token is read from: the Mac Keychain
+    or Windows Credential Manager. PPMX_TOKEN_KEYCHAIN names a different entry, or "off" for none."""
     entry = (env.get("PPMX_TOKEN_KEYCHAIN") or "PPMX_TOKEN").strip()
-    if sys.platform != "darwin" or entry.lower() in ("off", "none", "no"):
+    if not (sys.platform == "darwin" or WINDOWS) or entry.lower() in ("off", "none", "no"):
         entry = None
     return (env.get("PPMX_TOKEN_ENV") or "PPMX_TOKEN").strip(), entry
 
@@ -82,7 +92,7 @@ def get_token(env):
                 return cred.reveal().strip(), ""
         except kit_secrets.CredentialError:
             pass
-    where = f"the environment variable {var}" + (f" or the Keychain entry {entry}" if entry else "")
+    where = f"the environment variable {var}" + (f" or the {STORE} {entry}" if entry else "")
     return "", f"No personal access token: set {where} (kit-ppmx setup shows how)."
 
 
@@ -94,6 +104,39 @@ def tables_for(settings):
         return {}
 
 
+def audit_folder():
+    """Kit's audit folder: the connector guard's audit_dir, or ~/Claude/Agents/kit/audit."""
+    try:
+        folder = json.loads(GUARD.read_text(encoding="utf-8-sig")).get("audit_dir")
+    except (OSError, ValueError, AttributeError):
+        folder = None
+    return pathlib.Path(os.path.expanduser(folder or str(KIT / "audit")))
+
+
+def audit_logger(settings):
+    """One JSON line per tool call (no token, no argument values) in <audit folder>/ppmx-YYYY-MM.jsonl,
+    and on standard error, which Claude Code and Claude Desktop keep in their MCP logs."""
+    folder = audit_folder()
+
+    def log(entry):
+        line = json.dumps(entry, ensure_ascii=False, default=str)
+        if settings.audit:
+            sys.stderr.write(line + "\n")
+            sys.stderr.flush()
+        try:
+            folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+            with open(folder / f"ppmx-{datetime.date.today():%Y-%m}.jsonl", "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except OSError:
+            pass                                      # the call goes ahead; standard error still has it
+
+    return log
+
+
+def dispatcher_for(settings, tables, client, hint):
+    return Dispatcher(lambda token: Context(client, settings, tables, token, hint=hint()), writes=settings.writes)
+
+
 def cmd_serve(env):
     settings = Settings(env)
     client, tables = Client(settings), tables_for(settings)
@@ -103,8 +146,8 @@ def cmd_serve(env):
         token, state["hint"] = get_token(env)
         return token
 
-    dispatcher = Dispatcher(lambda token: Context(client, settings, tables, token, hint=state["hint"]))
-    return serve(dispatcher, token_source)
+    return serve(dispatcher_for(settings, tables, client, lambda: state["hint"]), token_source,
+                 log=audit_logger(settings))
 
 
 def ready(env):
@@ -120,29 +163,49 @@ def ready(env):
     return settings, token
 
 
+def call(settings, token, name, args, tables=None, via="kit-ppmx call"):
+    """(ok, text): one tool run the way the MCP server runs it, recorded in the audit log."""
+    d = dispatcher_for(settings, {} if tables is None else tables, Client(settings), lambda: "")
+    facts = {}
+    reply = d.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": args}},
+                     token, facts.update)
+    if facts.get("tool"):
+        audit_logger(settings)({"ts": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+                                "via": via, "user": f"u:{token_key(token)[:12]}", **facts})
+    if "error" in reply:
+        return False, reply["error"]["message"]
+    res = reply["result"]
+    return not res["isError"], res["content"][0]["text"]
+
+
 def cmd_check(env):
     got = ready(env)
     if not got:
         return 2
     settings, token = got
-    try:
-        me = run_tool("get_current_user", {}, Context(Client(settings), settings, {}, token))
-    except (PPMXError, ToolError) as e:
-        print(f"kit-ppmx: {e}", file=sys.stderr)
+    good, text = call(settings, token, "get_current_user", {}, via="kit-ppmx check")
+    if not good:
+        print(f"kit-ppmx: {text}", file=sys.stderr)
         return 1
+    me = json.loads(text)
     who = me.get("displayName") or me.get("name") or me.get("logonAccount") or "(no name given)"
     host = urllib.parse.urlsplit(settings.base_url).hostname
     print(f"kit-ppmx: PPM Express answers at {host}: {who}" + (f" <{me['email']}>" if me.get("email") else ""))
     tok = me.get("token") or {}
-    scopes = tok.get("scopes") or []
+    scopes = [str(s) for s in tok.get("scopes") or []]
     print(f"  token: {tok.get('name') or '(unnamed)'}, expires {when(tok.get('expirationDate'))}; "
-          f"scopes: {', '.join(map(str, scopes)) if scopes else 'none listed'}")
+          f"scopes: {', '.join(scopes) if scopes else 'none listed'}")
+    can_write = any(re.search(r"(?i)\b(write|create|update|manage)\b", s) for s in scopes)
+    if not settings.writes:
+        print("  changes: off (PPMX_WRITES=off): Kit only reads")
+    elif can_write:
+        print("  changes: the token's scopes allow them; Claude Code asks before each one")
+    else:
+        print("  changes: the token has no write scopes, so PPM Express will refuse them; reading works")
     expires = day(tok.get("expirationDate"))
     if expires and expires - datetime.date.today() <= datetime.timedelta(days=14):
         print(f"  note: the token expires {'today' if expires <= datetime.date.today() else 'within two weeks'}; "
               "create a new one in PPM Express > Automation")
-    if any(re.search(r"(?i)\b(write|create|update|delete|manage)\b", str(s)) for s in scopes):
-        print("  note: this token can change things; Kit only reads, so a read-only token is enough")
     return 0
 
 
@@ -160,7 +223,8 @@ def when(value):
 
 def cmd_tools():
     for t in TOOLS:
-        print(f"{t['name']:<18} {t['description']}")
+        mark = "" if t["kind"] == "read" else " [changes PPM Express]"
+        print(f"{t['name']:<18} {t['description'].split(' Changes PPM Express:')[0]}{mark}")
     return 0
 
 
@@ -177,14 +241,94 @@ def cmd_call(env, name, raw):
     if not got:
         return 2
     settings, token = got
-    try:
-        out = run_tool(name, args, Context(Client(settings), settings, tables_for(settings), token))
-    except (PPMXError, ToolError) as e:
-        print(f"kit-ppmx: {e}", file=sys.stderr)
+    good, text = call(settings, token, name, args, tables_for(settings))
+    if not good:
+        print(f"kit-ppmx: {text}", file=sys.stderr)
         return 1
-    print(json.dumps(out, indent=2, ensure_ascii=False, default=str))
+    print(json.dumps(json.loads(text), indent=2, ensure_ascii=False))
     return 0
 
+
+# ---------------------------------------------------------------- Claude Desktop
+
+def desktop_config():
+    """Claude Desktop's config file on this computer, or None where Desktop doesn't run.
+    CLAUDE_DESKTOP_CONFIG names another file (tests use it)."""
+    override = (os.environ.get("CLAUDE_DESKTOP_CONFIG") or "").strip()
+    if override:
+        return pathlib.Path(os.path.expanduser(override))
+    if sys.platform == "darwin":
+        return pathlib.Path.home() / "Library/Application Support/Claude/claude_desktop_config.json"
+    if WINDOWS and os.environ.get("APPDATA"):
+        return pathlib.Path(os.environ["APPDATA"]) / "Claude" / "claude_desktop_config.json"
+    return None
+
+
+def desktop_entry():
+    """How Claude Desktop starts the server: this Python, this script, serve. No token in it."""
+    return {"command": sys.executable or "python3", "args": [str(pathlib.Path(__file__).resolve()), "serve"],
+            "env": {"PYTHONUTF8": "1"}}
+
+
+def backup(path):
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    if (KIT / ".install").is_dir():
+        folder = KIT / ".install/backups" / f"{stamp}-claude-desktop"
+        folder.mkdir(parents=True, exist_ok=True)
+        dest = folder / path.name
+    else:
+        dest = path.with_name(f"{path.name}.bak-{stamp}")
+    dest.write_bytes(path.read_bytes())
+    return dest
+
+
+def cmd_desktop(env, remove=False, show=False):
+    path, entry = desktop_config(), desktop_entry()
+    if show or path is None:
+        if path is None:
+            print("kit-ppmx: Claude Desktop runs on macOS and Windows; to use this server from another app, "
+                  "give it this:", file=sys.stderr)
+        print(json.dumps({"mcpServers": {"ppmx": entry}}, indent=2))
+        return 0 if show else 2
+    try:
+        text = path.read_text(encoding="utf-8-sig") if path.exists() else ""
+        data = json.loads(text) if text.strip() else {}
+    except (OSError, ValueError):
+        print(f"kit-ppmx: {path} isn't valid JSON, so it was left as it is; fix it (Claude Desktop > Settings > "
+              "Developer > Edit Config) and run this again", file=sys.stderr)
+        return 2
+    if not isinstance(data, dict) or not isinstance(data.get("mcpServers", {}), dict):
+        print(f"kit-ppmx: {path} doesn't look like Claude Desktop's config, so it was left as it is", file=sys.stderr)
+        return 2
+    servers = data.setdefault("mcpServers", {})
+    if remove:
+        if "ppmx" not in servers:
+            print("kit-ppmx: Claude Desktop has no ppmx server; nothing to take out")
+            return 0
+        del servers["ppmx"]
+    elif servers.get("ppmx") == entry:
+        print(f"kit-ppmx: Claude Desktop already has Kit's PPM Express server ({path})")
+        return 0
+    else:
+        servers["ppmx"] = entry
+    saved = backup(path) if text else None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".kit-tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    os.replace(str(tmp), str(path))
+    print(f"kit-ppmx: {'took Kit' if remove else 'added Kit'}'s PPM Express server "
+          f"{'out of' if remove else 'to'} Claude Desktop's config: {path}")
+    if saved:
+        print(f"  the earlier config is saved at {saved}")
+    print("  Quit Claude Desktop and open it again to load the change.")
+    if not remove:
+        var, store = token_places(env)
+        print(f"  Desktop doesn't see variables set in a terminal: keep the token in the {STORE} {store}"
+              if store else f"  Desktop must be able to see the environment variable {var}")
+    return 0
+
+
+# ---------------------------------------------------------------- setup
 
 def cmd_setup(env):
     me = pathlib.Path(__file__).resolve()
@@ -193,47 +337,62 @@ def cmd_setup(env):
     settings = Settings(env)
     status = "set" if settings.ready else f"not usable yet: {settings.problem}"
     token = "found" if get_token(env)[0] else "not found yet"
-    if os.name == "nt":
-        where = "in your user environment"
-        store = ['     $t = Read-Host "PPM Express token" -AsSecureString',
-                 f'     [Environment]::SetEnvironmentVariable("{var}", [Net.NetworkCredential]::new("", $t).Password, "User")',
-                 "   then open a new window, so it's in your environment."]
+    if WINDOWS and entry:
+        where = f"in Windows Credential Manager as {entry}"
+        store = [f"     cmdkey /generic:{entry} /user:kit /pass",
+                 "   It asks for the token, so it never lands in your shell history. (A user environment",
+                 f"   variable {var} works too, for Claude Desktop only if it's set before Desktop starts.)"]
     elif entry:
-        where = "in the Keychain"
+        where = f"in the Keychain as {entry}"
         store = [f'     security add-generic-password -s {entry} -a "$USER" -w',
                  "   It asks for the token, so it never lands in your shell history."]
     else:
         where = f"in the environment variable {var}"
         store = [f"     read -rs {var} && export {var}    (it asks without echoing; add it to your session's secrets)"]
+    writes = ("Changes are on: PPMX_WRITES=\"off\" there makes it read-only." if settings.writes
+              else "Changes are off (PPMX_WRITES=\"off\"): it only reads.")
     print(f"""Connect PPM Express to Kit on this computer (kit-ppmx {__version__}; this changes nothing).
 
-1. A token (now: {token}). In PPM Express > Automation, create a personal access token with read
-   scopes only. Store it {where}:
+1. A token (now: {token}). In PPM Express > Automation, create a personal access token: read scopes to
+   look, and write scopes (such as Write Projects) for the changes you approve. Store it {where}:
 {chr(10).join(store)}
 
 2. The address (now: {status}). In Kit's config, {CONFIG}, add
      PPMX_BASE_URL="https://<host>/@<tenant>/v1.0"
-   with your tenant's API address from PPM Express > Automation.
+   with your tenant's API address from PPM Express > Automation. {writes}
 
 3. Claude Code. Add the server for your user:
      claude mcp add --scope user --env PYTHONUTF8=1 ppmx -- "{py}" "{me}" serve
+   Kit's rules make Claude Code ask before every create or update (rerun Kit's installer to add them).
 
-4. Kit's connector guard. In {KIT / 'memory/context/connector-guard.json'}:
+4. Claude Desktop, if you use it: run  kit-ppmx desktop  (it adds the same server to Desktop's config,
+   after a backup), then quit and reopen Desktop. Desktop asks before a tool runs unless you've told it
+   to always allow that tool; leave the create_ and update_ tools on asking.
+
+5. Kit's connector guard, so Kit's agents can read PPM Express (they can never change it). In
+   {GUARD}:
      "allowed_servers": [..., "ppmx"],
      "credential_env": {{"ppmx": ["{var}"]}},
      "probe_tools": {{"ppmx": "mcp__ppmx__get_current_user"}}
-   and add PPM Express (connector ppmx, read-only) under Systems in connectors.md, next to it.
+   and add PPM Express (connector ppmx) under Systems in connectors.md, next to it.
 
-5. Check: kit-ppmx check, then kit-connect test ppmx (add --read for one call through the gateway).""")
+6. Check: kit-ppmx check, then kit-connect test ppmx (add --read for one call through the gateway).""")
     return 0
 
 
 def main(argv):
+    for stream in (sys.stdout, sys.stderr):           # names and labels can be any language, on any console
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except (AttributeError, ValueError):
+            pass
     ap = argparse.ArgumentParser(prog="kit-ppmx", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["serve", "check", "tools", "call", "setup"])
+    ap.add_argument("command", choices=["serve", "check", "tools", "call", "desktop", "setup"])
     ap.add_argument("tool", nargs="?")
     ap.add_argument("arguments", nargs="?", help="the tool's arguments as JSON")
+    ap.add_argument("--remove", action="store_true", help="desktop: take the server out of Claude Desktop")
+    ap.add_argument("--print", dest="show", action="store_true", help="desktop: show the entry; change nothing")
     a = ap.parse_args(argv)
     env = kit_env()
     if a.command == "serve":
@@ -244,6 +403,8 @@ def main(argv):
         return cmd_tools()
     if a.command == "setup":
         return cmd_setup(env)
+    if a.command == "desktop":
+        return cmd_desktop(env, a.remove, a.show)
     if not a.tool:
         ap.error("give the tool's name: kit-ppmx call list_projects '{\"limit\": 5}'")
     return cmd_call(env, a.tool, a.arguments)
