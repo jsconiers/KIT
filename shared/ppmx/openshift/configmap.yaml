@@ -1,0 +1,15 @@
+# Settings for the server (shared/ppmx/README.md has them all). No secrets: tokens come with each request.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ppmx-mcp
+  labels:
+    app.kubernetes.io/name: ppmx-mcp
+    app.kubernetes.io/part-of: kit
+data:
+  PPMX_BASE_URL: "https://REPLACE-host/@REPLACE-tenant/v1.0"
+  PPMX_CACHE_SECONDS: "60"
+  PPMX_RATE_PER_MINUTE: "90"
+  PPMX_PAGE_SIZE: "25"
+  PPMX_MAX_ROWS: "200"
+  PPMX_ALLOWED_ORIGINS: ""

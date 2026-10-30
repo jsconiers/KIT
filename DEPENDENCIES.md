@@ -47,6 +47,7 @@ For installing and configuring, see INSTALL.md; for how the pieces fit, see DESI
 | `kit-lifecycle` | Python 3.8; an inventory export and eol.json in the radar folder | Same code | The planner joins inventory and dates by hand |
 | `kit-roadmap` | Python 3.8 | Same code | The planner drafts the roadmap by hand from the template |
 | `kit-connect` | Python 3.8; Claude Code (`claude mcp list`; `claude -p --agent gateway` for --read) | Same code; Keychain name check on macOS only | No connector report; check with `claude mcp list` by hand |
+| `kit-ppmx` | Python 3.8; a PPM Express tenant's API address (`PPMX_BASE_URL`) and a personal access token with read scopes, from an environment variable or a Keychain entry, by name; Claude Code for `serve` | Same code; Keychain on macOS only (Windows: a user environment variable) | No PPM Express connector; read PPM Express in its own web app |
 | `kit-evals` | Python 3.8; Claude Code for --live | Same code | Agent changes and model moves go unchecked |
 | `kit-commitments` | Python 3.8 | Same code | Commitments aren't proposed; add them with `todo` yourself |
 | `kit-quality` | Python 3.8 | Same code | Recurring findings are spotted by hand |
@@ -115,6 +116,7 @@ For installing and configuring, see INSTALL.md; for how the pieces fit, see DESI
 | `shared/reminders_sync.py` | `osascript` and Apple Reminders | Optional | Supported | Not supported; Windows uses `platform/windows/reminders/reminders_sync_win.py` (Outlook Tasks over COM, untested adapter) |
 | `shared/protect_folder.py` | Python stdlib; `git` when the folder is a repo | Recommended for work folders | Supported | Same code |
 | `shared/bin/connector-guard` | Python stdlib; runs as a Claude Code hook | Required for agents that reach outside systems | Supported | Untested: hook commands call `python3` and `$HOME` |
+| `shared/ppmx/` (the PPM Express MCP server) | Python stdlib for Kit's connector (stdio). The standalone service adds gunicorn, pinned in `shared/ppmx/requirements.txt` and installed only in its container image (a UBI Python 3.12 base), built with podman or docker and run on OpenShift | Optional | Supported (stdio) | Same code (stdio) |
 | `shared/bin/vsdx-finish` | Python stdlib; a `.vsdx` made from a stencil with title-block and legend masters; settings in `vsdx-finish.json` | Optional (diagrammer) | Supported | Same code; pass `--author`, since the default uses the POSIX `id` command |
 | `shared/bin/kit-drawio` | Python stdlib for JSON specs; `python-pptx` only for PowerPoint input | Optional (diagrammer) | Supported | Same code |
 | `shared/bin/kit-grammar` | LanguageTool (folder with `languagetool-commandline.jar`) and Java (17+ for LanguageTool 6+); `pdftotext` for PDFs | Optional (reviewer) | Supported | Same code (looks in Program Files, AppData, and Scoop) |
@@ -544,6 +546,10 @@ A failed sign-in can count against a shared account: the gateway stops after one
   memory/context/sharing-db.json (Transport sql).
 - The backup passphrase's Keychain entry name (BACKUP_KEY_KEYCHAIN) or environment variable name
   (BACKUP_KEY_ENV).
+- A PPM Express personal access token: the environment variable `PPMX_TOKEN` (or the name in
+  `PPMX_TOKEN_ENV`) or, on a Mac, the Keychain entry `PPMX_TOKEN` (or the name in
+  `PPMX_TOKEN_KEYCHAIN`). The standalone service holds none: each caller sends their own with every
+  request.
 
 ## 6. Check it
 
@@ -638,6 +644,10 @@ Claude Code uses for hooks, on every machine.
   reaches outside the computer; the inventory never leaves.
 - Sharing policy: closed (a policy file that can't be read refuses all sharing).
 - kit-connect --read: off by default; one read-only tool per server, run as the gateway under the guard.
+- kit-ppmx and the PPM Express server: closed (no address or no token means no call; the tools only
+  read; redirects aren't followed, so a token goes only to `PPMX_BASE_URL`; a token in Kit's config
+  is ignored; tokens are never stored, printed, or logged; the HTTP server refuses browser origins
+  not listed in `PPMX_ALLOWED_ORIGINS`).
 - Phone approvals: closed (unknown, expired, used, or wrong-scope codes and any payload naming a
   medium- or high-tier action are refused and recorded; a code is single-use and works only on the
   day it's issued).

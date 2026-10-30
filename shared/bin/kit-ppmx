@@ -1,0 +1,253 @@
+#!/usr/bin/env python3
+"""kit-ppmx: Kit's PPM Express connector (an MCP server Claude Code starts on this computer) and its checks.
+Read-only. A stub until the tenant's endpoints are confirmed (shared/ppmx/README.md).
+
+  kit-ppmx serve              run the MCP server on standard input and output; Claude Code starts it
+                              (`kit-ppmx setup` gives the command that adds it)
+  kit-ppmx check              whose token it is in PPM Express, its scopes, and when it expires; exit 0
+                              when PPM Express answers
+  kit-ppmx tools              the tools it offers
+  kit-ppmx call TOOL [JSON]   run one tool and print the result, for testing; agents use the MCP tools,
+                              which go through the connector guard and its audit log, not this
+  kit-ppmx setup              the steps to connect it on this computer: the token, the address, Claude
+                              Code, and Kit's connector guard. It changes nothing.
+
+Settings: PPMX_BASE_URL (https://<host>/@<tenant>/v1.0, from PPM Express > Automation) and the other
+PPMX_* settings in shared/ppmx/README.md, from the environment or Kit's config
+(~/Claude/Agents/kit/.install/shared/morning/config). The personal access token: the environment variable
+PPMX_TOKEN (PPMX_TOKEN_ENV names another) or, on a Mac, the Keychain entry PPMX_TOKEN (PPMX_TOKEN_KEYCHAIN
+names another, or "off"). It's never written to a file, printed, or logged, and a token in Kit's config is
+ignored.
+
+Exit codes: 0 fine, 1 PPM Express refused or failed, 2 not set up (no address or no token) or bad input.
+"""
+import argparse
+import datetime
+import json
+import os
+import pathlib
+import re
+import sys
+import urllib.parse
+
+SHARED = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(SHARED))
+import kit_secrets  # noqa: E402
+from ppmx import __version__  # noqa: E402
+from ppmx.client import Client, PPMXError  # noqa: E402
+from ppmx.codes import CodesError, load as load_codes  # noqa: E402
+from ppmx.config import Settings  # noqa: E402
+from ppmx.mcp_core import Dispatcher  # noqa: E402
+from ppmx.server_stdio import serve  # noqa: E402
+from ppmx.tools import TOOLS, Context, ToolError, run_tool  # noqa: E402
+
+KIT = pathlib.Path(os.path.expanduser(os.environ.get("KIT_DIR", "~/Claude/Agents/kit")))
+CONFIG = KIT / ".install/shared/morning/config"
+SETTING = re.compile(r'^\s*(PPMX_[A-Z_]+)="?([^"\n]*)"?\s*$')
+
+
+def kit_env():
+    """The environment, plus PPMX_* settings from Kit's config where the environment has none. A token
+    there is ignored: tokens live in the environment or the Keychain, never in a file."""
+    env = dict(os.environ)
+    try:
+        text = CONFIG.read_text(encoding="utf-8-sig")
+    except OSError:
+        text = ""
+    for line in text.splitlines():
+        m = SETTING.match(line)
+        if m and not m.group(1).endswith("TOKEN") and not (env.get(m.group(1)) or "").strip():
+            env[m.group(1)] = m.group(2).strip()
+    return env
+
+
+def token_places(env):
+    """(environment variable, Keychain entry or None) the token is read from. PPMX_TOKEN_KEYCHAIN names a
+    different Keychain entry, or "off" for none."""
+    entry = (env.get("PPMX_TOKEN_KEYCHAIN") or "PPMX_TOKEN").strip()
+    if sys.platform != "darwin" or entry.lower() in ("off", "none", "no"):
+        entry = None
+    return (env.get("PPMX_TOKEN_ENV") or "PPMX_TOKEN").strip(), entry
+
+
+def get_token(env):
+    """(token, problem): the token, or "" and what to do about it."""
+    var, entry = token_places(env)
+    if (os.environ.get(var) or "").strip():
+        return os.environ[var].strip(), ""
+    if entry:
+        try:
+            cred = kit_secrets.resolve({"credential_env": var, "keychain_entry": entry}, "PPM Express")
+            if cred:
+                return cred.reveal().strip(), ""
+        except kit_secrets.CredentialError:
+            pass
+    where = f"the environment variable {var}" + (f" or the Keychain entry {entry}" if entry else "")
+    return "", f"No personal access token: set {where} (kit-ppmx setup shows how)."
+
+
+def tables_for(settings):
+    try:
+        return load_codes(settings.codes_file)
+    except CodesError as e:
+        print(f"kit-ppmx: {e}; coded fields stay as numbers", file=sys.stderr)
+        return {}
+
+
+def cmd_serve(env):
+    settings = Settings(env)
+    client, tables = Client(settings), tables_for(settings)
+    state = {"hint": ""}
+
+    def token_source():
+        token, state["hint"] = get_token(env)
+        return token
+
+    dispatcher = Dispatcher(lambda token: Context(client, settings, tables, token, hint=state["hint"]))
+    return serve(dispatcher, token_source)
+
+
+def ready(env):
+    """(settings, token) when both are usable; otherwise prints why and returns None."""
+    settings = Settings(env)
+    if not settings.ready:
+        print(f"kit-ppmx: {settings.problem}", file=sys.stderr)
+        return None
+    token, problem = get_token(env)
+    if not token:
+        print(f"kit-ppmx: {problem}", file=sys.stderr)
+        return None
+    return settings, token
+
+
+def cmd_check(env):
+    got = ready(env)
+    if not got:
+        return 2
+    settings, token = got
+    try:
+        me = run_tool("get_current_user", {}, Context(Client(settings), settings, {}, token))
+    except (PPMXError, ToolError) as e:
+        print(f"kit-ppmx: {e}", file=sys.stderr)
+        return 1
+    who = me.get("displayName") or me.get("name") or me.get("logonAccount") or "(no name given)"
+    host = urllib.parse.urlsplit(settings.base_url).hostname
+    print(f"kit-ppmx: PPM Express answers at {host}: {who}" + (f" <{me['email']}>" if me.get("email") else ""))
+    tok = me.get("token") or {}
+    scopes = tok.get("scopes") or []
+    print(f"  token: {tok.get('name') or '(unnamed)'}, expires {when(tok.get('expirationDate'))}; "
+          f"scopes: {', '.join(map(str, scopes)) if scopes else 'none listed'}")
+    expires = day(tok.get("expirationDate"))
+    if expires and expires - datetime.date.today() <= datetime.timedelta(days=14):
+        print(f"  note: the token expires {'today' if expires <= datetime.date.today() else 'within two weeks'}; "
+              "create a new one in PPM Express > Automation")
+    if any(re.search(r"(?i)\b(write|create|update|delete|manage)\b", str(s)) for s in scopes):
+        print("  note: this token can change things; Kit only reads, so a read-only token is enough")
+    return 0
+
+
+def day(value):
+    try:
+        return datetime.date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
+
+
+def when(value):
+    d = day(value)
+    return d.strftime("%d-%b-%Y") if d else "(not given)"
+
+
+def cmd_tools():
+    for t in TOOLS:
+        print(f"{t['name']:<18} {t['description']}")
+    return 0
+
+
+def cmd_call(env, name, raw):
+    try:
+        args = json.loads(raw) if raw else {}
+    except ValueError:
+        print("kit-ppmx: the arguments must be JSON, like '{\"limit\": 5}'", file=sys.stderr)
+        return 2
+    if not isinstance(args, dict):
+        print("kit-ppmx: the arguments must be a JSON object", file=sys.stderr)
+        return 2
+    got = ready(env)
+    if not got:
+        return 2
+    settings, token = got
+    try:
+        out = run_tool(name, args, Context(Client(settings), settings, tables_for(settings), token))
+    except (PPMXError, ToolError) as e:
+        print(f"kit-ppmx: {e}", file=sys.stderr)
+        return 1
+    print(json.dumps(out, indent=2, ensure_ascii=False, default=str))
+    return 0
+
+
+def cmd_setup(env):
+    me = pathlib.Path(__file__).resolve()
+    py = sys.executable or "python3"
+    var, entry = token_places(env)
+    settings = Settings(env)
+    status = "set" if settings.ready else f"not usable yet: {settings.problem}"
+    token = "found" if get_token(env)[0] else "not found yet"
+    if os.name == "nt":
+        where = "in your user environment"
+        store = ['     $t = Read-Host "PPM Express token" -AsSecureString',
+                 f'     [Environment]::SetEnvironmentVariable("{var}", [Net.NetworkCredential]::new("", $t).Password, "User")',
+                 "   then open a new window, so it's in your environment."]
+    elif entry:
+        where = "in the Keychain"
+        store = [f'     security add-generic-password -s {entry} -a "$USER" -w',
+                 "   It asks for the token, so it never lands in your shell history."]
+    else:
+        where = f"in the environment variable {var}"
+        store = [f"     read -rs {var} && export {var}    (it asks without echoing; add it to your session's secrets)"]
+    print(f"""Connect PPM Express to Kit on this computer (kit-ppmx {__version__}; this changes nothing).
+
+1. A token (now: {token}). In PPM Express > Automation, create a personal access token with read
+   scopes only. Store it {where}:
+{chr(10).join(store)}
+
+2. The address (now: {status}). In Kit's config, {CONFIG}, add
+     PPMX_BASE_URL="https://<host>/@<tenant>/v1.0"
+   with your tenant's API address from PPM Express > Automation.
+
+3. Claude Code. Add the server for your user:
+     claude mcp add --scope user --env PYTHONUTF8=1 ppmx -- "{py}" "{me}" serve
+
+4. Kit's connector guard. In {KIT / 'memory/context/connector-guard.json'}:
+     "allowed_servers": [..., "ppmx"],
+     "credential_env": {{"ppmx": ["{var}"]}},
+     "probe_tools": {{"ppmx": "mcp__ppmx__get_current_user"}}
+   and add PPM Express (connector ppmx, read-only) under Systems in connectors.md, next to it.
+
+5. Check: kit-ppmx check, then kit-connect test ppmx (add --read for one call through the gateway).""")
+    return 0
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-ppmx", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("command", choices=["serve", "check", "tools", "call", "setup"])
+    ap.add_argument("tool", nargs="?")
+    ap.add_argument("arguments", nargs="?", help="the tool's arguments as JSON")
+    a = ap.parse_args(argv)
+    env = kit_env()
+    if a.command == "serve":
+        return cmd_serve(env)
+    if a.command == "check":
+        return cmd_check(env)
+    if a.command == "tools":
+        return cmd_tools()
+    if a.command == "setup":
+        return cmd_setup(env)
+    if not a.tool:
+        ap.error("give the tool's name: kit-ppmx call list_projects '{\"limit\": 5}'")
+    return cmd_call(env, a.tool, a.arguments)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

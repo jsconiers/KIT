@@ -55,7 +55,11 @@ ALLOW = [f"Read({K}/**)", f"Edit({K}/memory/**)", f"Edit({K}/QUEUE.md)", f"Edit(
          "Bash(kit-library --check *)", "Bash(kit-library deliver *)", "Bash(kit-library index *)",
          "Bash(kit-library flush *)", "Bash(kit-library mirror *)", "Bash(kit-library fetch *)",
          # Kit's own lists (keep in touch, the private feedback log) and the read-only meeting audit.
-         "Bash(kit-touch *)", "Bash(kit-feedback *)", "Bash(kit-meetload *)"]
+         "Bash(kit-touch *)", "Bash(kit-feedback *)", "Bash(kit-meetload *)",
+         # PPM Express (read-only): the connection check, the tool list, and the setup steps, which
+         # change nothing.
+         "Bash(kit-ppmx check)", "Bash(kit-ppmx check *)", "Bash(kit-ppmx tools)", "Bash(kit-ppmx tools *)",
+         "Bash(kit-ppmx setup)", "Bash(kit-ppmx setup *)"]
 # Always prompt, even if a broader allow rule exists: Kit's rules, Claude Code's own settings,
 # and commands that delete, push or post, install, or change system settings.
 ASK = [
@@ -79,6 +83,9 @@ ASK = [
     "Bash(kit-library define *)",
     # A pre-read runs the red team on a document with Claude (a paid run), so it asks first.
     "Bash(kit-preread *)",
+    # A PPM Express call from the command line reads with your token outside the connector guard's
+    # audit log, so it asks first; agents use the MCP tools, which the guard checks and logs.
+    "Bash(kit-ppmx call *)",
 ]
 
 

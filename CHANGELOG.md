@@ -7,6 +7,20 @@ versions follow [semantic versioning](https://semver.org).
 
 ## [Unreleased]
 
+### Added
+- PPM Express, read-only (`shared/ppmx/`, version 0.1.0; a stub until a tenant's endpoints are
+  confirmed): one MCP server package with ten read-only tools (who you are, portfolios, programs,
+  projects, a project, its tasks and key dates, ideas, resources, and a tenant's fields), run two
+  ways. `kit-ppmx serve` is Kit's connector, started by Claude Code with your own personal access
+  token from the environment or the Keychain; `kit-ppmx check`, `tools`, `call`, and `setup` (the
+  steps to connect it, changing nothing). The standalone service runs the same tools over Streamable
+  HTTP for a team, each caller sending their own token with every request: a container image
+  (`shared/ppmx/Containerfile`: non-root, read-only filesystem) and OpenShift files
+  (`shared/ppmx/openshift/`: deployment, service, HTTPS route, network policy). Tokens are passed
+  through, never stored, printed, or logged. Tested against a fake PPM Express
+  (`tests/test_ppmx.py`, `tests/ppmx_container_smoke.py`); GitHub's checks build the image and run it
+  the way OpenShift does.
+
 ## [1.5.1] - 2026-10-29
 
 ### Fixed

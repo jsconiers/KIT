@@ -1,0 +1,21 @@
+# HTTPS only, ending at the router. The cluster picks the host unless you set spec.host. Keep the route on
+# an internal router or ingress controller; put single sign-on in front of it if your platform requires
+# that (callers then send their PPM Express token in X-PPMX-Token, leaving Authorization to the sign-on).
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: ppmx-mcp
+  labels:
+    app.kubernetes.io/name: ppmx-mcp
+    app.kubernetes.io/part-of: kit
+  annotations:
+    haproxy.router.openshift.io/timeout: 60s
+spec:
+  to:
+    kind: Service
+    name: ppmx-mcp
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

@@ -1,0 +1,35 @@
+# In: only from OpenShift's routers. Out: DNS, and HTTPS to PPM Express. A NetworkPolicy can't name a host,
+# so ask the platform team to limit egress to your PPM Express host (an EgressFirewall) if they want it
+# tighter; a proxy in between needs HTTPS_PROXY in the ConfigMap and its port here.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ppmx-mcp
+  labels:
+    app.kubernetes.io/name: ppmx-mcp
+    app.kubernetes.io/part-of: kit
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: ppmx-mcp
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              policy-group.network.openshift.io/ingress: ""
+      ports:
+        - port: 8080
+          protocol: TCP
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openshift-dns
+      ports:
+        - {port: 53, protocol: UDP}
+        - {port: 53, protocol: TCP}
+        - {port: 5353, protocol: UDP}
+        - {port: 5353, protocol: TCP}
+    - ports:
+        - {port: 443, protocol: TCP}

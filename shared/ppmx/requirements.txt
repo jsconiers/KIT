@@ -1,0 +1,2 @@
+# The standalone container's only dependency: the HTTP server. The package itself is standard library only.
+gunicorn==26.2.0

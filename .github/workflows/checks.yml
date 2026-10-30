@@ -6,6 +6,10 @@
 #   windows-install: the Windows installer, run for real on GitHub's Windows runners under Windows
 #                    PowerShell 5.1 and PowerShell 7: install, reinstall, and the repair of an install
 #                    whose files lost their permissions. See .github/scripts/windows-install-test.ps1.
+#   ppmx:            the PPM Express MCP server (shared/ppmx): its tests against a fake PPM Express, the
+#                    OpenShift files rendered with kustomize, and the container image built and run the
+#                    way OpenShift runs it (a random non-root user, a read-only root filesystem, no
+#                    capabilities). See tests/test_ppmx.py and tests/ppmx_container_smoke.py.
 name: Checks
 
 on:
@@ -61,3 +65,20 @@ jobs:
         env:
           KIT_OWNER: Testy
         run: .\.github\scripts\windows-install-test.ps1
+
+  ppmx:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: PPM Express MCP tests
+        run: python tests/test_ppmx.py
+      - name: OpenShift files render
+        run: kubectl kustomize shared/ppmx/openshift > /dev/null
+      - name: Build the standalone image
+        run: docker build -f shared/ppmx/Containerfile -t ppmx-mcp:ci .
+      - name: Run it the way OpenShift does, against a fake PPM Express
+        run: python tests/ppmx_container_smoke.py --image ppmx-mcp:ci

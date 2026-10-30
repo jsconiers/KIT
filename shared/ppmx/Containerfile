@@ -1,0 +1,27 @@
+# The standalone PPM Express MCP server, for OpenShift. Build it from the repository root:
+#
+#   podman build -f shared/ppmx/Containerfile -t ppmx-mcp:0.1.0 .
+#
+# It runs as whatever non-root user OpenShift assigns (group 0), with a read-only filesystem: the code is
+# group-readable and nothing is written outside /tmp and /dev/shm. Use your organization's approved base
+# image if it has one: --build-arg BASE_IMAGE=..., ideally pinned by digest.
+ARG BASE_IMAGE=registry.access.redhat.com/ubi9/python-312:latest
+FROM ${BASE_IMAGE}
+
+USER 0
+WORKDIR /opt/ppmx
+COPY shared/ppmx/requirements.txt /opt/ppmx/requirements.txt
+RUN python3 -m pip install --no-cache-dir -r /opt/ppmx/requirements.txt
+COPY shared/ppmx/ /opt/ppmx/ppmx/
+RUN rm -rf /opt/ppmx/ppmx/openshift /opt/ppmx/ppmx/Containerfile /opt/ppmx/ppmx/__pycache__ \
+ && chgrp -R 0 /opt/ppmx && chmod -R g=u,o-w /opt/ppmx
+
+ENV PYTHONUTF8=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/opt/ppmx
+USER 1001
+EXPOSE 8080
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "--threads", "4", "--timeout", "60", \
+     "--worker-tmp-dir", "/dev/shm", "--no-control-socket", "--chdir", "/opt/ppmx", \
+     "ppmx.server_http:application"]

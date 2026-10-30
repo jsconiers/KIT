@@ -172,6 +172,7 @@ The installer links these into `~/.local/bin` (all in `shared/bin/`):
 |---|---|
 | `kit-pause` | Kill switch: stops scheduled runs and connector calls until `kit-pause resume` |
 | `kit-connect` | Connector check: guard, credential variables by name, Claude Code health |
+| `kit-ppmx` | PPM Express, read-only (a stub until a tenant's endpoints are confirmed): `serve` is the MCP server Claude Code starts; `check`, `tools`, `call`, and `setup` (the steps, changing nothing). The same package runs as a standalone service on OpenShift: `shared/ppmx/README.md` |
 | `kit-backup` | Checked archive of Kit's folder and history to a folder you choose (local or shared), encrypted on request; `verify`, `restore` |
 | `kit-audit-export` | A dated evidence pack of Kit's controls for a compliance or security review; `--controls` organises it by control for an audit request, with gaps listed |
 | `kit-retention` | Retention rules with legal holds; reports, and only moves files with `--yes` |
@@ -260,7 +261,8 @@ kit/          the brain, shared by every platform: KIT.md, QUEUE.md, STATUS.md, 
 shared/       cross-platform Python: kit_setup.py (installer logic), doctor.py, dashboard.py,
               deliver.py, the transport and sync modules, bin/ (the tools above), morning/
               (scheduled-run prompts and config.example), records/ (shared record schemas),
-              sql/ (SQL transport scripts), templates/ (dashboard HTML), KIT-RUN.md
+              sql/ (SQL transport scripts), templates/ (dashboard HTML), ppmx/ (the PPM Express
+              MCP server, with its container and OpenShift files), KIT-RUN.md
 platform/mac/      install.sh, uninstall.sh, morning/run.sh and launchd templates, mail and
                    calendar adapters
 platform/windows/  install.ps1, uninstall.ps1, morning/run.ps1 and Task Scheduler scripts,
