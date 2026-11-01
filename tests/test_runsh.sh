@@ -242,5 +242,59 @@ grep -q "Refresh skipped: connector-guard can't be loaded" "$ARGS" && ! grep -q 
   && ok "demands: fails closed without the connector guard" || bad "demands no guard"
 rm -f "$M/demand_refresh.py" "$M/prompt-demand-refresh.md" "$KIT/memory/context/connector-guard.json"
 
+# ---- end-of-day wrap: kit-wrap, no model call, unless EOD_MODEL="on" ----------------------------------
+cp "$HERE/shared/bin/kit-wrap" "$HERE/shared/bin/kit-meetprep" "$KIT/.install/shared/bin/"
+cp "$HERE/shared/morning/prompt-eod.md" "$M/"
+printf '# Queue\n\n## Alex\n\n- [ ] **Send the report** [work]: due %s (added 01-Oct-2026)\n\n## Done\n' "$(date +%d-%b-%Y)" > "$KIT/QUEUE.md"
+EOD="$KIT/briefs/eod-$(date +%Y-%m-%d).md"
+printf 'OUTLOOK_CHECK="off"\nOWNER_NAME="Alex"\n' > "$M/config"
+fresh; rm -f "$EOD"; run eod
+[ ! -f "$S/claude-args.txt" ] && grep -q "Send the report" "$EOD" 2>/dev/null && [ -s "$KIT/briefs/eod-text.txt" ] \
+  && ok "eod: kit-wrap writes the wrap and its texts with no model call" || bad "eod wrap"
+grep -q "start eod (kit-wrap, no model)" "$LOG" && grep -q "end eod rc=0" "$LOG" \
+  && ok "eod: logged as a run, for the reliability report" || bad "eod log lines"
+cat > "$KIT/.install/shared/bin/kit-cost" <<'KC'
+import sys
+if sys.argv[1:2] == ["check"]:
+    print("stop 97%; budget 100")
+KC
+fresh; rm -f "$EOD"; run eod
+[ -f "$EOD" ] && ! grep -q "eod run skipped" "$LOG" && ok "eod: the wrap still comes at the budget's stop level (it costs nothing)" \
+  || bad "eod at stop level"
+rm -f "$KIT/.install/shared/bin/kit-cost"
+printf 'OUTLOOK_CHECK="off"\nEOD_MODEL="on"\n' > "$M/config"
+fresh; rm -f "$EOD"; run eod
+[ -f "$S/claude-args.txt" ] && grep -q "end-of-day wrap-up" "$S/claude-args.txt" && ok "eod: EOD_MODEL=on runs Claude with prompt-eod.md" \
+  || bad "eod model run"
+printf 'OUTLOOK_CHECK="off"\nEOD="off"\n' > "$M/config"
+fresh; run eod
+[ ! -f "$S/claude-args.txt" ] && ! grep -q "start eod" "$LOG" 2>/dev/null && ok "eod: EOD=off skips it" || bad "eod off"
+printf 'OUTLOOK_CHECK="off"\n' > "$M/config"
+mv "$KIT/.install/shared/bin/kit-wrap" "$S/kit-wrap.saved"
+printf 'raise SystemExit(4)\n' > "$KIT/.install/shared/bin/kit-wrap"
+fresh; run eod
+grep -q "end eod rc=4" "$LOG" && grep -q "sent failure notice" "$LOG" && ok "eod: a failed wrap is logged and noticed" || bad "eod failure"
+mv "$S/kit-wrap.saved" "$KIT/.install/shared/bin/kit-wrap"
+grep -q '<integer>5</integer><key>Hour</key><integer>15</integer>' "$HERE/platform/mac/morning/com.USER.kit.eod.plist.template" \
+  && ok "eod: Friday's wrap is at 15:30 in the job template" || bad "eod Friday time"
+
+# ---- PPM Express pulse on the chosen day's morning brief -------------------------------------------------
+cat > "$KIT/.install/shared/bin/kit-ppmx" <<'KP'
+import sys
+print("PPM Express pulse")
+print("[work] args: " + " ".join(sys.argv[1:]))
+KP
+printf 'OUTLOOK_CHECK="off"\nPPMX_PULSE="on"\nPPMX_PULSE_DAY="%s"\n' "$(date +%u)" > "$M/config"
+fresh; run morning
+grep -q "args: pulse --brief --save" "$KIT/briefs/extra-ppmx-pulse.txt" 2>/dev/null \
+  && ok "pulse: on its day, the morning brief gets kit-ppmx pulse --brief --save" || bad "pulse on its day"
+printf 'OUTLOOK_CHECK="off"\nPPMX_PULSE="on"\nPPMX_PULSE_DAY="%s"\n' "$(( $(date +%u) % 7 + 1 ))" > "$M/config"
+fresh; rm -f "$KIT/briefs/extra-ppmx-pulse.txt"; run morning
+[ ! -f "$KIT/briefs/extra-ppmx-pulse.txt" ] && ok "pulse: not on other days" || bad "pulse on another day"
+printf 'OUTLOOK_CHECK="off"\nPPMX_PULSE_DAY="%s"\n' "$(date +%u)" > "$M/config"
+fresh; rm -f "$KIT/briefs/extra-ppmx-pulse.txt"; run morning
+[ ! -f "$KIT/briefs/extra-ppmx-pulse.txt" ] && ok "pulse: off unless PPMX_PULSE=on" || bad "pulse default off"
+rm -f "$KIT/.install/shared/bin/kit-ppmx"
+
 echo "run.sh tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

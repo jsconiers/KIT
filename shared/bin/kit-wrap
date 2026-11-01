@@ -1,0 +1,459 @@
+#!/usr/bin/env python3
+"""kit-wrap: the end-of-day wrap: what got done today, what moves to the next working day, and that day's first meeting and what it needs. No model call.
+
+  kit-wrap                         print today's wrap
+  kit-wrap --write                 write briefs/eod-YYYY-MM-DD.md and its short texts (briefs/eod-text.txt,
+                                   eod-text-work.txt, eod-text-personal.txt); the end-of-day run does this
+  kit-wrap --calendar-json FILE    read the next working day's events from FILE (the calendar JSON format)
+  kit-wrap --no-calendar           leave the calendar out
+
+The next working day is tomorrow, or Monday after a Friday (WRAP_WORKDAYS in Kit's config, default
+"1 2 3 4 5", with Monday = 1). Its events come from WRAP_CALENDAR_CMD, a command that prints one day's
+events as JSON, with {day} where the date goes (YYYY-MM-DD); without it, from CALENDAR_JSON_CMD, which
+covers only today and tomorrow. WRAP_CALENDAR_SIDE says which short text the calendar belongs in: work
+(the default) or personal. For the first meeting, the wrap lists what it needs: open to-dos that share
+words with its title, meeting actions and commitments waiting on it, a pre-read (or how to make one, for
+a design review), and where it is.
+
+Hooks: each executable in .install/wrap.d/ runs with the next working day (YYYY-MM-DD) and prints a
+section: its first line is the title, the rest goes in as written, and a line starting "Text:" goes in a
+short text instead (the work one when the line says [work], otherwise the personal one).
+
+The texts follow the morning brief's rules: counts and times, personal items counted and never named,
+work items only in the work text. The wrap file stays on this computer. Nothing is sent: the end-of-day
+run (run.sh eod) delivers the texts. KIT_TODAY sets the day (for tests). Cross-platform.
+"""
+import argparse
+import datetime as dt
+import importlib.machinery
+import importlib.util
+import json
+import os
+import pathlib
+import re
+import shlex
+import subprocess
+import sys
+
+BIN = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(BIN.parent))
+import kit_daily as kd  # noqa: E402
+
+WEEKDAYS = "Mon Tue Wed Thu Fri Sat Sun".split()
+DAYNAMES = "Monday Tuesday Wednesday Thursday Friday Saturday Sunday".split()
+WORK = "[work]"
+HOOKS = kd.KIT / ".install" / "wrap.d"
+DONE_ON = re.compile(r"\bdone (\d{1,2}-[A-Z][a-z]{2}-\d{4})")
+ADDED_ON = re.compile(r"\badded (\d{1,2}-[A-Z][a-z]{2}-\d{4})")
+ONLINE = re.compile(r"https?://|\b(teams|zoom|webex|google meet|meet\.google|skype|facetime|online|virtual|"
+                    r"dial[- ]in|conference call)\b", re.I)
+MAX_TEXT = 599
+
+
+def setting(key, default=""):
+    m = re.search(rf'^\s*{key}="?([^"\n]*)"?\s*$', kd.read(kd.CONFIG), re.M)
+    value = os.environ.get(key) or (m.group(1).strip() if m else "")
+    return value or default
+
+
+def meetprep():
+    """kit-meetprep's helpers (the pre-reads made for a meeting, and what counts as a design review), or None
+    without it."""
+    path = BIN / "kit-meetprep"
+    if not path.exists():
+        return None
+    loader = importlib.machinery.SourceFileLoader("kit_meetprep", str(path))
+    spec = importlib.util.spec_from_loader("kit_meetprep", loader)
+    mod = importlib.util.module_from_spec(spec)
+    try:
+        loader.exec_module(mod)
+    except Exception:                                   # a broken helper never stops the wrap
+        return None
+    return mod
+
+
+def workdays():
+    days = {int(x) for x in re.findall(r"[1-7]", setting("WRAP_WORKDAYS", "1 2 3 4 5"))}
+    return days or {1, 2, 3, 4, 5}
+
+
+def next_workday(t):
+    days, d = workdays(), t + dt.timedelta(days=1)
+    for _ in range(7):
+        if d.isoweekday() in days:
+            return d
+        d += dt.timedelta(days=1)
+    return t + dt.timedelta(days=1)
+
+
+def day_word(t, n):
+    return "tomorrow" if n == t + dt.timedelta(days=1) else DAYNAMES[n.weekday()]
+
+
+def short_day(d):
+    return f"{WEEKDAYS[d.weekday()]} {d.day:02d}-{kd.MONTHS[d.month - 1]}"
+
+
+def date_in(rx, line):
+    m = rx.search(line or "")
+    return kd.parse_date(m.group(1)) if m else None
+
+
+# ------------------------------------------------------------------ the queue
+def queue_facts(t, n):
+    lines = kd.queue_lines()
+    owner = kd.owner_section(lines)
+    out = {"done_work": [], "done_personal": [], "done_kit": 0, "added": 0, "moves_work": [], "moves_personal": [],
+           "due_work": [], "due_personal": [], "waiting": [], "owner": owner}
+    for name in kd.sections(lines):
+        for it in kd.items(lines, name):
+            if it["sub"]:
+                continue
+            added_today = date_in(ADDED_ON, it["line"]) == t
+            if it["done"]:
+                m = re.search(r":\s*([^,:]+), done ", it["line"])
+                who = (m.group(1).strip() if m else name)
+                kits = who == "Kit" or name == "Kit"
+                out["added"] += added_today and not kits
+                if date_in(DONE_ON, it["line"]) != t:
+                    continue
+                if kits:
+                    out["done_kit"] += 1
+                elif WORK in it["line"]:
+                    out["done_work"].append(it["title"])
+                else:
+                    out["done_personal"].append(it["title"])
+                continue
+            if name == "Waiting on others":
+                out["waiting"].append(it)
+            if name != owner:
+                continue
+            out["added"] += added_today
+            due = kd.due_of(it["line"])
+            if not due:
+                continue
+            side = "work" if WORK in it["line"] else "personal"
+            if due <= t:
+                out[f"moves_{side}"].append((it["title"], due))
+            elif due <= n:
+                out[f"due_{side}"].append((it["title"], due))
+    return out
+
+
+def pending_counts():
+    def count(name):
+        n = 0
+        for ln in kd.read(kd.BRIEFS / name).splitlines():
+            s = ln.strip()
+            if s.startswith("|") and re.search(r"\|\s*proposed\s*\|", s, re.I):
+                n += 1
+            elif s.startswith("- [action]") and not re.search(r"\b(confirmed|dropped)\b", s, re.I):
+                n += 1
+        return n
+    return {"meeting actions": count("pending-actions.md"), "commitments": count("pending-commitments.md")}
+
+
+# ------------------------------------------------------------------ the calendar
+def events_for(day, t, args):
+    """(events on `day`, note). Events: timed ones sorted by start, then all-day ones; holidays and
+    declined events left out. None when the calendar can't be read."""
+    if args.no_calendar:
+        return None, "left out"
+    if args.calendar_json:
+        raw = kd.read(args.calendar_json)
+    else:
+        cmd = setting("WRAP_CALENDAR_CMD")
+        if cmd:
+            cmd = cmd.replace("{day}", day.isoformat())
+        else:
+            cmd = setting("CALENDAR_JSON_CMD")
+            if not cmd:
+                return None, "no calendar command set (CALENDAR_JSON_CMD)"
+            if day > t + dt.timedelta(days=1):
+                return None, f"{DAYNAMES[day.weekday()]}'s calendar isn't in reach (set WRAP_CALENDAR_CMD)"
+        try:
+            raw = subprocess.run([os.path.expanduser(p) for p in shlex.split(cmd)], capture_output=True,
+                                 text=True, timeout=120).stdout
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return None, "the calendar command didn't answer"
+    try:
+        events = json.loads(raw or "[]")
+    except ValueError:
+        return None, "the calendar output wasn't readable"
+    timed, allday, seen = [], [], set()
+    for e in events if isinstance(events, list) else []:
+        if not isinstance(e, dict):
+            continue
+        start = str(e.get("start") or "")
+        if not start.startswith(day.isoformat()):
+            continue
+        if str(e.get("my_response") or "").lower() in ("declined", "decline"):
+            continue
+        if "holiday" in str(e.get("calendar") or "").lower():
+            continue
+        title = kd.mask(str(e.get("subject") or e.get("title") or "(no title)"))
+        key = (title.lower(), start)
+        if key in seen:
+            continue
+        seen.add(key)
+        e = dict(e, title=title)
+        if e.get("all_day") or len(start) <= 10:
+            allday.append(e)
+        else:
+            timed.append(e)
+    timed.sort(key=lambda e: str(e.get("start")).replace("T", " ")[:16])    # "2026-11-06 09:00" or ISO
+    return timed + allday, ""
+
+
+def hhmm(e):
+    s = str(e.get("start") or "")
+    return s[11:16] if len(s) >= 16 else "all day"
+
+
+def alike(a, b):
+    """Two titles are about the same thing: two words in common, or one long one (one short word, like
+    "pick" or "plan", isn't enough)."""
+    common = kd.words(a) & kd.words(b)
+    return len(common) >= 2 or any(len(w) >= 7 for w in common)
+
+
+def related_todos(title):
+    lines = kd.queue_lines()
+    hits = []
+    for name in kd.sections(lines):
+        if name in ("Done", "Someday"):
+            continue
+        for it in kd.items(lines, name):
+            if not it["done"] and not it["sub"] and alike(title, it["title"]):
+                hits.append(it["title"])
+    return hits
+
+
+def pending_about(title):
+    n = 0
+    for name in ("pending-actions.md", "pending-commitments.md"):
+        for ln in kd.read(kd.BRIEFS / name).splitlines():
+            s = ln.strip()
+            if not s.startswith(("|", "- ")) or re.fullmatch(r"[|\s:-]+", s):
+                continue
+            if re.search(r"\b(confirmed|dropped)\b", s, re.I):
+                continue
+            n += alike(title, s)
+    return n
+
+
+def needs(e, mp):
+    """What a meeting needs, as (lines for the wrap file, a short count for the text)."""
+    title = e["title"]
+    lines, bits = [], []
+    todo = related_todos(title)
+    if todo:
+        lines.append("Open to-dos about it: " + "; ".join(f"**{kd.clip(x, 80)}**" for x in todo[:4]))
+        bits.append(f"{len(todo)} to-do{'s' if len(todo) != 1 else ''}")
+    waiting = pending_about(title)
+    if waiting:
+        lines.append(f"Meeting actions or commitments about it, not yet confirmed: {waiting}")
+        bits.append(f"{waiting} to confirm")
+    if mp:
+        try:
+            pre = mp.prereads(title)
+            review = bool(mp.REVIEW.search(title))
+        except Exception:
+            pre, review = [], False
+        if pre:
+            lines.append(f"Pre-read ready: {pre[0]}")
+        elif review:
+            lines.append("A design review: read the document first (`kit-preread FILE --meeting \"...\"`), or, for "
+                         "your own design, rehearse it (`kit-rehearse FILE`)")
+            bits.append("a pre-read")
+    where = kd.clip(str(e.get("location") or "").strip(), 80)
+    if where:
+        if ONLINE.search(where):
+            lines.append("Online")
+        else:
+            lines.append(f"In person: {where}; allow travel time")
+            bits.append("travel")
+    n = e.get("attendees")
+    if isinstance(n, int) and n > 0:
+        lines.append(f"{n} invited")
+    elif isinstance(n, list) and n:
+        lines.append(f"{len(n)} invited")
+    return lines, ", ".join(bits)
+
+
+# ------------------------------------------------------------------ hooks
+def run_hooks(n):
+    """[(title, lines, texts)] from the executables in .install/wrap.d/."""
+    out = []
+    if not HOOKS.is_dir():
+        return out
+    for hook in sorted(HOOKS.iterdir()):
+        if not hook.is_file() or hook.name.startswith(".") or not os.access(hook, os.X_OK):
+            continue
+        try:
+            r = subprocess.run([str(hook), n.isoformat()], capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        rows = [ln.rstrip() for ln in (r.stdout or "").splitlines() if ln.strip()]
+        if r.returncode != 0 or not rows:
+            continue
+        body = [ln for ln in rows[1:] if not ln.startswith("Text:")]
+        texts = [ln[5:].strip() for ln in rows[1:] if ln.startswith("Text:")]
+        out.append((rows[0].strip(), body, texts))
+    return out
+
+
+# ------------------------------------------------------------------ the wrap
+def names(items, n=3):
+    shown = [kd.clip(x if isinstance(x, str) else x[0], 60) for x in items[:n]]
+    more = len(items) - len(shown)
+    return "; ".join(shown) + (f" (+{more} more)" if more > 0 else "")
+
+
+def build(args):
+    t = kd.today()
+    n = next_workday(t)
+    word = day_word(t, n)
+    Word = word[0].upper() + word[1:]
+    q = queue_facts(t, n)
+    pend = pending_counts()
+    events, cal_note = events_for(n, t, args)
+    mp = meetprep()
+    hooks = run_hooks(n)
+    side = "personal" if setting("WRAP_CALENDAR_SIDE", "work").lower().startswith("p") else "work"
+
+    md = [f"# End of day, {WEEKDAYS[t.weekday()]} {kd.fmt(t)}", "",
+          f"Written {kd.now():%H:%M} by kit-wrap, from Kit's files (no model call).", "", "## Done today", ""]
+    done_n = len(q["done_work"]) + len(q["done_personal"])
+    if done_n:
+        md += [f"- **{x}** [work]" for x in q["done_work"]] + [f"- **{x}** (personal)" for x in q["done_personal"]]
+    else:
+        md.append("- Nothing of yours checked off today.")
+    if q["done_kit"]:
+        md.append(f"- Kit finished {q['done_kit']} of its own item{'s' if q['done_kit'] != 1 else ''}.")
+    if q["added"]:
+        md.append(f"- New today: {q['added']} item{'s' if q['added'] != 1 else ''} added to the queue.")
+
+    md += ["", f"## Moves to {word}", ""]
+    moves = [(x, d, "[work]") for x, d in q["moves_work"]] + [(x, d, "(personal)") for x, d in q["moves_personal"]]
+    moves.sort(key=lambda m: m[1])
+    md += [f"- **{x}** {tag}: due {kd.fmt(d)}" + (", overdue" if d < t else "") for x, d, tag in moves] \
+        or ["- Nothing: everything due by today is done."]
+
+    md += ["", f"## {Word}, {short_day(n)}", ""]
+    due = [(x, d, "[work]") for x, d in q["due_work"]] + [(x, d, "(personal)") for x, d in q["due_personal"]]
+    due.sort(key=lambda m: m[1])
+    md += [f"- Due: **{x}** {tag}" + (f" ({kd.fmt(d)})" if d != n else "") for x, d, tag in due] or ["- Nothing due."]
+    first, first_bits, timed, allday = None, "", [], []
+    if events is None:
+        md.append(f"- Calendar: {cal_note}.")
+    else:
+        timed = [e for e in events if hhmm(e) != "all day"]
+        allday = [e for e in events if hhmm(e) == "all day"]
+        if not timed:
+            md.append("- No meetings.")
+        else:
+            first = timed[0]
+            lines, first_bits = needs(first, mp)
+            md.append(f"- {len(timed)} meeting{'s' if len(timed) != 1 else ''}; the first at {hhmm(first)}: "
+                      f"**{first['title']}**")
+            md += [f"  - {ln}" for ln in lines] or ["  - Nothing found that it needs."]
+            for e in timed[1:8]:
+                _, bits = needs(e, mp)
+                md.append(f"- {hhmm(e)} {e['title']}" + (f" (needs: {bits})" if bits else ""))
+            if len(timed) > 8:
+                md.append(f"- and {len(timed) - 8} more")
+        if allday:
+            md.append("- All day: " + "; ".join(kd.clip(e["title"], 60) for e in allday[:4]))
+
+    waiting = q["waiting"]
+    if waiting or any(pend.values()):
+        md += ["", "## Waiting", ""]
+        if waiting:
+            md.append(f"- On others: {len(waiting)} item{'s' if len(waiting) != 1 else ''}")
+        if any(pend.values()):
+            md.append("- For your decision: " + ", ".join(f"{v} {k}" for k, v in pend.items() if v)
+                      + " (confirm them with Kit in a session)")
+    hook_texts = []
+    for title, body, texts in hooks:
+        md += ["", f"## {title}", ""] + [ln if ln.startswith(("-", "  ")) else f"- {ln}" for ln in body]
+        hook_texts += texts
+    md += ["", "_Information only; nothing was sent._", ""]
+
+    # The short texts: counts and times; personal items counted, never named; work only in the work text.
+    head = f"Kit · wrap {short_day(t)}"
+    tail = f"Full wrap: briefs/eod-{t.isoformat()}.md"
+    meet = ""
+    if first is not None:
+        meet = (f"{Word}: {len(timed)} meeting{'s' if len(timed) != 1 else ''}, first {hhmm(first)}"
+                + (f" (needs: {first_bits})" if first_bits else ""))
+    elif events is not None:
+        meet = f"{Word}: no meetings"
+    work, pers = [], []
+    if q["done_work"]:
+        work.append(f"Done: {names(q['done_work'])}")
+    if q["moves_work"]:
+        work.append(f"Moves to {word}: {names(q['moves_work'])}")
+    if q["due_work"]:
+        work.append(f"Due {word}: {names(q['due_work'])}")
+    if q["done_personal"]:
+        pers.append(f"Done today: {len(q['done_personal'])} personal item{'s' if len(q['done_personal']) != 1 else ''}")
+    if q["moves_personal"]:
+        pers.append(f"Moves to {word}: {len(q['moves_personal'])} personal")
+    if q["due_personal"]:
+        pers.append(f"Due {word}: {len(q['due_personal'])} personal")
+    if meet:
+        (pers if side == "personal" else work).append(meet)
+    if waiting:
+        work.append(f"Waiting on others: {len(waiting)}")
+    if pend["meeting actions"] or pend["commitments"]:
+        work.append(f"To confirm: {pend['meeting actions'] + pend['commitments']}")
+    for x in hook_texts:
+        (work if WORK in x else pers).append(x.replace(WORK, "").strip())
+    combined = [f"Done today: {done_n}" + (f" ({len(q['done_personal'])} personal)" if q["done_personal"] else ""),
+                f"Moves to {word}: {len(moves)}" + (f" ({len(q['moves_personal'])} personal)" if q["moves_personal"] else "")]
+    if due:
+        combined.append(f"Due {word}: {len(due)}" + (f" ({len(q['due_personal'])} personal)" if q["due_personal"] else ""))
+    if meet:
+        combined.append(meet)
+    combined += [x.replace(WORK, "").strip() for x in hook_texts if WORK not in x]
+    texts = {"eod-text.txt": [head] + combined + [tail],
+             "eod-text-work.txt": [head] + (work or ["Nothing today."]) + [tail],
+             "eod-text-personal.txt": [head] + (pers or ["Nothing today."]) + [tail]}
+    return "\n".join(md), {k: clip_text(v) for k, v in texts.items()}
+
+
+def clip_text(lines):
+    """The lines joined, under MAX_TEXT characters, keeping the first and last lines."""
+    head, body, tail = lines[0], lines[1:-1], lines[-1]
+    while body and len("\n".join([head] + body + [tail])) > MAX_TEXT:
+        body.pop()
+    return "\n".join([head] + body + [tail]) + "\n"
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-wrap", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--write", action="store_true", help="write the wrap file and its short texts")
+    ap.add_argument("--calendar-json", help="a calendar JSON file instead of the calendar command")
+    ap.add_argument("--no-calendar", action="store_true", help="leave the calendar out")
+    args = ap.parse_args(argv)
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except (AttributeError, ValueError):
+            pass
+    wrap, texts = build(args)
+    if not args.write:
+        print(wrap)
+        return 0
+    t = kd.today()
+    kd.write(kd.BRIEFS / f"eod-{t.isoformat()}.md", wrap + "\n")
+    for name, text in texts.items():
+        kd.write(kd.BRIEFS / name, text)
+    print(f"kit-wrap: wrote briefs/eod-{t.isoformat()}.md and the short texts")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

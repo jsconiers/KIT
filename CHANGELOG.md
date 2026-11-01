@@ -28,8 +28,28 @@ versions follow [semantic versioning](https://semver.org).
 - A credential's `keychain_entry` (in models.json, sharing-db.json, or for kit-ppmx) is read from Windows
   Credential Manager on Windows: a generic credential with that name.
 - INSTALL.md: setting up the PPM Express connector, under Connectors.
+- `kit-ppmx pulse`: the portfolio pulse. A weekly snapshot of the projects your token sees and their key dates,
+  compared with last week's: projects that turned At Risk or Critical (and back), key dates that slipped, are
+  overdue, or come due in 14 days, and what else changed (finish dates, managers, progress, projects added and
+  closed). Read only. With `PPMX_PULSE="on"`, Monday's morning brief has it, every line tagged [work];
+  `PPMX_PULSE_SCOPE` narrows it to your own projects or named portfolios and programs.
+- `kit-ppmx actions`: meeting actions into PPM Express. From the meeting scribe's Actions block (or
+  `briefs/pending-actions.md`), a proposal per action: create a task in the project's PPM Express project, or
+  update the open task it matches (its due date, its assignee when it has none). Proposing only reads;
+  `kit-ppmx actions apply N` makes one proposal, after Claude Code asks, and never twice. `actions map` says
+  which PPM Express project a library project is.
+- `kit-rehearse`: before your own design goes to a review board, the ten hardest questions the board will
+  ask, where the document answers each (or doesn't) with the points of a strong answer, a two-minute talk
+  track, and the gaps to close. A closed Claude run like kit-preread's; never texted.
+- `kit-wrap`: the end-of-day wrap from Kit's files, with no model call: what got done today, what moves to
+  the next working day (Monday, after a Friday), and that day's first meeting and what it needs. Hooks in
+  `.install/wrap.d/` add sections of your own.
 
 ### Changed
+- The end-of-day run uses `kit-wrap` instead of a Claude run (`EOD_MODEL="on"` keeps the old one), so it
+  costs nothing and still arrives at the budget's stop level. Friday's wrap comes at 15:30, before the weekend
+  (the job template; reinstall the job to pick it up).
+- `todo done` keeps a work item's [work] tag, so finished work stays work in the wrap and the briefs.
 - KIT.md's ask-first rule now covers changing a record in an outside system: Kit changes PPM Express
   only when you ask in the session, after saying exactly what it will create or change, and only on
   your yes; never from a scheduled run, a text, or another agent.

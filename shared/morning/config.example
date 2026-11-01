@@ -153,8 +153,33 @@ RUN_TIMEOUT_WEEKLY=""
 RUN_TIMEOUT_WORKLIST=""
 RUN_LOCK_WAIT=""
 
-# End-of-day wrap-up (run.sh eod, weekdays 17:30 when its launchd job is installed): "on" or "off".
+# End-of-day wrap (run.sh eod, Monday to Thursday 17:30 and Friday 15:30 when its launchd job is
+# installed): "on" or "off". kit-wrap writes it from Kit's files with no model call: what got done today,
+# what moves to the next working day, and that day's first meeting and what it needs. EOD_MODEL="on"
+# runs the older Claude wrap-up (prompt-eod.md) instead. WRAP_WORKDAYS are the working days (1 = Monday);
+# WRAP_CALENDAR_CMD prints one day's events as JSON, with {day} where the date goes (without it,
+# CALENDAR_JSON_CMD, which covers only tomorrow, so Friday's wrap can't see Monday); WRAP_CALENDAR_SIDE
+# is "work" or "personal": which short text the calendar belongs in.
 EOD="on"
+EOD_MODEL="off"
+WRAP_WORKDAYS="1 2 3 4 5"
+WRAP_CALENDAR_CMD=""
+WRAP_CALENDAR_SIDE="work"
+
+# PPM Express pulse (kit-ppmx pulse): "on" adds what changed in PPM Express since last week to the morning
+# brief on PPMX_PULSE_DAY (1 = Monday): projects turned At Risk or Critical, key dates slipped, overdue, or
+# coming due, and what else changed. Read only, no model call. PPMX_PULSE_SCOPE: all, mine (projects you
+# manage), or portfolio and program names, comma-separated. PPMX_TASK_DUE_FIELD: the task field a meeting
+# action's due date goes in when a project has no tasks to copy it from (kit-ppmx actions).
+PPMX_PULSE="off"
+PPMX_PULSE_DAY="1"
+PPMX_PULSE_SCOPE="all"
+PPMX_PULSE_TIMEOUT="300"
+PPMX_TASK_DUE_FIELD="FinishDate"
+
+# Review board rehearsal (kit-rehearse): the model and the time limit (seconds) for its closed run.
+REHEARSE_MODEL="opus"
+REHEARSE_TIMEOUT="900"
 
 # Phone and remote access, phase 1 (shared/kit_inbox.py). PHONE_APPROVALS adds a single-use code to
 # each delivered work list and brief for approving it from Kit Inbox (low-tier actions only).

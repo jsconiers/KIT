@@ -166,7 +166,7 @@ done
 | `weekly` | Monday 06:30 | Finishes before the brief; 50-minute limit |
 | `worklist` | Monday to Thursday 09:00 | Proposes the day's work for your approval |
 | `sync` | Every 15 minutes | To-do sync with Outlook Tasks or Apple Reminders |
-| `eod` | Weekdays 17:30 | Optional end-of-day wrap-up (`EOD="off"` skips it) |
+| `eod` | Monday to Thursday 17:30, Friday 15:30 | Optional end-of-day wrap: `kit-wrap`, no model call (`EOD="off"` skips it; `EOD_MODEL="on"` uses Claude instead) |
 | `backup` | Daily 12:30 | `kit-backup` with the config's `BACKUP_*` settings (encrypted when `BACKUP_ENCRYPT` is on); runs on wake if the Mac was asleep; logs to `.install/logs/backup.log` |
 | `meetprep` | Weekdays, every 30 minutes 07:00 to 18:00 | Optional meeting prep packs (`kit-meetprep`); a plain script, no Claude run; honours `kit-pause` |
 | `open` | Weekdays 09:45 | Optional, for a trading setup only |
@@ -214,7 +214,7 @@ rule written with `~/` doesn't match a command spelled with the full home path.
 | Key | What it does |
 |---|---|
 | `RUN_TIMEOUT`, `RUN_TIMEOUT_WEEKLY`, `RUN_TIMEOUT_WORKLIST`, `RUN_LOCK_WAIT` | Time limits per run and how long a run waits for another to finish |
-| `SKIP_DAYS`, `EOD` | Days with no scheduled runs; the optional end-of-day wrap-up |
+| `SKIP_DAYS`, `EOD`, `EOD_MODEL`, `WRAP_CALENDAR_CMD`, `WRAP_CALENDAR_SIDE` | Days with no scheduled runs; the optional end-of-day wrap, and where it reads the next working day's calendar |
 | `ALLOW_TOOLS`, `ALLOW_TOOLS_WEEKLY`, `BLOCK_TOOLS` | Extra tools a run may or may not use |
 | `COST_BUDGET_MONTHLY`, `COST_WARN_PCT`, `COST_STOP_PCT`, `COST_ESSENTIAL_MODES` | The monthly budget, its warn and stop levels, and the runs that continue at the stop level |
 | `OUTLOOK_CHECK`, `OUTLOOK_RETRY_WAITS`, `CALENDAR_JSON_CMD` | Outlook health check, retry waits, and an alternative calendar command |
@@ -302,7 +302,10 @@ kit-settings email you@example.com            # where Outlook drafts are address
 | `RUN_TIMEOUT`, `RUN_TIMEOUT_WEEKLY`, `RUN_TIMEOUT_WORKLIST` | 1200, 3000, 900 s | Time limit per run kind |
 | `RUN_LOCK_WAIT` | 1800 s | How long a run waits for another to finish before going ahead |
 | `OUTLOOK_CHECK`, `OUTLOOK_RETRY_WAITS` | on, "30 90" | Check Outlook answers before the morning and weekly runs |
-| `EOD` | on | End-of-day wrap-up on or off |
+| `EOD` | on | End-of-day wrap on or off |
+| `EOD_MODEL` | off | "on" writes the wrap with Claude (prompt-eod.md) instead of kit-wrap |
+| `WRAP_CALENDAR_CMD` | empty | A command that prints one day's events as JSON, with `{day}` for the date; without it the wrap uses `CALENDAR_JSON_CMD`, which can't see past tomorrow (so Friday's wrap has no Monday meetings) |
+| `WRAP_CALENDAR_SIDE` | work | Which short text the calendar line goes in: work or personal |
 | `PHONE_APPROVALS` | on | Single-use daily approval code in delivered work lists and briefs |
 | `ONEDRIVE_PUBLISH_DIR` | empty | Folder inside your OneDrive where briefs are published for your phone; empty is off |
 | `PUBLISH_PERSONAL` | off | Include personal items when publishing |
@@ -400,6 +403,13 @@ and changes nothing.
    under Systems in `connectors.md`. The guard never lets an agent make a change.
 6. **Check:** `kit-ppmx check` (who the token belongs to, its scopes, whether it can make changes, when it
    expires), then `kit-connect test ppmx`.
+7. **The Monday pulse** (optional). Set `PPMX_PULSE="on"` in Kit's config, and `PPMX_PULSE_SCOPE` to
+   `mine` or to portfolio names if you don't want every project your token sees. The first Monday saves a
+   snapshot; from the second on, the brief says what changed. `kit-ppmx pulse` shows it any time.
+8. **Meeting actions** (optional). After the meeting scribe writes minutes, `kit-ppmx actions MINUTES.md`
+   proposes a PPM Express task for each action. If an action's project isn't matched, `kit-ppmx actions map
+   SLUG "PROJECT NAME"` remembers it (in `memory/context/ppmx-projects.json`). Kit makes each proposal only
+   on your yes, one at a time (`kit-ppmx actions apply N`), and Claude Code asks before each.
 
 How changes stay yours: in Claude Code, Kit's permission rules make every `create_` and `update_` tool ask
 you first, even if you allow the rest of the server, and a scheduled run can't answer, so it never makes a

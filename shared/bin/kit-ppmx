@@ -13,6 +13,17 @@ and create or update them, each change approved by you.
                               (--remove takes it out; --print shows the entry and changes nothing)
   kit-ppmx setup              the steps for this computer: the token, the address, Claude Code, Claude
                               Desktop, and Kit's connector guard. It changes nothing.
+  kit-ppmx pulse [--save] [--brief] [--json] [--scope all|mine|"NAME,NAME"] [--since YYYY-MM-DD]
+                              the portfolio pulse: projects that turned At Risk or Critical, key dates that
+                              slipped, are overdue, or come due in 14 days, and what else changed since last
+                              week's snapshot (--save keeps this week's in briefs/ppmx/). Read only. On
+                              Mondays the morning brief has it when PPMX_PULSE="on"
+  kit-ppmx actions [FILE] [--project ID|NAME]
+                              meeting actions into PPM Express: from minutes (or briefs/pending-actions.md),
+                              propose a task to create or update for each action, and save the proposals.
+                              Read only
+  kit-ppmx actions apply N    make proposal N, and only it; Claude Code asks first (show lists them; map
+                              SLUG PROJECT says which PPM Express project a library project is)
 
 Works on macOS and Windows. Settings: PPMX_BASE_URL (https://<host>/@<tenant>/v1.0, from PPM Express >
 Automation) and the other PPMX_* settings in shared/ppmx/README.md, from the environment or Kit's config
@@ -46,13 +57,19 @@ from ppmx.codes import CodesError, load as load_codes  # noqa: E402
 from ppmx.config import Settings  # noqa: E402
 from ppmx.mcp_core import Dispatcher  # noqa: E402
 from ppmx.server_stdio import serve  # noqa: E402
-from ppmx.tools import TOOLS, Context  # noqa: E402
+from ppmx import actions as actions_mod  # noqa: E402
+from ppmx import pulse as pulse_mod  # noqa: E402
+from ppmx.client import PPMXError  # noqa: E402
+from ppmx.tools import TOOLS, Context, ToolError, t_current_user  # noqa: E402
 
 KIT = pathlib.Path(os.path.expanduser(os.environ.get("KIT_DIR", "~/Claude/Agents/kit")))
 CONFIG = KIT / ".install/shared/morning/config"
 GUARD = KIT / "memory/context/connector-guard.json"
 SETTING = re.compile(r'^\s*(PPMX_[A-Z_]+)="?([^"\n]*)"?\s*$')
 WINDOWS = os.name == "nt"
+WORK_DIR = KIT / "briefs" / "ppmx"                       # pulse snapshots and action proposals (owner-only)
+PROJECT_MAP = KIT / "memory/context/ppmx-projects.json"  # library project slug -> PPM Express project
+KEEP_DAYS = 120
 STORE = "Credential Manager entry" if WINDOWS else "Keychain entry"
 
 
@@ -380,15 +397,278 @@ def cmd_setup(env):
     return 0
 
 
+# ---------------------------------------------------------------- the portfolio pulse
+
+def private_write(path, text):
+    """Write a file only this account can read (snapshots and proposals hold work data)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    if not WINDOWS:
+        os.chmod(path.parent, 0o700)
+        os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+
+def snapshots():
+    """[(date, path)] of the saved pulse snapshots, oldest first."""
+    out = []
+    for f in WORK_DIR.glob("pulse-*.json") if WORK_DIR.is_dir() else []:
+        try:
+            out.append((datetime.date.fromisoformat(f.stem[6:]), f))
+        except ValueError:
+            pass
+    return sorted(out)
+
+
+def baseline(today, since=None):
+    """The snapshot to compare with: the one from `since`, or the latest one at least six days old."""
+    for d, f in reversed(snapshots()):
+        if (since and d == since) or (not since and d <= today - datetime.timedelta(days=6)):
+            try:
+                return json.loads(f.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return None
+    return None
+
+
+def my_names(ctx):
+    try:
+        me = t_current_user(ctx, {})
+    except (PPMXError, ToolError):
+        return []
+    return [str(me[k]) for k in ("displayName", "name", "email", "logonAccount") if me.get(k)]
+
+
+def cmd_pulse(env, argv):
+    ap = argparse.ArgumentParser(prog="kit-ppmx pulse", description="The portfolio pulse (read only).")
+    ap.add_argument("--save", action="store_true", help="keep this snapshot for next week's comparison")
+    ap.add_argument("--brief", action="store_true", help="lines for the morning brief, tagged [work]")
+    ap.add_argument("--json", action="store_true", help="the comparison as JSON")
+    ap.add_argument("--scope", default=None, help='all (the default), mine, or portfolio and program names: "A,B"')
+    ap.add_argument("--since", default=None, help="compare with the snapshot from this date (YYYY-MM-DD)")
+    a = ap.parse_args(argv)
+    title = "PPM Express pulse"
+
+    def fail(why, rc):
+        if a.brief:                                   # the brief says what went wrong instead of going quiet
+            print(f"{title}\n[work] Couldn't read PPM Express: {why}")
+            return 0
+        print(f"kit-ppmx: {why}", file=sys.stderr)
+        return rc
+    since = None
+    if a.since:
+        try:
+            since = datetime.date.fromisoformat(a.since)
+        except ValueError:
+            return fail("--since takes a date like 2026-11-02", 2)
+    settings = Settings(env)
+    if not settings.ready:
+        return fail(settings.problem, 2)
+    token, problem = get_token(env)
+    if not token:
+        return fail(problem, 2)
+    ctx = Context(Client(settings), settings, tables_for(settings), token)
+    raw = (a.scope or env.get("PPMX_PULSE_SCOPE") or "all").strip()
+    scope = raw.lower() if raw.lower() in ("all", "mine") else [s.strip() for s in raw.split(",") if s.strip()]
+    me = my_names(ctx) if scope == "mine" else None
+    try:
+        snap = pulse_mod.snapshot(ctx, scope, me, max_projects=int(env.get("PPMX_PULSE_MAX") or 300),
+                                  deadline_seconds=int(env.get("PPMX_PULSE_SECONDS") or 240),
+                                  now=datetime.datetime.combine(ctx.today, datetime.datetime.now().time()))
+    except PPMXError as e:
+        return fail(str(e), 1)
+    today = ctx.today
+    rep = pulse_mod.compare(baseline(today, since), snap, today)
+    audit_logger(settings)({"ts": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+                            "via": "kit-ppmx pulse", "user": f"u:{token_key(token)[:12]}", "tool": "pulse",
+                            "outcome": "ok", "projects": rep["projects"], "key_dates": rep["key_dates"]})
+    if a.save:
+        private_write(WORK_DIR / f"pulse-{today.isoformat()}.json", json.dumps(snap, indent=1, ensure_ascii=False))
+        for d, f in snapshots():
+            if d < today - datetime.timedelta(days=KEEP_DAYS):
+                f.unlink()
+    if a.json:
+        print(json.dumps(rep, indent=2, ensure_ascii=False))
+    elif a.brief:
+        print(title)
+        print("\n".join(pulse_mod.lines(rep)))
+    else:
+        print(f"{title}, {pulse_mod.fmt_day(today.isoformat())}"
+              + (f" (scope: {raw})" if raw.lower() != "all" else ""))
+        print("\n".join("  " + ln for ln in pulse_mod.lines(rep, n=25, tag="")))
+        if a.save:
+            print(f"Saved this week's snapshot: briefs/ppmx/pulse-{today.isoformat()}.json")
+    return 0
+
+
+# ---------------------------------------------------------------- meeting actions into PPM Express
+
+def proposal_files():
+    return sorted(WORK_DIR.glob("actions-*.json"), key=lambda f: f.stat().st_mtime) if WORK_DIR.is_dir() else []
+
+
+def load_proposals(name=None):
+    """(path, data) for a proposals file (by name or path), or the newest one."""
+    if name:
+        f = pathlib.Path(os.path.expanduser(name))
+        if not f.is_file():
+            f = WORK_DIR / (name if name.endswith(".json") else f"actions-{name}.json")
+    else:
+        files = proposal_files()
+        f = files[-1] if files else None
+    if not f or not f.is_file():
+        raise SystemExit("kit-ppmx: no proposals yet (kit-ppmx actions [MINUTES])")
+    return f, json.loads(f.read_text(encoding="utf-8"))
+
+
+def project_map():
+    try:
+        value = json.loads(PROJECT_MAP.read_text(encoding="utf-8-sig"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def show_proposals(f, data):
+    print(f"Proposals from {data.get('from', '?')} ({data.get('made', '')[:16].replace('T', ' ')}), in {f.name}:")
+    for p in data["proposals"]:
+        mark = {"applied": "done: ", "failed": "FAILED: "}.get(p.get("status"), "")
+        print(f"  {p['n']}. {mark}{p['says']}" + (f" [{p.get('error')}]" if p.get("status") == "failed" else ""))
+    todo = [p["n"] for p in data["proposals"] if p.get("status") == "proposed" and p["kind"] in ("create", "update")]
+    if todo:
+        print(f"To make one, say which (one at a time; Claude Code asks before each): kit-ppmx actions apply {todo[0]}")
+
+
+def cmd_actions(env, argv):
+    if argv[:1] == ["show"]:
+        ap = argparse.ArgumentParser(prog="kit-ppmx actions show")
+        ap.add_argument("--file")
+        a = ap.parse_args(argv[1:])
+        f, data = load_proposals(a.file)
+        show_proposals(f, data)
+        return 0
+    if argv[:1] == ["apply"]:
+        ap = argparse.ArgumentParser(prog="kit-ppmx actions apply")
+        ap.add_argument("n", type=int, help="the proposal's number (one at a time)")
+        ap.add_argument("--file")
+        a = ap.parse_args(argv[1:])
+        return apply_proposal(env, a.n, a.file)
+    if argv[:1] == ["map"]:
+        if len(argv) != 3:
+            print('kit-ppmx: kit-ppmx actions map SLUG "PROJECT NAME or ID"', file=sys.stderr)
+            return 2
+        return map_project(env, argv[1], argv[2])
+    ap = argparse.ArgumentParser(prog="kit-ppmx actions", description="Propose PPM Express tasks for meeting actions.")
+    ap.add_argument("file", nargs="?", help="minutes with an Actions block (default: briefs/pending-actions.md)")
+    ap.add_argument("--project", help="put every action in this PPM Express project (its name or ID)")
+    a = ap.parse_args(argv)
+    src = pathlib.Path(os.path.expanduser(a.file)) if a.file else KIT / "briefs" / "pending-actions.md"
+    try:
+        text = src.read_text(encoding="utf-8-sig")
+    except OSError:
+        print(f"kit-ppmx: can't read {src}", file=sys.stderr)
+        return 2
+    acts = actions_mod.parse(text)
+    if not acts:
+        print(f"kit-ppmx: no actions in {src.name} (lines that start \"- [action]\")")
+        return 0
+    got = ready(env)
+    if not got:
+        return 2
+    settings, token = got
+    ctx = Context(Client(settings), settings, tables_for(settings), token)
+    names = my_names(ctx)
+    me = next((n for n in names if "@" in n), names[0] if names else None)
+    try:
+        props = actions_mod.propose(ctx, acts, project_map(), me, a.project,
+                                    due_key=env.get("PPMX_TASK_DUE_FIELD") or "FinishDate")
+    except PPMXError as e:
+        print(f"kit-ppmx: {e}", file=sys.stderr)
+        return 1
+    audit_logger(settings)({"ts": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+                            "via": "kit-ppmx actions", "user": f"u:{token_key(token)[:12]}", "tool": "propose",
+                            "outcome": "ok", "actions": len(acts), "proposals": len(props)})
+    stem = re.sub(r"[^a-z0-9]+", "-", src.stem.lower()).strip("-") or "actions"
+    out = WORK_DIR / f"actions-{stem}.json"
+    data = {"from": str(src), "made": datetime.datetime.now().isoformat(timespec="seconds"), "proposals": props}
+    private_write(out, json.dumps(data, indent=1, ensure_ascii=False))
+    dropped = sum(1 for x in acts if x["status"] == "dropped")
+    print(f"kit-ppmx: {len(acts)} action(s) in {src.name}" + (f", {dropped} dropped and left out" if dropped else "")
+          + ". Nothing has changed in PPM Express.")
+    show_proposals(out, data)
+    for p in props:
+        if p["kind"] == "no-project" and p.get("slug"):
+            print(f'  (for "{p["slug"]}": kit-ppmx actions map {p["slug"]} "PROJECT NAME", then run this again)')
+            break
+    return 0
+
+
+def apply_proposal(env, n, name=None):
+    """Make one proposal in PPM Express, through the same tool the MCP server runs (and its audit line)."""
+    f, data = load_proposals(name)
+    p = next((x for x in data["proposals"] if x["n"] == n), None)
+    if not p:
+        print(f"kit-ppmx: there's no proposal {n} in {f.name}", file=sys.stderr)
+        return 2
+    if p["kind"] not in ("create", "update"):
+        print(f"kit-ppmx: proposal {n} has nothing to make: {p['says']}", file=sys.stderr)
+        return 2
+    if p.get("status") == "applied":
+        print(f"kit-ppmx: proposal {n} was made already ({p.get('result_id') or 'see PPM Express'})", file=sys.stderr)
+        return 2
+    got = ready(env)
+    if not got:
+        return 2
+    settings, token = got
+    good, text = call(settings, token, p["tool"], p["args"], tables_for(settings), via="kit-ppmx actions apply")
+    if good:
+        res = json.loads(text)
+        p.update(status="applied", result_id=res.get("id"), applied=datetime.datetime.now().isoformat(timespec="seconds"))
+        p.pop("error", None)
+        print(f"kit-ppmx: done: {p['says']}" + (f" (ID {res.get('id')})" if res.get("id") else ""))
+    else:
+        p.update(status="failed", error=text[:300])
+        print(f"kit-ppmx: PPM Express didn't make it: {text}", file=sys.stderr)
+    private_write(f, json.dumps(data, indent=1, ensure_ascii=False))
+    return 0 if good else 1
+
+
+def map_project(env, slug, project):
+    got = ready(env)
+    if not got:
+        return 2
+    settings, token = got
+    ctx = Context(Client(settings), settings, tables_for(settings), token)
+    try:
+        rows = [r for r in ctx.rows("projects") if r.get("id")]
+    except PPMXError as e:
+        print(f"kit-ppmx: {e}", file=sys.stderr)
+        return 1
+    found, why = actions_mod.find_project(rows, slug, {}, project)
+    if not found:
+        print(f"kit-ppmx: {why}", file=sys.stderr)
+        return 1
+    m = project_map()
+    m[slug] = str(found["id"])
+    private_write(PROJECT_MAP, json.dumps(m, indent=1, ensure_ascii=False) + "\n")
+    print(f'kit-ppmx: "{slug}" is now the PPM Express project {found.get("Name") or found.get("Title") or found["id"]}')
+    return 0
+
+
 def main(argv):
     for stream in (sys.stdout, sys.stderr):           # names and labels can be any language, on any console
         try:
             stream.reconfigure(encoding="utf-8")
         except (AttributeError, ValueError):
             pass
+    if argv[:1] == ["pulse"]:
+        return cmd_pulse(kit_env(), argv[1:])
+    if argv[:1] == ["actions"]:
+        return cmd_actions(kit_env(), argv[1:])
     ap = argparse.ArgumentParser(prog="kit-ppmx", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["serve", "check", "tools", "call", "desktop", "setup"])
+    ap.add_argument("command", choices=["serve", "check", "tools", "call", "desktop", "setup", "pulse", "actions"])
     ap.add_argument("tool", nargs="?")
     ap.add_argument("arguments", nargs="?", help="the tool's arguments as JSON")
     ap.add_argument("--remove", action="store_true", help="desktop: take the server out of Claude Desktop")

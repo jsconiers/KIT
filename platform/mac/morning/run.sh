@@ -3,7 +3,8 @@
 #   run.sh          morning brief (weekdays 7:45, delivered by 8:00)
 #   run.sh weekly   weekly review (Monday 6:30)
 #   run.sh worklist proposed work list for the owner to approve (Monday to Thursday 9:00)
-#   run.sh eod      end-of-day wrap-up (weekdays 17:30; EOD="off" in the config skips it)
+#   run.sh eod      end-of-day wrap (Monday to Thursday 17:30, Friday 15:30): kit-wrap, no model call
+#                   (EOD_MODEL="on" uses Claude and prompt-eod.md instead; EOD="off" skips it)
 # With DEMAND_REFRESH="on", the weekly review also has the demand tracker re-check the demands in
 # its register (demand_refresh.py, prompt-demand-refresh.md); off by default.
 # With REG_WATCH="on", the first weekly review of each month also has the researcher write a
@@ -134,6 +135,39 @@ run_alerts() {
     python3 "$SHAREDIR/run_alerts.py" --kit "$KIT" --no-dashboard "$@" >/dev/null 2>> "$LOG" || true
 }
 
+# End-of-day wrap: kit-wrap writes it from Kit's files with no model call (what got done today, what
+# moves to the next working day, and that day's first meeting and what it needs), so the budget guard,
+# the connection check, and the run lock don't apply. EOD_MODEL="on" runs prompt-eod.md with Claude
+# instead, as before.
+if [ "$MODE" = "eod" ] && [ "${EOD_MODEL:-off}" != "on" ] && [ -f "$KIT/.install/shared/bin/kit-wrap" ]; then
+  echo "== $(date) start eod (kit-wrap, no model) ${TEST}" >> "$LOG"
+  perl -e 'alarm shift; exec @ARGV' "${RUN_TIMEOUT_EOD:-300}" python3 "$KIT/.install/shared/bin/kit-wrap" --write >> "$LOG" 2>&1
+  rc=$?
+  if [ "$rc" -eq 0 ] && [ -s "$TEXT" ]; then
+    if deliver "$TEXT" >> "$LOG" 2>&1; then
+      [ -z "$TEST" ] && touch "$DONE"
+      rm -f "briefs/unsent-$MODE.txt"
+      echo "== delivered" >> "$LOG"
+    else
+      cp "$TEXT" "briefs/unsent-$MODE.txt"
+      echo "== delivery failed" >> "$LOG"
+    fi
+  else
+    [ "$rc" -eq 0 ] && rc=1
+    echo "Kit's end-of-day wrap didn't finish (rc=$rc). Log: ~/Claude/Agents/kit/.install/logs/$TODAY.log" > "$LOGDIR/failure-$MODE.txt"
+    deliver "$LOGDIR/failure-$MODE.txt" nobrief >> "$LOG" 2>&1
+    echo "== sent failure notice" >> "$LOG"
+  fi
+  echo "== $(date) end eod rc=$rc" >> "$LOG"
+  run_alerts
+  if [ -d "$KIT/.git" ]; then
+    git -C "$KIT" add -A >/dev/null 2>&1
+    git -C "$KIT" commit -qm "auto: $MODE run $TODAY" >/dev/null 2>&1
+  fi
+  [ -f "$KIT/.install/shared/dashboard.py" ] && python3 "$KIT/.install/shared/dashboard.py" >/dev/null 2>&1
+  exit 0
+fi
+
 # Budget guard (kit-cost): at the stop level only the essential runs go ahead; the others skip, with
 # one notice a day. Without a budget, or without kit-cost, every run goes ahead.
 COST_LEVEL="ok"; COST_PCT=""
@@ -210,6 +244,16 @@ if [ "$MODE" = "morning" ] || [ "$MODE" = "weekly" ]; then
     perl -e 'alarm shift; exec @ARGV' 60 "$hook" "$MODE" > "$out" 2>> "$LOG" || rm -f "$out"
     [ -s "$out" ] || rm -f "$out"
   done
+  # PPM Express pulse (PPMX_PULSE="on"; off by default): on PPMX_PULSE_DAY's morning brief (1, Monday, by
+  # default), kit-ppmx pulse adds what changed in PPM Express since last week: projects that turned At Risk
+  # or Critical, key dates that slipped, are overdue, or come due, and what else changed. Read only, no
+  # model call, every line [work]. Time-limited by PPMX_PULSE_TIMEOUT (seconds, default 300).
+  if [ "$MODE" = "morning" ] && [ "${PPMX_PULSE:-off}" = "on" ] && [ "$(date +%u)" = "${PPMX_PULSE_DAY:-1}" ] \
+     && [ -f "$KIT/.install/shared/bin/kit-ppmx" ]; then
+    perl -e 'alarm shift; exec @ARGV' "${PPMX_PULSE_TIMEOUT:-300}" python3 "$KIT/.install/shared/bin/kit-ppmx" \
+      pulse --brief --save > briefs/extra-ppmx-pulse.txt 2>> "$LOG" || rm -f briefs/extra-ppmx-pulse.txt
+    [ -s briefs/extra-ppmx-pulse.txt ] || rm -f briefs/extra-ppmx-pulse.txt
+  fi
   for f in briefs/dates.txt briefs/renewals.txt briefs/renewals-missing.txt; do [ -s "$f" ] || rm -f "$f"; done
 fi
 PROMPT_TEXT=$(sed "s/{{OWNER}}/${OWNER_NAME:-the owner}/g" "$PROMPT")

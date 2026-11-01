@@ -152,7 +152,8 @@ def done(section, number):
     m = re.match(r"- \[ \] \*\*(.+?)\*\*(.*)", block[0])
     title, rest = (m.group(1), m.group(2)) if m else (block[0][6:], "")
     added = re.search(r"added (\d{2}-\w{3}-\d{4})", rest)
-    first = (f"- [x] **{title}**: {section}, done {fmt(TODAY)}"
+    tag = " [work]" if "[work]" in rest else ""          # a work item stays one once it's done
+    first = (f"- [x] **{title}**{tag}: {section}, done {fmt(TODAY)}"
              + (f" (added {added.group(1)})" if added else ""))
     del lines[i:j]
     h = heads(lines)

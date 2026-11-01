@@ -56,9 +56,13 @@ ALLOW = [f"Read({K}/**)", f"Edit({K}/memory/**)", f"Edit({K}/QUEUE.md)", f"Edit(
          "Bash(kit-library flush *)", "Bash(kit-library mirror *)", "Bash(kit-library fetch *)",
          # Kit's own lists (keep in touch, the private feedback log) and the read-only meeting audit.
          "Bash(kit-touch *)", "Bash(kit-feedback *)", "Bash(kit-meetload *)",
-         # PPM Express: the connection check, the tool list, and the setup steps, which change nothing.
+         # PPM Express: the connection check, the tool list, and the setup steps, which change nothing; the
+         # portfolio pulse and the proposals for meeting actions, which only read it.
          "Bash(kit-ppmx check)", "Bash(kit-ppmx check *)", "Bash(kit-ppmx tools)", "Bash(kit-ppmx tools *)",
-         "Bash(kit-ppmx setup)", "Bash(kit-ppmx setup *)"]
+         "Bash(kit-ppmx setup)", "Bash(kit-ppmx setup *)", "Bash(kit-ppmx pulse)", "Bash(kit-ppmx pulse *)",
+         "Bash(kit-ppmx actions)", "Bash(kit-ppmx actions *)",
+         # The end-of-day wrap: it reads Kit's files and writes only its own wrap file.
+         "Bash(kit-wrap)", "Bash(kit-wrap *)"]
 # Always prompt, even if a broader allow rule exists: Kit's rules, Claude Code's own settings,
 # and commands that delete, push or post, install, or change system settings.
 ASK = [
@@ -80,11 +84,13 @@ ASK = [
     "Bash(kit-library tag *)", "Bash(kit-library untag *)", "Bash(kit-library rule *)",
     "Bash(kit-library unrule *)", "Bash(kit-library exclude *)", "Bash(kit-library include *)",
     "Bash(kit-library define *)",
-    # A pre-read runs the red team on a document with Claude (a paid run), so it asks first.
-    "Bash(kit-preread *)",
+    # A pre-read or a rehearsal runs Claude on a document (a paid run), so it asks first.
+    "Bash(kit-preread *)", "Bash(kit-rehearse *)",
     # A PPM Express call from the command line can change PPM Express (a create_ or update_ tool), so it
     # asks first, and so does adding the server to Claude Desktop's config.
     "Bash(kit-ppmx call *)", "Bash(kit-ppmx desktop)", "Bash(kit-ppmx desktop *)",
+    # Making a meeting action's proposal changes PPM Express: it asks every time, one proposal at a time.
+    "Bash(kit-ppmx actions apply *)",
     # Every PPM Express change asks, even when the ppmx server is allowed as a whole. A scheduled run
     # can't answer, so it never makes one.
     "mcp__ppmx__create_project", "mcp__ppmx__update_project", "mcp__ppmx__create_task",

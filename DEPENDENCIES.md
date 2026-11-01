@@ -81,6 +81,8 @@ For installing and configuring, see INSTALL.md; for how the pieces fit, see DESI
 | `kit-audit-export` | Python 3.8 | Same code | Gather evidence by hand |
 | `kit-holds` | Python 3.8 (3.9+ for time zones via zoneinfo; older Pythons write floating local times) | Same code; `open` on macOS, the default app on Windows | Holds are created by hand |
 | `kit-degraded` | Python 3.8 | Same code | A failed or budget-stopped morning run sends only a failure notice |
+| `kit-wrap` | Python 3.8; a calendar JSON command for the meetings (`WRAP_CALENDAR_CMD` or `CALENDAR_JSON_CMD`) | Same code; the end-of-day job is a launchd template on macOS | No end-of-day wrap, or the older Claude one with `EOD_MODEL="on"` |
+| `kit-rehearse` | Python 3.8; Claude Code; kit-preread and kit-library (to read the document) | Same code | Rehearse by hand: list the board's hard questions and check the document for each |
 | `kit-reliability` | Python 3.8 | Same code | No reliability view; read the run logs by hand |
 
 ### macOS

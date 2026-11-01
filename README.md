@@ -20,8 +20,8 @@ affiliated with them.)
 - **Keeps your commitments.** A running queue (`QUEUE.md`) for you, for Kit, and for what's
   waiting on others, with sprints, stale-item checks, and duplicate detection.
 - **Briefs you.** A morning brief on weekdays, a weekly review on Mondays, a daily work list for
-  your approval, and an optional end-of-day wrap-up, delivered as a desktop notification or an
-  Outlook draft (never sent).
+  your approval, and an end-of-day wrap, delivered as a desktop notification or an Outlook draft
+  (never sent).
 - **Runs your staff.** Routes work to the right agent with a brief, checks what comes back, and
   reports to you.
 - **Helps with architecture work.** Matches a new demand to published reference architectures,
@@ -80,7 +80,7 @@ agent meant to reach outside systems; the connector guard keeps its calls read-o
 | Weekdays 07:45 | Morning brief | A connector health line, to-dos, calendar, mail needing you, health and audit issues, queue hygiene |
 | Mon to Thu 09:00 | Work list | What Kit can do on its own today; you approve it in a session |
 | Monday 06:30 | Weekly review | The week, the queue, audit, what changed on your demands (optional refresh), horizon scan, watch, sprint review, cost, quality, retrospective (first Monday) |
-| Weekdays 17:30 | End-of-day wrap-up (optional) | What moved, what's due tomorrow, commitments not yet in the queue |
+| Mon to Thu 17:30, Fri 15:30 | End-of-day wrap (optional) | What got done, what moves to the next working day, and that day's first meeting and what it needs; no model call (`kit-wrap`) |
 | Weekdays, every 30 minutes (optional) | Meeting prep | A prep pack per upcoming meeting (a plain script; no Claude run) |
 | Daily 12:30 | Backup | An encrypted, checked archive of Kit's folder and history, in the folder you choose |
 | Every 15 minutes | To-do sync | Your queue mirrored to Outlook Tasks or Apple Reminders, and the "Kit Inbox" list pulled in |
@@ -133,6 +133,7 @@ The installer links these into `~/.local/bin` (all in `shared/bin/`):
 | `kit-diaglint` | Checks draw.io and Visio diagrams against your team's diagramming standard (a JSON rules file): palette, fonts, title block, legend, line types, connectors, shapes, view labels |
 | `kit-onepager` | One-page executive summary of an IA or GDS (Markdown, .docx, or PDF), every line cited, "not stated" where the document is silent; Markdown, JSON, or Word |
 | `kit-preread` | Before a design review: Kit's red team reads the document (Word, PowerPoint, Excel, PDF) in a closed run and gives the findings that matter most, what it doesn't say, and five questions to ask, each tied to a finding; Claude Code asks before it runs; never texted |
+| `kit-rehearse` | Before your own design goes to a review board: the ten hardest questions the board will ask, where the document answers each (or that it doesn't) with the points of a strong answer, a two-minute talk track, and the gaps to close; a closed run like kit-preread; Claude Code asks before it runs; never texted |
 | `kit-decisions` | Drafts proposed ADRs from architectural decisions in meeting minutes, with the classifying rule shown; never accepts anything |
 | `kit-viewpoints` | DoDAF-style viewpoint drafts (OV-1, SV-1, SV-4, DIV-2) from a GDS, every element cited, with a draw.io file per view in the team style |
 | `kit-coverage` | Framework coverage per design and across the portfolio (CSF 2.0, Zero Trust, Secure by Design, standards, threat models, red team, waivers), filtered by your framework profile; HTML and JSON |
@@ -172,12 +173,13 @@ The installer links these into `~/.local/bin` (all in `shared/bin/`):
 |---|---|
 | `kit-pause` | Kill switch: stops scheduled runs and connector calls until `kit-pause resume` |
 | `kit-connect` | Connector check: guard, credential variables by name, Claude Code health |
-| `kit-ppmx` | PPM Express from Claude Code or Claude Desktop, on macOS or Windows: reads portfolios, projects, tasks, key dates, ideas, and resources, and creates or updates them, asking you before each change (a stub until a tenant's endpoints are confirmed). `serve` (the MCP server), `check`, `tools`, `call`, `desktop` (adds it to Claude Desktop), and `setup` (the steps, changing nothing). The same package runs as a team service on OpenShift: `shared/ppmx/openshift/INSTALL.md` |
+| `kit-ppmx` | PPM Express from Claude Code or Claude Desktop, on macOS or Windows: reads portfolios, projects, tasks, key dates, ideas, and resources, and creates or updates them, asking you before each change (a stub until a tenant's endpoints are confirmed). `serve` (the MCP server), `check`, `tools`, `call`, `desktop` (adds it to Claude Desktop), and `setup` (the steps, changing nothing). `pulse`: the portfolio pulse (projects turned At Risk or Critical, key dates slipped or coming due, what changed since last week), in Monday's brief with `PPMX_PULSE="on"`. `actions`: meeting actions from the scribe's minutes as proposed tasks to create or update, each made only on your yes, one at a time (`actions apply N`). The same package runs as a team service on OpenShift: `shared/ppmx/openshift/INSTALL.md` |
 | `kit-backup` | Checked archive of Kit's folder and history to a folder you choose (local or shared), encrypted on request; `verify`, `restore` |
 | `kit-audit-export` | A dated evidence pack of Kit's controls for a compliance or security review; `--controls` organises it by control for an audit request, with gaps listed |
 | `kit-retention` | Retention rules with legal holds; reports, and only moves files with `--yes` |
 | `kit-outlook` | Checks Outlook answers before a run, retrying; never starts it |
 | `kit-degraded` | The morning brief from Kit's files with no model call (budget stop, failed or timed-out run) |
+| `kit-wrap` | The end-of-day wrap from Kit's files with no model call: what got done, what moves to the next working day, and that day's first meeting and what it needs (related to-dos, pending actions, a pre-read, where it is); hooks in `.install/wrap.d/` add your own sections |
 | `kit-reliability` | How reliably the scheduled runs work: success rate, duration, cost, and alerts, by run type |
 | `kit-cost` | What scheduled runs cost, by run and model, against an optional monthly budget |
 | `kit-expiry` | Everything that expires (tokens, logins, domains, certificates), soonest first, from `expiry.json`; the health check warns before each is due |

@@ -63,6 +63,19 @@ as PPM Express now has it.
   token), the tool, the argument names, the outcome, and for a change, its kind, the record's ID, and the
   field names. Never a token, never a value. Kit's connector also keeps them in Kit's audit folder.
 
+## Kit's extras: the pulse and meeting actions
+
+`kit-ppmx` adds two commands for Kit, both built on the same client and tools:
+
+- **`kit-ppmx pulse`** reads the projects a token can see and the open ones' key dates (pulse.py), keeps a
+  weekly snapshot in `briefs/ppmx/`, and compares it with last week's: projects that turned At Risk or
+  Critical (and back), key dates that slipped, are overdue, or come due in 14 days, and what else changed.
+  Read only. It waits out PPM Express's request limit, so a large portfolio takes a few minutes.
+- **`kit-ppmx actions`** reads the meeting scribe's Actions block (actions.py) and proposes, per action, a task
+  to create or the matching open task to update (its due date, an assignee when it has none, Completed when
+  the action says it's done). Proposing only reads; `kit-ppmx actions apply N` makes one proposal through the
+  `create_task` or `update_task` tool, with its audit line, and never makes the same one twice.
+
 ## Settings
 
 Environment variables (Kit's connector also reads them from Kit's config; the container from its
