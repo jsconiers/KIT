@@ -140,16 +140,22 @@ def queue_facts(t, n):
     return out
 
 
+def open_proposal(line):
+    """True for a proposal still waiting on the owner: a table row with a "proposed" cell, or a scribe's
+    "- [action]" line not marked confirmed or dropped after its action (an action about "dropped packets"
+    is still open)."""
+    s = line.strip()
+    if s.startswith("|") and not re.fullmatch(r"[|\s:-]+", s):
+        return "proposed" in [c.strip().lower() for c in s.strip("|").split("|")]
+    if s.lower().startswith("- [action]"):
+        tail = s.split("|", 1)[1] if "|" in s else ""
+        return not re.search(r"\b(confirmed|dropped)\b", tail, re.I)
+    return False
+
+
 def pending_counts():
     def count(name):
-        n = 0
-        for ln in kd.read(kd.BRIEFS / name).splitlines():
-            s = ln.strip()
-            if s.startswith("|") and re.search(r"\|\s*proposed\s*\|", s, re.I):
-                n += 1
-            elif s.startswith("- [action]") and not re.search(r"\b(confirmed|dropped)\b", s, re.I):
-                n += 1
-        return n
+        return sum(1 for ln in kd.read(kd.BRIEFS / name).splitlines() if open_proposal(ln))
     return {"meeting actions": count("pending-actions.md"), "commitments": count("pending-commitments.md")}
 
 
@@ -173,7 +179,7 @@ def events_for(day, t, args):
                 return None, f"{DAYNAMES[day.weekday()]}'s calendar isn't in reach (set WRAP_CALENDAR_CMD)"
         try:
             raw = subprocess.run([os.path.expanduser(p) for p in shlex.split(cmd)], capture_output=True,
-                                 text=True, timeout=120).stdout
+                                 text=True, encoding="utf-8", errors="replace", timeout=120).stdout
         except (OSError, ValueError, subprocess.SubprocessError):
             return None, "the calendar command didn't answer"
     try:
@@ -197,17 +203,19 @@ def events_for(day, t, args):
             continue
         seen.add(key)
         e = dict(e, title=title)
-        if e.get("all_day") or len(start) <= 10:
-            allday.append(e)
-        else:
-            timed.append(e)
+        (allday if all_day(e) else timed).append(e)
     timed.sort(key=lambda e: str(e.get("start")).replace("T", " ")[:16])    # "2026-11-06 09:00" or ISO
     return timed + allday, ""
 
 
+def all_day(e):
+    """An all-day event: flagged as one, or with a date and no time."""
+    return bool(e.get("all_day")) or len(str(e.get("start") or "")) <= 10
+
+
 def hhmm(e):
     s = str(e.get("start") or "")
-    return s[11:16] if len(s) >= 16 else "all day"
+    return "all day" if all_day(e) or len(s) < 16 else s[11:16]
 
 
 def alike(a, b):
@@ -233,12 +241,8 @@ def pending_about(title):
     n = 0
     for name in ("pending-actions.md", "pending-commitments.md"):
         for ln in kd.read(kd.BRIEFS / name).splitlines():
-            s = ln.strip()
-            if not s.startswith(("|", "- ")) or re.fullmatch(r"[|\s:-]+", s):
-                continue
-            if re.search(r"\b(confirmed|dropped)\b", s, re.I):
-                continue
-            n += alike(title, s)
+            if open_proposal(ln):
+                n += alike(title, ln)
     return n
 
 
@@ -291,7 +295,8 @@ def run_hooks(n):
         if not hook.is_file() or hook.name.startswith(".") or not os.access(hook, os.X_OK):
             continue
         try:
-            r = subprocess.run([str(hook), n.isoformat()], capture_output=True, text=True, timeout=30)
+            r = subprocess.run([str(hook), n.isoformat()], capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=30)
         except (OSError, subprocess.SubprocessError):
             continue
         rows = [ln.rstrip() for ln in (r.stdout or "").splitlines() if ln.strip()]
@@ -348,8 +353,8 @@ def build(args):
     if events is None:
         md.append(f"- Calendar: {cal_note}.")
     else:
-        timed = [e for e in events if hhmm(e) != "all day"]
-        allday = [e for e in events if hhmm(e) == "all day"]
+        timed = [e for e in events if not all_day(e)]
+        allday = [e for e in events if all_day(e)]
         if not timed:
             md.append("- No meetings.")
         else:

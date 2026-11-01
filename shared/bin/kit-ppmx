@@ -65,7 +65,7 @@ from ppmx.tools import TOOLS, Context, ToolError, t_current_user  # noqa: E402
 KIT = pathlib.Path(os.path.expanduser(os.environ.get("KIT_DIR", "~/Claude/Agents/kit")))
 CONFIG = KIT / ".install/shared/morning/config"
 GUARD = KIT / "memory/context/connector-guard.json"
-SETTING = re.compile(r'^\s*(PPMX_[A-Z_]+)="?([^"\n]*)"?\s*$')
+SETTING = re.compile(r"^\s*(?:export\s+)?(PPMX_[A-Z_]+)\s*=(.*)$")
 WINDOWS = os.name == "nt"
 WORK_DIR = KIT / "briefs" / "ppmx"                       # pulse snapshots and action proposals (owner-only)
 PROJECT_MAP = KIT / "memory/context/ppmx-projects.json"  # library project slug -> PPM Express project
@@ -73,9 +73,20 @@ KEEP_DAYS = 120
 STORE = "Credential Manager entry" if WINDOWS else "Keychain entry"
 
 
+def shell_value(raw):
+    """A value as the shell reads it from a config line: "x", 'x', or x, with any # comment after it.
+    None when it can't be read (an unclosed quote)."""
+    raw = raw.strip()
+    if raw[:1] in ("'", '"'):
+        end = raw.find(raw[0], 1)
+        return raw[1:end] if end > 0 else None
+    return re.split(r"\s#", raw, maxsplit=1)[0].strip()
+
+
 def kit_env():
     """The environment, plus PPMX_* settings from Kit's config where the environment has none. A token
-    there is ignored: tokens live in the environment or the credential store, never in a file."""
+    there is ignored: tokens live in the environment or the credential store, never in a file. A
+    PPMX_WRITES line Kit can't read counts as "off", so a typo never turns changes on."""
     env = dict(os.environ)
     try:
         text = CONFIG.read_text(encoding="utf-8-sig")
@@ -83,8 +94,12 @@ def kit_env():
         text = ""
     for line in text.splitlines():
         m = SETTING.match(line)
-        if m and not m.group(1).endswith("TOKEN") and not (env.get(m.group(1)) or "").strip():
-            env[m.group(1)] = m.group(2).strip()
+        if not m or m.group(1).endswith("TOKEN") or (env.get(m.group(1)) or "").strip():
+            continue
+        value = shell_value(m.group(2))
+        if value is None:
+            value = "off" if m.group(1) == "PPMX_WRITES" else ""
+        env[m.group(1)] = value
     return env
 
 
@@ -462,6 +477,9 @@ def cmd_pulse(env, argv):
             since = datetime.date.fromisoformat(a.since)
         except ValueError:
             return fail("--since takes a date like 2026-11-02", 2)
+        if since not in [d for d, _ in snapshots()]:
+            return fail(f"there's no snapshot from {a.since}; the saved ones: "
+                        + (", ".join(d.isoformat() for d, _ in snapshots()) or "none yet"), 2)
     settings = Settings(env)
     if not settings.ready:
         return fail(settings.problem, 2)
@@ -504,19 +522,27 @@ def cmd_pulse(env, argv):
 
 # ---------------------------------------------------------------- meeting actions into PPM Express
 
+CURRENT = WORK_DIR / "actions-current"                  # the proposals file the last `kit-ppmx actions` made
+TASK_TOOLS = {"create_task": {"project_id", "name", "fields"}, "update_task": {"project_id", "task_id", "fields"}}
+UNCONFIRMED = ("couldn't confirm", "accepted the change but")
+
+
 def proposal_files():
     return sorted(WORK_DIR.glob("actions-*.json"), key=lambda f: f.stat().st_mtime) if WORK_DIR.is_dir() else []
 
 
 def load_proposals(name=None):
-    """(path, data) for a proposals file (by name or path), or the newest one."""
+    """(path, data) for a proposals file (by name or path), or the one the last proposing run made."""
     if name:
         f = pathlib.Path(os.path.expanduser(name))
         if not f.is_file():
             f = WORK_DIR / (name if name.endswith(".json") else f"actions-{name}.json")
     else:
-        files = proposal_files()
-        f = files[-1] if files else None
+        current = CURRENT.read_text(encoding="utf-8").strip() if CURRENT.is_file() else ""
+        f = WORK_DIR / current if current else None
+        if not f or not f.is_file():
+            files = proposal_files()
+            f = files[-1] if files else None
     if not f or not f.is_file():
         raise SystemExit("kit-ppmx: no proposals yet (kit-ppmx actions [MINUTES])")
     return f, json.loads(f.read_text(encoding="utf-8"))
@@ -533,8 +559,10 @@ def project_map():
 def show_proposals(f, data):
     print(f"Proposals from {data.get('from', '?')} ({data.get('made', '')[:16].replace('T', ' ')}), in {f.name}:")
     for p in data["proposals"]:
-        mark = {"applied": "done: ", "failed": "FAILED: "}.get(p.get("status"), "")
-        print(f"  {p['n']}. {mark}{p['says']}" + (f" [{p.get('error')}]" if p.get("status") == "failed" else ""))
+        mark = {"applied": "done: ", "failed": "FAILED: ", "unconfirmed": "NOT CONFIRMED (check PPM Express): "}.get(
+            p.get("status"), "")
+        print(f"  {p['n']}. {mark}{p['says']}" + (f" [{p.get('error')}]" if p.get("status") in ("failed", "unconfirmed")
+                                                  else ""))
     todo = [p["n"] for p in data["proposals"] if p.get("status") == "proposed" and p["kind"] in ("create", "update")]
     if todo:
         print(f"To make one, say which (one at a time; Claude Code asks before each): kit-ppmx actions apply {todo[0]}")
@@ -552,8 +580,10 @@ def cmd_actions(env, argv):
         ap = argparse.ArgumentParser(prog="kit-ppmx actions apply")
         ap.add_argument("n", type=int, help="the proposal's number (one at a time)")
         ap.add_argument("--file")
+        ap.add_argument("--again", action="store_true",
+                        help="send a change PPM Express didn't confirm once more, after you've checked it isn't there")
         a = ap.parse_args(argv[1:])
-        return apply_proposal(env, a.n, a.file)
+        return apply_proposal(env, a.n, a.file, a.again)
     if argv[:1] == ["map"]:
         if len(argv) != 3:
             print('kit-ppmx: kit-ppmx actions map SLUG "PROJECT NAME or ID"', file=sys.stderr)
@@ -591,8 +621,22 @@ def cmd_actions(env, argv):
                             "outcome": "ok", "actions": len(acts), "proposals": len(props)})
     stem = re.sub(r"[^a-z0-9]+", "-", src.stem.lower()).strip("-") or "actions"
     out = WORK_DIR / f"actions-{stem}.json"
+    try:
+        before = json.loads(out.read_text(encoding="utf-8")).get("proposals", []) if out.is_file() else []
+    except (OSError, ValueError):
+        before = []
+    made = {p["action"]: p for p in before if p.get("status") in ("applied", "unconfirmed")}
+    for p in props:                                    # what was made (or may have been) stays made
+        o = made.get(p["action"])
+        if not o or (p.get("project") or {}).get("id") != (o.get("project") or {}).get("id"):
+            continue                                   # another project (--project): a different change
+        if p["kind"] == "create" or (p["kind"] == o.get("kind") and p.get("args") == o.get("args")):
+            for k in ("status", "result_id", "applied", "error", "kind", "tool", "args", "says"):
+                if k in o:
+                    p[k] = o[k]
     data = {"from": str(src), "made": datetime.datetime.now().isoformat(timespec="seconds"), "proposals": props}
     private_write(out, json.dumps(data, indent=1, ensure_ascii=False))
+    private_write(CURRENT, out.name + "\n")
     dropped = sum(1 for x in acts if x["status"] == "dropped")
     print(f"kit-ppmx: {len(acts)} action(s) in {src.name}" + (f", {dropped} dropped and left out" if dropped else "")
           + ". Nothing has changed in PPM Express.")
@@ -604,29 +648,44 @@ def cmd_actions(env, argv):
     return 0
 
 
-def apply_proposal(env, n, name=None):
-    """Make one proposal in PPM Express, through the same tool the MCP server runs (and its audit line)."""
+def apply_proposal(env, n, name=None, again=False):
+    """Make one proposal in PPM Express, through the same tool the MCP server runs (and its audit line). Only a
+    task's create or update, as proposed; never one that was made, or that may have been, unless --again."""
     f, data = load_proposals(name)
-    p = next((x for x in data["proposals"] if x["n"] == n), None)
+    p = next((x for x in data["proposals"] if x.get("n") == n), None)
     if not p:
         print(f"kit-ppmx: there's no proposal {n} in {f.name}", file=sys.stderr)
         return 2
-    if p["kind"] not in ("create", "update"):
-        print(f"kit-ppmx: proposal {n} has nothing to make: {p['says']}", file=sys.stderr)
+    if p.get("kind") not in ("create", "update"):
+        print(f"kit-ppmx: proposal {n} has nothing to make: {p.get('says')}", file=sys.stderr)
+        return 2
+    tool, args = p.get("tool"), p.get("args")
+    if tool not in TASK_TOOLS or not isinstance(args, dict) or not set(args) <= TASK_TOOLS[tool] \
+            or tool != {"create": "create_task", "update": "update_task"}[p["kind"]]:
+        print(f"kit-ppmx: proposal {n} in {f.name} isn't a task change as kit-ppmx proposes them (was the file "
+              "edited?); propose again with kit-ppmx actions", file=sys.stderr)
         return 2
     if p.get("status") == "applied":
         print(f"kit-ppmx: proposal {n} was made already ({p.get('result_id') or 'see PPM Express'})", file=sys.stderr)
+        return 2
+    if p.get("status") == "unconfirmed" and not again:
+        print(f"kit-ppmx: PPM Express may already have proposal {n} (it didn't confirm last time). Check there; if "
+              f"it isn't, kit-ppmx actions apply {n} --again", file=sys.stderr)
         return 2
     got = ready(env)
     if not got:
         return 2
     settings, token = got
-    good, text = call(settings, token, p["tool"], p["args"], tables_for(settings), via="kit-ppmx actions apply")
+    print(f"kit-ppmx: making {n} from {f.name}: {p['says']}")
+    good, text = call(settings, token, tool, args, tables_for(settings), via="kit-ppmx actions apply")
     if good:
         res = json.loads(text)
         p.update(status="applied", result_id=res.get("id"), applied=datetime.datetime.now().isoformat(timespec="seconds"))
         p.pop("error", None)
-        print(f"kit-ppmx: done: {p['says']}" + (f" (ID {res.get('id')})" if res.get("id") else ""))
+        print(f"kit-ppmx: done" + (f" (ID {res.get('id')})" if res.get("id") else ""))
+    elif any(u in text for u in UNCONFIRMED):
+        p.update(status="unconfirmed", error=text[:300])
+        print(f"kit-ppmx: {text}", file=sys.stderr)
     else:
         p.update(status="failed", error=text[:300])
         print(f"kit-ppmx: PPM Express didn't make it: {text}", file=sys.stderr)

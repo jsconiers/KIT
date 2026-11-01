@@ -187,6 +187,39 @@ if os.name != "nt":
     ok("no" not in out.split("## Weekend")[1].split("_Information")[0].split("\n")[0], "a hook that fails is skipped")
 shutil.rmtree(hooks)
 
+# ---- a word in the action, an all-day event with a time, output that isn't UTF-8 -----------------------------------
+saved_pending = (briefs / "pending-actions.md").read_text()
+(briefs / "pending-actions.md").write_text(
+    saved_pending
+    + "- [action] Trace the dropped packets on the lab link | owner: owner | due: no date | project: lab | source: [Eng]\n"
+    + "| 3 | Order cables | owner | proposed |\n| 4 | Old idea | owner | dropped |\n| --- | --- | --- | --- |\n")
+r = wrap("--no-calendar")
+ok("For your decision: 3 meeting actions" in r.stdout,
+   "an action about dropped packets is still open; a table row counts by its status cell", r.stdout)
+(briefs / "pending-actions.md").write_text(saved_pending)
+cal2 = tmp / "cal2.json"
+cal2.write_text(json.dumps(EVENTS + [{"title": "Security conference", "start": "2026-11-06T00:00:00",
+                                      "end": "2026-11-07T00:00:00", "all_day": True, "calendar": "Work"}]))
+r = wrap("--calendar-json", str(cal2))
+ok("3 meetings; the first at 09:00" in r.stdout and "All day: Team offsite planning; Security conference" in r.stdout
+   and "00:00" not in r.stdout, "an all-day event that comes with a time is still all day", r.stdout)
+latin = tmp / "latin.py"
+latin.write_text("import sys\nsys.stdout.buffer.write("
+                 "b'[{\"title\": \"Caf\\xe9 meeting\", \"start\": \"2026-11-06T10:00:00\"}]')\n")
+r = wrap(CALENDAR_JSON_CMD=f'"{sys.executable}" "{latin}"')
+ok(r.returncode == 0 and "1 meeting; the first at 10:00: **Caf" in r.stdout,
+   "a calendar command whose output isn't UTF-8 still works", r.stdout + r.stderr)
+if os.name != "nt":
+    hooks.mkdir()
+    (hooks / "20-choir").write_text(f"#!{sys.executable}\nimport sys\n"
+                                    "sys.stdout.buffer.write(b'Choir\\nCaf\\xe9 night at 7\\nText: Caf\\xe9 at 7\\n')\n")
+    (hooks / "20-choir").chmod(0o755)
+    r = wrap("--write", "--no-calendar")
+    out = (briefs / "eod-2026-11-05.md").read_text(encoding="utf-8")
+    ok(r.returncode == 0 and "## Choir" in out and "- Caf\ufffd night at 7" in out
+       and "Caf\ufffd at 7" in texts()["eod-text-personal.txt"], "a hook whose output isn't UTF-8 still shows", out + r.stderr)
+    shutil.rmtree(hooks)
+
 # ---- a Friday: the next working day is Monday ---------------------------------------------------------
 fri = dict(KIT_TODAY="2026-11-06", KIT_NOW="2026-11-06T15:30:00")
 r = wrap(**fri, CALENDAR_JSON_CMD=f"{sys.executable} -c print([])")

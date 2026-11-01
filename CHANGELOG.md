@@ -21,8 +21,10 @@ versions follow [semantic versioning](https://semver.org).
     token with every request; a container image (non-root, read-only filesystem; `PIP_INDEX_URL` for a
     package mirror) and OpenShift files, with their own install guide, `shared/ppmx/openshift/INSTALL.md`.
   - PPM Express's published codes (status, progress, ratings, idea stage, key date type) both ways:
-    labels when reading, labels or numbers when writing. `PPMX_WRITES=off` makes either one read-only.
-    A change is never sent twice: it's retried only when PPM Express says it didn't take it.
+    labels when reading, labels or numbers when writing. `PPMX_WRITES=off` makes either one read-only;
+    in Kit's config, `export`, quotes, and a comment after the value are read the way the shell reads them,
+    and a `PPMX_WRITES` line Kit can't read counts as off. A change is never sent twice: it's retried only
+    when PPM Express says it didn't take it.
   - Tested against a fake PPM Express (`tests/test_ppmx.py`, `tests/ppmx_container_smoke.py`) on Linux
     and Windows; GitHub's checks also build the image and run it the way OpenShift does.
 - A credential's `keychain_entry` (in models.json, sharing-db.json, or for kit-ppmx) is read from Windows
@@ -36,8 +38,10 @@ versions follow [semantic versioning](https://semver.org).
 - `kit-ppmx actions`: meeting actions into PPM Express. From the meeting scribe's Actions block (or
   `briefs/pending-actions.md`), a proposal per action: create a task in the project's PPM Express project, or
   update the open task it matches (its due date, its assignee when it has none). Proposing only reads;
-  `kit-ppmx actions apply N` makes one proposal, after Claude Code asks, and never twice. `actions map` says
-  which PPM Express project a library project is.
+  `kit-ppmx actions apply N` makes one proposal from the ones you were last shown, after Claude Code asks, and
+  never twice: a change PPM Express didn't confirm is marked so and goes again only with `--again`, once
+  you've checked. An action the minutes mark done never becomes a new task. `actions map` says which PPM
+  Express project a library project is.
 - `kit-rehearse`: before your own design goes to a review board, the ten hardest questions the board will
   ask, where the document answers each (or doesn't) with the points of a strong answer, a two-minute talk
   track, and the gaps to close. A closed Claude run like kit-preread's; never texted.

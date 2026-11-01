@@ -15,6 +15,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPO = HERE.parent
@@ -26,7 +27,7 @@ from ppmx import pulse as P  # noqa: E402
 from ppmx.client import PPMXError  # noqa: E402
 
 PASS = FAIL = 0
-ALEX, BLAKE = "token-alex-0001", "token-blake-0002"
+ALEX, BLAKE, LOST = "token-alex-0001", "token-blake-0002", "token-lost-0004"
 
 
 def ok(cond, name, detail=""):
@@ -107,6 +108,9 @@ rep = json.loads(o) if rc == 0 else {}
 ok(rep.get("projects") == 4 and rep.get("turned") and rep["turned"][0][0] == "Network refresh", "--json gives the comparison")
 rc, o, e = kp("pulse", "--since", "2026-11-02", PPMX_TODAY="2026-11-02")
 ok("Nothing turned At Risk or Critical" in o or "Turned" not in o, "--since compares with that day's snapshot", o)
+rc, o, e = kp("pulse", "--since", "2026-10-01", PPMX_TODAY="2026-11-02")
+ok(rc == 2 and "no snapshot from 2026-10-01" in e and "2026-10-26, 2026-11-02" in e,
+   "--since a day with no snapshot says so and lists the saved ones (never compares with another day)", e)
 rc, o, e = kp("pulse", "--scope", "mine", PPMX_TODAY="2026-11-02")
 ok(rc == 0 and "2 projects" in o, "--scope mine: the projects you manage (Mobile app, Branch Wi-Fi)", o)
 rc, o, e = kp("pulse", "--scope", "Digital", PPMX_TODAY="2026-11-02")
@@ -114,6 +118,11 @@ ok(rc == 0 and "1 projects" in o, "--scope NAME: one portfolio", o)
 (kit / ".install/shared/morning/config").write_text(f'PPMX_BASE_URL="{BASE}"\nPPMX_PULSE_SCOPE="Digital"\n')
 rc, o, e = kp("pulse", PPMX_TODAY="2026-11-02")
 ok("(scope: Digital)" in o and "1 projects" in o, "PPMX_PULSE_SCOPE in Kit's config sets the default", o)
+(kit / ".install/shared/morning/config").write_text(f"PPMX_BASE_URL='{BASE}'  # the test server\n"
+                                                    "export PPMX_PULSE_SCOPE='Digital' # one portfolio\n")
+rc, o, e = kp("pulse", PPMX_TODAY="2026-11-02")
+ok("(scope: Digital)" in o and "1 projects" in o, "Kit's config is read as the shell reads it: export, quotes, comments",
+   o + e)
 (kit / ".install/shared/morning/config").write_text(f'OWNER_NAME="Alex"\nPPMX_BASE_URL="{BASE}"\n')
 old = WORK / "pulse-2026-01-02.json"
 old.write_text("{}")
@@ -181,7 +190,8 @@ ok(data["proposals"][0]["args"] == {"project_id": F.A1, "task_id": F.T1, "fields
 
 # ---- making them, one at a time ---------------------------------------------------------------------------------
 rc, o, e = kp("actions", "apply", "1", PPMX_TODAY="2026-11-03")
-ok(rc == 0 and "done: update the task" in o, "apply 1 makes that change", o + e)
+ok(rc == 0 and "making 1 from actions-2026-11-03-network-refresh-sync.json: update the task" in o
+   and "kit-ppmx: done" in o, "apply 1 says which proposal from which file, then makes that change", o + e)
 ok(fake.writes and fake.writes[-1][1:] == ("PATCH", f"Projects/{F.A1}/Tasks/{F.T1}", {"updates": {"DueDate": "2026-11-13"}}),
    "PPM Express got exactly the proposed change", str(fake.writes[-1:]))
 rc, o, e = kp("actions", "apply", "1")
@@ -220,6 +230,71 @@ ok(d2["proposals"][3]["args"]["fields"] == {"FinishDate": "2026-11-20", "Assigne
    "with no tasks to copy, the due date goes in FinishDate (PPMX_TASK_DUE_FIELD changes it)", str(d2["proposals"][3]))
 rc, o, e = kp("actions", str(minutes), "--project", "Mobile app")
 ok(o.count("in Mobile app") == 4, "--project puts every action in one project", o)
+
+# ---- what the review asked for: done actions, words in the action, the current file, edited files, lost replies --------
+minutes2 = tmp / "2026-11-04-standup.md"
+minutes2.write_text("""## Actions
+- [action] Set up the beta feedback form | owner: owner | due: 18-Nov-2026 | project: mobile-app | source: [PM]
+- [action] Finish the design review | owner: owner | due: no date | project: network-refresh | source: [PM] | status: done
+- [action] Retire the old firewall | owner: owner | due: no date | project: network-refresh | source: [Eng] | status: done
+- [action] Investigate dropped packets on the guest VLAN | owner: owner | due: no date | project: network-refresh | source: [Eng]
+""")
+ok([a["status"] for a in A.parse(minutes2.read_text())] == ["proposed"] * 4
+   and A.parse("- [action] Confirmed: book the hall | owner: PM | source: [PM]")[0]["status"] == "proposed",
+   "words in the action itself (dropped packets, confirmed) never set its status")
+rc, o, e = kp("actions", str(minutes2), PPMX_TODAY="2026-11-04")
+ok(rc == 0 and "4 action(s)" in o and "left out" not in o, "an action about dropped packets isn't left out", o + e)
+ok('2. already done in PPM Express as the task "Design review"' in o, "a done action PPM Express has finished: nothing", o)
+ok("3. done, per the minutes; no PPM Express task to mark" in o, "a done action never becomes a new task", o)
+ok('4. create the task "Investigate dropped packets on the guest VLAN" in Network refresh: assigned to you' in o,
+   "an open action about dropped packets becomes a task", o)
+P2 = WORK / "actions-2026-11-04-standup.json"
+later = time.time() + 3600
+os.utime(WORK / "actions-pending-actions.json", (later, later))
+rc, o, e = kp("actions", "show")
+ok("in actions-2026-11-04-standup.json" in o, "show and apply use the proposals last made, not the newest file", o)
+n0 = len(fake.writes)
+saved = P2.read_text()
+for change, why in (({"tool": "delete_task"}, "another tool"), ({"tool": "update_task"}, "a tool that isn't its kind's"),
+                    ({"args": {"project_id": F.A1, "name": "x", "fields": {}, "parent_id": F.T1}}, "arguments it never has")):
+    d = json.loads(saved)
+    d["proposals"][3].update(change)
+    P2.write_text(json.dumps(d))
+    rc, o, e = kp("actions", "apply", "4")
+    ok(rc == 2 and "isn't a task change" in e and len(fake.writes) == n0, f"an edited proposal with {why} is refused", e)
+P2.write_text(saved)
+cfg = kit / ".install/shared/morning/config"
+base_cfg = cfg.read_text()
+for line, why in (("export PPMX_WRITES='off'  # read only for now", "export, single quotes, and a comment"),
+                  ("PPMX_WRITES=off # read only", "a comment after the value"),
+                  ('PPMX_WRITES="on', "a line Kit can't read counts as off")):
+    cfg.write_text(base_cfg + line + "\n")
+    rc, o, e = kp("actions", "apply", "4")
+    ok(rc == 1 and len(fake.writes) == n0, f"PPMX_WRITES in Kit's config, {why}: nothing is sent", o + e)
+cfg.write_text(base_cfg + "PPMX_WRITES=on  # changes allowed\n")
+rc, o, e = kp("actions", "apply", "4")
+ok(rc == 0 and len(fake.writes) == n0 + 1 and fake.writes[-1][2] == f"Projects/{F.A1}/Tasks",
+   "PPMX_WRITES=on with a comment: the change is made", o + e)
+cfg.write_text(base_cfg)
+rc, o, e = kp("actions", "apply", "1", PPMX_TOKEN=LOST)
+ok(rc == 1 and "accepted the change but" in e and json.loads(P2.read_text())["proposals"][0]["status"] == "unconfirmed",
+   "a change PPM Express may have made, unconfirmed, is marked so", e)
+n1 = len(fake.writes)
+rc, o, e = kp("actions", "apply", "1")
+ok(rc == 2 and "apply 1 --again" in e and len(fake.writes) == n1, "an unconfirmed change isn't sent again on its own", e)
+rc, o, e = kp("actions", "show")
+ok('1. NOT CONFIRMED (check PPM Express): create the task "Set up the beta feedback form"' in o, "show flags it", o)
+rc, o, e = kp("actions", str(minutes2), PPMX_TODAY="2026-11-04")
+ok("1. NOT CONFIRMED" in o and '4. already in PPM Express as the task "Investigate dropped packets' in o,
+   "proposing again keeps it unconfirmed, and finds the task that was made", o)
+rc, o, e = kp("actions", "apply", "1")
+ok(rc == 2 and len(fake.writes) == n1, "so it still isn't sent twice", e)
+rc, o, e = kp("actions", "apply", "1", "--again")
+ok(rc == 0 and len(fake.writes) == n1 + 1 and fake.writes[-1][2] == f"Projects/{F.A3}/Tasks",
+   "--again sends it, once you've checked", o + e)
+rc, o, e = kp("actions", str(minutes2), PPMX_TODAY="2026-11-04")
+ok('1. already in PPM Express as the task "Set up the beta feedback form"' in o, "and then it's found there", o)
+
 rc, o, e = kp("actions", "map", "x", "No such project")
 ok(rc == 1 and "no project" in e, "mapping to a project that doesn't exist is refused")
 (tmp / "empty.md").write_text("# Minutes\n\nNo actions.\n")

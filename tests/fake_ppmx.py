@@ -10,8 +10,9 @@ fake has its own copy of the data, so one test's writes never leak into another'
   python3 tests/fake_ppmx.py [--port 18080]     serve http://127.0.0.1:PORT/@test/v1.0 until stopped
 
 Tokens: token-alex-0001 (Alex: read and write scopes), token-blake-0002 (Blake: read only, so a change
-gets 403), token-busy-0003 (answers 429 once per path, then like Alex). Anything else gets 401. Alex's
-project list comes back in two pages (nextLink).
+gets 403), token-busy-0003 (answers 429 once per path, then like Alex), token-lost-0004 (like Alex, but a
+change is recorded and then lost, and the reply isn't JSON, so the caller can't confirm it). Anything else
+gets 401. Alex's project list comes back in two pages (nextLink).
 """
 import argparse
 import copy
@@ -22,7 +23,8 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PREFIX = "/@test/v1.0"
-TOKENS = {"token-alex-0001": "alex", "token-blake-0002": "blake", "token-busy-0003": "busy"}
+TOKENS = {"token-alex-0001": "alex", "token-blake-0002": "blake", "token-busy-0003": "busy",
+          "token-lost-0004": "lost"}
 ME = {"alex": {"logonAccount": "alex", "email": "alex@example.com", "displayName": "Alex Rivera"},
       "blake": {"logonAccount": "blake", "email": "blake@example.com", "displayName": "Blake Chen"}}
 SCOPES = {"alex": ["Read Projects", "Write Projects", "Read Resources", "Write Resources"],
@@ -149,6 +151,9 @@ def make_handler(fake):
                     self.send(429, {"error": "slow down"}, [("Retry-After", "0")])
                     return None
                 who = "alex"
+            self.lost = who == "lost"
+            if self.lost:
+                who = "alex"
             return who, path, urllib.parse.parse_qs(url.query)
 
         # ---- reads
@@ -222,6 +227,14 @@ def make_handler(fake):
                 return self.send(403, {"error": "the token has no write scope"})
             with fake.lock:
                 fake.writes.append((who, method, path, body))
+            if self.lost:                               # taken, then lost; the reply is a gateway's page
+                page = b"<html>502 Bad Gateway</html>"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(page)))
+                self.end_headers()
+                self.wfile.write(page)
+                return None
             parts = path.split("/")
             if method == "POST" and len(parts) == 4 and parts[0] == "Projects" and parts[2:] == ["Tasks", "bulk"]:
                 if self.project(who, parts[1]) is None:

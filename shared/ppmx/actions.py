@@ -60,9 +60,9 @@ def parse(text):
             key, sep, value = p.partition(":")
             if sep:
                 fields[key.strip().lower()] = value.strip()
-        low = line.lower()
-        status = ("dropped" if re.search(r"\bdropped\b", low) else
-                  "confirmed" if re.search(r"\bconfirmed\b", low) else "proposed")
+        tail = " | ".join(parts[1:]).lower()                # after the action: its words never set the status
+        status = ("dropped" if re.search(r"\bdropped\b", tail) else
+                  "confirmed" if re.search(r"\bconfirmed\b", tail) else "proposed")
         done = bool(re.search(r"\b(done|complete|completed|finished)\b", fields.get("status", "").lower()))
         what = parts[0].strip()
         if not what:
@@ -99,11 +99,12 @@ def find_project(projects, slug, project_map, given=None):
     return None, f"no PPM Express project clearly matches {slug!r}"
 
 
-def best_task(tasks, action):
-    """(task, likeness) for the open task most like the action, or (None, 0)."""
+def best_task(tasks, action, finished=False):
+    """(task, likeness) for the open task most like the action (with finished=True, the finished task most
+    like it), or (None, 0)."""
     best, score = None, 0.0
     for t in tasks:
-        if is_done(t) is True or t.get("sourceType"):          # finished, or synced from Jira or Azure DevOps
+        if (is_done(t) is True) != finished or t.get("sourceType"):   # synced from Jira or Azure DevOps: not here
             continue
         s = likeness(action, text_of(pick(t, "name")[1]))
         if s > score:
@@ -112,7 +113,9 @@ def best_task(tasks, action):
 
 
 def _assignee(task):
-    return text_of(pick(task, "assignee")[1]).strip()
+    """Whether someone is assigned, in whatever form PPM Express gives it back (a person, or the reference
+    a change sent: {"search": ...} or {"id": ...})."""
+    return pick(task, "assignee")[1] is not None
 
 
 def propose_one(a, project, how, tasks, me, due_key):
@@ -123,6 +126,11 @@ def propose_one(a, project, how, tasks, me, due_key):
             "project": {"id": pid, "name": pname, "how": how}, "status": "proposed"}
     mine = a["owner"].strip().lower() in ("owner", "me", "you", "") and bool(me)
     task, score = best_task(tasks, a["action"])
+    if a["done"] and not task:                          # done already: never a new task for it
+        done, _ = best_task(tasks, a["action"], finished=True)
+        says = (f"already done in PPM Express as the task \"{text_of(pick(done, 'name')[1])}\"" if done
+                else "done, per the minutes; no PPM Express task to mark")
+        return dict(base, kind="none", says=says)
     if task:
         fields, said = {}, []
         key = pick(task, "due")[0] or due_key
