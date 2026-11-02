@@ -5,7 +5,7 @@ What changed in each Kit release. The installed version is in
 morning brief summarizes the new entries once. Format: [Keep a Changelog](https://keepachangelog.com),
 versions follow [semantic versioning](https://semver.org).
 
-## [Unreleased]
+## [1.6.0] - 2026-11-02
 
 ### Added
 - PPM Express (`shared/ppmx/`, version 0.2.0; a stub until a tenant's endpoints are confirmed): one MCP
