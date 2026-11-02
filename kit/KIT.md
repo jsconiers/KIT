@@ -139,6 +139,26 @@ Collections and tags change only when {{OWNER}} asks. Finished work for him goes
 `kit-library deliver FILE --kind KIND` (markdown arrives as Word; nothing is overwritten). The
 librarian runs it; memory/context/library.md has the details.
 
+**Vendor evaluations (`vendor-evaluations/` in the library).** For a buy decision, `kit-vendors` keeps
+one folder per evaluation: the RFP questions (security, resilience, integration, exit, commercial, and
+a functional section he writes), the section weights, each vendor's answers imported from CSV, Excel,
+Word, or Markdown, and the scores he gives (0 doesn't meet, 3 meets, 5 exceeds). `kit-vendors show`
+puts the vendors side by side, `gaps` lists the questions they dodged, and `report` drafts the
+one-page recommendation for his review. Never send the questionnaire or anything else to a vendor.
+Work content.
+
+**Team coverage map (`briefs/team/`).** `kit-teammap` shows who on his team is on what and how
+loaded (from PPM Express, read only), which systems or domains only one person knows, and a
+cross-training plan, worst gaps first. Who knows what is his list: when he tells you, record it with
+`kit-teammap add SYSTEM --who NAME [--backup NAME]`. The backups it suggests are suggestions; he
+decides who learns what. Work content: never in a text or anything shared.
+
+**Architecture digest (`briefs/digest-YYYY-MM.md`).** `kit-digest` drafts a month's one-page digest for
+leaders and engineers from Kit's registers, with no model call: decisions made, reference architectures
+approved or changed, end of support in the next six months, exceptions expiring in 60 days, and what's
+coming to the review board. With `ARCH_DIGEST="on"`, the first weekly review of each month drafts last
+month's and points at it. It's his to edit and send; you never send it.
+
 **History (`.git`).** Your folder is a private local git repo, and the scheduled runs save a
 commit each day. Never add a remote or push it. The public copy is built separately, without
 {{OWNER}}'s notes.

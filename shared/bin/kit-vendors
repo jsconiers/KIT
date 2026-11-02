@@ -1,0 +1,1394 @@
+#!/usr/bin/env python3
+"""kit-vendors: the vendor evaluation desk for a buy decision: the RFP questions, a weighted scoring sheet, answers side by side, dodged questions, failed must-haves, and a one-page recommendation.
+
+  kit-vendors new SLUG --title T [--vendors "A, B"] [--due DATE]
+                                     start an evaluation with the default questions and weights
+  kit-vendors vendor SLUG NAME       add a vendor
+  kit-vendors questions SLUG [--csv FILE | --md FILE] [--force]
+                                     the questionnaire to send (Kit never sends it); a file that's
+                                     there already is kept unless --force
+  kit-vendors question SLUG add --section S "TEXT" [--must] [--id ID]
+  kit-vendors question SLUG remove ID
+  kit-vendors question SLUG must ID [on|off]
+                                     change the question set; mark or unmark a must-have
+  kit-vendors weights SLUG [SECTION=N ...]
+                                     show the section weights, or set them
+  kit-vendors import SLUG VENDOR FILE
+                                     a vendor's answers from CSV, XLSX, a Markdown table, or a DOCX
+                                     table, matched by question ID, else by the question's text
+  kit-vendors score SLUG VENDOR QID 0-5 [--note T]
+  kit-vendors score SLUG VENDOR --file FILE.csv
+                                     scores (columns ID, Score, Note); "clear" removes one
+  kit-vendors show SLUG [--answers] [--section S] [--json]
+                                     side by side: section scores out of 100, the weighted total,
+                                     the rank, failed must-haves, unscored questions; --answers adds
+                                     each vendor's answer to each question
+  kit-vendors gaps SLUG [VENDOR] [--json]
+                                     the questions a vendor dodged
+  kit-vendors report SLUG [--write]  the one-page recommendation, drafted for your review; --write
+                                     saves report-YYYY-MM-DD.md in the evaluation's folder
+  kit-vendors list [--json]          every evaluation
+  kit-vendors due [--days N] [--json]
+                                     evaluations with answers due within N days (default 7) or late
+
+Where: one folder per evaluation in vendor-evaluations/ in the library root (memory/context/library.md),
+or in the folder a "Vendor evaluations" line in memory/context/decisions.md names (a full path, or one
+relative to the library root). Each folder holds eval.json, a copy of every answers file imported
+(answers/; for a file with text anywhere in it that looks like a credential, the rows read, with it
+removed, instead), and the reports; the files are readable only by you. With neither set, it stops and
+says so: vendors' answers are work documents and stay out of Kit's own folder. A later import adds to the
+answers; a blank never replaces an answer that's there.
+
+Sections: security, resilience, integration, exit, commercial, and functional (empty until you add the
+questions only you can write). Scores: 0 doesn't meet, 3 meets, 5 exceeds. A section's score is the
+mean of its scored questions times 20; the total is the weighted mean of the section scores (sections
+with nothing scored yet are left out, and the total is marked partial). A vendor fails a must-have it
+scored 0 on, or left unanswered once it has sent answers, and ranks after every vendor that passes.
+
+Dodged: no answer, N/A, TBD, "available on request", "see attached", "roadmap", "contact sales", a bare
+yes or no to a question that asks how or what, a very short answer to a long question, and the same
+answer pasted on three or more questions. Text in answers that looks like a credential is removed on
+import. Deterministic, no model call; work content, tagged [work]. Nothing is sent to anyone.
+Dates: DD-Mmm-YYYY or YYYY-MM-DD. KIT_TODAY sets the day (for tests).
+"""
+import argparse
+import csv
+import datetime as dt
+import difflib
+import html
+import io
+import json
+import os
+import pathlib
+import re
+import shutil
+import sys
+import xml.etree.ElementTree as ET
+import zipfile
+
+BIN = pathlib.Path(__file__).resolve().parent
+for cand in (BIN.parent, pathlib.Path(os.path.expanduser(os.environ.get("KIT_DIR", "~/Claude/Agents/kit"))) / ".install/shared"):
+    if (cand / "kit_compliance.py").exists():
+        sys.path.insert(0, str(cand))
+        break
+import kit_compliance as kc  # noqa: E402
+
+try:   # the credential patterns Kit's records use, minus the loose ones ("password: 12 characters" is an answer)
+    import kit_records
+    STRONG = [(re.compile(p), w) for p, w in kit_records.SECRET_PATTERNS
+              if w not in ("credential assignment", "account or card number", "Social Security number")]
+except ImportError:  # pragma: no cover
+    STRONG = []
+
+PROG = "kit-vendors"
+SECTIONS = [  # key, name, ID prefix, default weight
+    ("security", "Security", "SEC", 25),
+    ("resilience", "Resilience", "RES", 20),
+    ("integration", "Integration", "INT", 15),
+    ("exit", "Exit", "EXIT", 10),
+    ("commercial", "Commercial", "COM", 15),
+    ("functional", "Functional", "FUN", 15),
+]
+NAME = {k: n for k, n, _, _ in SECTIONS}
+PREFIX = {k: p for k, _, p, _ in SECTIONS}
+# The default question set: (section, must-have, text). The functional section is yours to write.
+QUESTIONS = [
+    ("security", True, "Describe how customer data is encrypted at rest and in transit, including key management "
+                       "and who holds the keys."),
+    ("security", True, "Describe how users sign in: single sign-on (SAML or OpenID Connect), multi-factor "
+                       "authentication, and how access is removed when someone leaves."),
+    ("security", True, "Which independent assurance reports do you hold (for example SOC 2 Type II or ISO 27001)? "
+                       "Give the scope, the auditor, and the date of the latest report."),
+    ("security", False, "How do you find and fix vulnerabilities in the product and its dependencies? State your "
+                        "patch times by severity."),
+    ("security", False, "Describe how you detect and respond to security incidents, and how quickly you tell "
+                        "customers about an incident that affects their data."),
+    ("security", False, "Where is customer data stored and processed (countries and providers), and which "
+                        "subprocessors can reach it?"),
+    ("security", False, "How is your staff's access to customer data and production systems controlled, logged, "
+                        "and reviewed?"),
+    ("security", False, "Can we send audit logs of user and administrator activity to our own security "
+                        "monitoring? Describe the format and how often."),
+    ("resilience", True, "What recovery time (RTO) and recovery point (RPO) do you commit to, and when and how were "
+                         "they last tested?"),
+    ("resilience", False, "What availability does the service level agreement commit to, how is it measured, and "
+                          "what credits apply when you miss it?"),
+    ("resilience", False, "Describe the architecture's redundancy: regions, availability zones, and any single "
+                          "point of failure."),
+    ("resilience", False, "How are backups taken, protected, and restored, and how often do you test a restore?"),
+    ("resilience", False, "Give your availability for the last 12 months and your three largest incidents, with "
+                          "their causes."),
+    ("resilience", False, "How do you handle capacity and peak load? Describe any limits per customer."),
+    ("integration", False, "Describe the APIs (REST, events, files): standards, authentication, rate limits, and "
+                           "versioning."),
+    ("integration", False, "How do you tell customers about breaking changes, and how long is a deprecated API "
+                           "supported?"),
+    ("integration", False, "Which identity, monitoring, and ticketing products do you integrate with out of the box?"),
+    ("integration", False, "Can the service connect privately to our network (private link, VPN, an on-premises "
+                           "agent)? Describe the options."),
+    ("integration", False, "Describe the data model, and how we can load and extract data in bulk."),
+    ("exit", True, "How do we export all of our data at the end of the contract? Name the formats, how long it "
+                   "takes, and any cost."),
+    ("exit", True, "How and when is our data deleted after we leave, and what confirmation do you give?"),
+    ("exit", False, "What help do you give during a move to another provider, and on what terms?"),
+    ("exit", False, "Which parts of the product have no standard equivalent, and how would we replace them?"),
+    ("commercial", False, "Describe the pricing model and what drives cost (users, volume, environments), with a "
+                          "three-year estimate for our scope."),
+    ("commercial", False, "What price increases are allowed at renewal, and how are they capped?"),
+    ("commercial", False, "Which support tiers do you offer, with response times by severity and hours of cover?"),
+    ("commercial", False, "What are the contract term, the termination rights, and the notice periods?"),
+    ("commercial", False, "Give two references from customers of a similar size and industry."),
+]
+SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{1,59}$")
+QID = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,9}-?\d{1,4}$")
+CLOSE = 5.0          # points: a closer margin than this is a close call
+REMOVED = "[removed: looked like a credential]"
+WORK = "[work]"
+
+# What counts as a dodged answer.
+DODGES = [
+    ("N/A", re.compile(r"^\W*(n\s*/\s*a|na|not applicable)\W*$", re.I)),
+    ("TBD", re.compile(r"\b(tbd|tbc|to be (determined|confirmed|defined|advised|provided))\b", re.I)),
+    ("available on request", re.compile(r"\b(up)?on request\b|\bavailable under (an )?nda\b|"
+                                        r"\b(once|after|on) (signing )?(an |the )?nda\b", re.I)),
+    ("see attached", re.compile(r"\b(see|refer to|please refer to)\s+(the\s+)?(attached|attachment|enclosed|"
+                                r"appendix|our\s+(website|web site|documentation|docs|whitepaper|white paper|"
+                                r"trust\s+(center|centre|portal)|security\s+(page|portal)))\b", re.I)),
+    ("roadmap", re.compile(r"\broad\s?map\b|\bfuture release\b|\bcoming soon\b|\bnext release\b|"
+                           r"\bplanned for (q[1-4]|20\d\d|next|later|a future)\b", re.I)),
+    ("contact sales", re.compile(r"\b(contact|ask|speak (to|with)|talk to|discuss with)\s+(our |your )?"
+                                 r"(sales|account (manager|executive|team|rep|representative)|"
+                                 r"customer success)\b", re.I)),
+]
+ASKS_HOW = re.compile(r"\b(describe|explain|how|what|which|where|when|why|give|list|name|outline|detail|state)\b",
+                      re.I)
+# A bare yes or no, as words: "Yes.", "Yes, we do", "Compliant".
+BARE = {"yes", "no", "y", "n", "true", "false", "ok", "correct", "confirmed", "yes we do", "we do", "no we don t",
+        "we don t", "yes we can", "we can", "supported", "yes supported", "fully supported", "available",
+        "yes available", "compliant", "fully compliant", "yes compliant", "yes fully"}
+LONG_Q, SHORT_A = 18, 5           # words: a question this long deserves more than this
+UNANSWERED = re.compile(r"^[\s\-.?_/]*$")
+
+
+def die(msg):
+    sys.exit(f"{PROG}: {msg}")
+
+
+def today():
+    return kc.today()
+
+
+def fmt(d):
+    return kc.fmt(d)
+
+
+def iso_fmt(s):
+    d = parse(s)
+    return fmt(d) if d else ""
+
+
+def parse(s):
+    if isinstance(s, dt.date):
+        return s
+    return kc.parse_date(s) if s else None
+
+
+def clip(s, n):
+    s = " ".join(str(s or "").split())
+    return s if len(s) <= n else s[: n - 1].rstrip() + "…"
+
+
+def words(s):
+    return re.findall(r"[a-z0-9]+", (s or "").lower())
+
+
+def scrub(text):
+    """The text with anything that looks like a credential removed, and how many were."""
+    n = 0
+    for rx, _ in STRONG:
+        text, k = rx.subn(REMOVED, text)
+        n += k
+    return text, n
+
+
+# ------------------------------------------------------------------ where evaluations live
+def root():
+    path = kc.setup_path(None, "Vendor evaluations", "vendor-evaluations", setup="decisions.md")
+    if not path:
+        die("no place for evaluations: set the library root in memory/context/library.md, or a full path for "
+            "\"Vendor evaluations\" in memory/context/decisions.md")
+    return path
+
+
+def folder(slug):
+    if not SLUG.match(slug or ""):
+        die(f"{slug!r} isn't a slug: lowercase letters, digits, and hyphens, 2 to 60 characters")
+    return root() / slug
+
+
+def load(slug):
+    path = folder(slug) / "eval.json"
+    if not path.exists():
+        die(f"no evaluation {slug!r} in {root()} (kit-vendors list shows them)")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as e:
+        die(f"can't read {path}: {e}")
+    if not isinstance(data, dict) or not isinstance(data.get("questions"), list):
+        die(f"{path} isn't an evaluation file")
+    for k in ("vendors", "answers", "scores"):
+        data.setdefault(k, [] if k == "vendors" else {})
+    data.setdefault("weights", {k: w for k, _, _, w in SECTIONS})
+    return data
+
+
+def save(data):
+    kc.write(folder(data["slug"]) / "eval.json", json.dumps(data, indent=1, ensure_ascii=False) + "\n")
+
+
+def vendor_of(data, name):
+    n = (name or "").strip().lower()
+    for v in data["vendors"]:
+        if v["name"].lower() == n:
+            return v
+    names = ", ".join(v["name"] for v in data["vendors"]) or "none yet"
+    die(f"no vendor {name!r} in {data['slug']} (vendors: {names})")
+
+
+def norm_qid(q):
+    m = re.match(r"^\s*([A-Za-z]+)\s*-?\s*0*(\d+)\s*$", q or "")
+    return f"{m.group(1).upper()}-{int(m.group(2))}" if m else (q or "").strip().upper()
+
+
+def question_of(data, qid):
+    want = norm_qid(qid)
+    for q in data["questions"]:
+        if norm_qid(q["id"]) == want:
+            return q
+    die(f"no question {qid} in {data['slug']} (kit-vendors questions {data['slug']} lists them)")
+
+
+def section_key(text):
+    t = (text or "").strip().lower()
+    for k, n, p, _ in SECTIONS:
+        if t in (k, n.lower(), p.lower()) or (len(t) >= 3 and k.startswith(t)):
+            return k
+    die(f"no section {text!r}: use " + ", ".join(k for k, _, _, _ in SECTIONS))
+
+
+def next_qid(data, section):
+    prefix = PREFIX[section]
+    top = 0
+    for q in data["questions"]:
+        m = re.match(re.escape(prefix) + r"-(\d+)$", q["id"])
+        if m:
+            top = max(top, int(m.group(1)))
+    return f"{prefix}-{top + 1:02d}"
+
+
+def refuse_credentials(text, what):
+    hits = kc.cred_hits(text)
+    if hits:
+        die(f"refused: the {what} has text that looks like a credential ({', '.join(hits)})")
+
+
+# ------------------------------------------------------------------ scoring
+def answer_text(data, vendor, qid):
+    a = data["answers"].get(vendor, {}).get(qid)
+    return (a.get("text") or "") if isinstance(a, dict) else ""
+
+
+def score_of(data, vendor, qid):
+    s = data["scores"].get(vendor, {}).get(qid)
+    return s.get("score") if isinstance(s, dict) else None
+
+
+def responded(data, vendor):
+    return bool(data["answers"].get(vendor))
+
+
+def unanswered(text):
+    return bool(UNANSWERED.match(text or ""))
+
+
+def results(data):
+    """Per vendor: section scores, the weighted total, partial or not, failed must-haves, unscored and
+    unanswered questions, and the rank."""
+    out = []
+    weights = data.get("weights") or {}
+    for v in data["vendors"]:
+        name = v["name"]
+        secs, unscored, fails, unans = {}, [], [], []
+        for key, _, _, _ in SECTIONS:
+            qs = [q for q in data["questions"] if q["section"] == key]
+            got = [score_of(data, name, q["id"]) for q in qs]
+            scored = [s for s in got if s is not None]
+            secs[key] = round(sum(scored) / len(scored) * 20, 1) if scored else None
+            unscored += [q["id"] for q, s in zip(qs, got) if s is None]
+        for q in data["questions"]:
+            text = answer_text(data, name, q["id"])
+            if responded(data, name) and unanswered(text):
+                unans.append(q["id"])
+            if q.get("must"):
+                s = score_of(data, name, q["id"])
+                if s == 0:
+                    fails.append((q["id"], "scored 0"))
+                elif s is None and responded(data, name) and unanswered(text):
+                    fails.append((q["id"], "left unanswered"))
+        num = sum(float(weights.get(k, 0)) * s for k, s in secs.items() if s is not None)
+        den = sum(float(weights.get(k, 0)) for k, s in secs.items() if s is not None)
+        total = round(num / den, 1) if den > 0 else None
+        partial = total is not None and any(
+            q["id"] in unscored for q in data["questions"] if float(weights.get(q["section"], 0)) > 0)
+        out.append({"name": name, "sections": secs, "total": total, "partial": partial, "fails": fails,
+                    "unscored": unscored, "unanswered": unans, "responded": responded(data, name),
+                    "answered": sum(1 for q in data["questions"] if not unanswered(answer_text(data, name, q["id"]))),
+                    "rank": None})
+    passing = sorted([r for r in out if r["total"] is not None and not r["fails"]],
+                     key=lambda r: (-r["total"], r["name"].lower()))
+    for i, r in enumerate(passing, 1):
+        r["rank"] = i
+    for r in out:
+        if r["fails"]:
+            r["rank"] = "out"
+    return out
+
+
+def ranked(res):
+    return sorted([r for r in res if isinstance(r["rank"], int)], key=lambda r: r["rank"])
+
+
+# ------------------------------------------------------------------ dodged answers
+def dodges(data, vendor):
+    """[(qid, why, answer)] for one vendor's answers, in question order."""
+    if not responded(data, vendor):
+        return []
+    answers = {q["id"]: answer_text(data, vendor, q["id"]) for q in data["questions"]}
+    same = {}
+    for qid, text in answers.items():
+        key = " ".join(words(text))
+        if len(key.split()) >= 4:
+            same.setdefault(key, []).append(qid)
+    sentences = {}
+    for qid, text in answers.items():
+        for s in set(" ".join(words(x)) for x in re.split(r"(?<=[.!?])\s+", text or "")):
+            if len(s.split()) >= 12:
+                sentences.setdefault(s, set()).add(qid)
+    out = []
+    for q in data["questions"]:
+        qid, text = q["id"], answers[q["id"]]
+        why = None
+        if unanswered(text):
+            why = "no answer"
+        else:
+            for label, rx in DODGES:
+                if rx.search(text):
+                    why = label
+                    break
+        if not why and " ".join(words(text)) in BARE and ASKS_HOW.search(q["text"]):
+            why = "a bare yes or no to a question that asks how or what"
+        if not why and len(words(q["text"])) >= LONG_Q and len(words(text)) <= SHORT_A:
+            why = f"{len(words(text))} word{'s' if len(words(text)) != 1 else ''} for a long question"
+        if not why:
+            key = " ".join(words(text))
+            if len(same.get(key, [])) >= 3:
+                why = f"the same answer as {len(same[key]) - 1} other questions"
+            else:
+                for s, qids in sentences.items():
+                    if len(qids) >= 3 and qid in qids and len(s.split()) >= 0.6 * len(words(text)):
+                        why = f"boilerplate pasted on {len(qids)} questions"
+                        break
+        if why:
+            out.append((qid, why, text))
+    return out
+
+
+# ------------------------------------------------------------------ reading tables from files
+def local(tag):
+    return tag.rsplit("}", 1)[-1]
+
+
+def safe_xml(data, what):
+    if len(data) > 50 * 1024 * 1024:
+        die(f"{what} is too large to read")
+    if b"<!DOCTYPE" in data or b"<!ENTITY" in data:
+        die(f"{what} has a document type declaration, which an Office file never needs; not read")
+    try:
+        return ET.fromstring(data)
+    except ET.ParseError as e:
+        die(f"{what} isn't valid XML: {e}")
+
+
+def zip_part(z, name, what):
+    try:
+        info = z.getinfo(name)
+    except KeyError:
+        return None
+    if info.file_size > 50 * 1024 * 1024:
+        die(f"{what}: {name} is too large to read")
+    return safe_xml(z.read(name), f"{what} ({name})")
+
+
+def col_index(ref):
+    m = re.match(r"([A-Z]+)", ref or "")
+    if not m:
+        return None
+    n = 0
+    for ch in m.group(1):
+        n = n * 26 + ord(ch) - 64
+    return n - 1
+
+
+def xlsx_tables(path):
+    """Each worksheet's rows, as lists of cell text."""
+    what = path.name
+    try:
+        z = zipfile.ZipFile(path)
+    except (zipfile.BadZipFile, OSError) as e:
+        die(f"{what} isn't a readable XLSX file ({e})")
+    with z:
+        shared = []
+        sst = zip_part(z, "xl/sharedStrings.xml", what)
+        if sst is not None:
+            for si in sst:
+                if local(si.tag) != "si":
+                    continue
+                parts = []
+                for child in si:
+                    if local(child.tag) == "t":
+                        parts.append(child.text or "")
+                    elif local(child.tag) == "r":
+                        parts += [t.text or "" for t in child if local(t.tag) == "t"]
+                shared.append("".join(parts))
+        wb = zip_part(z, "xl/workbook.xml", what)
+        rels = zip_part(z, "xl/_rels/workbook.xml.rels", what)
+        if wb is None:
+            die(f"{what} has no workbook; is it an XLSX file?")
+        targets = {}
+        for r in (rels if rels is not None else []):
+            targets[r.get("Id")] = r.get("Target") or ""
+        sheets = []
+        for el in wb.iter():
+            if local(el.tag) == "sheet":
+                rid = next((v for k, v in el.attrib.items() if local(k) == "id"), None)
+                t = targets.get(rid, "")
+                if t:
+                    sheets.append(t.lstrip("/") if t.startswith("/") else "xl/" + t)
+        tables = []
+        for name in sheets:
+            sheet = zip_part(z, name, what)
+            if sheet is None:
+                continue
+            rows = []
+            for row in sheet.iter():
+                if local(row.tag) != "row":
+                    continue
+                cells = {}
+                for c in row:
+                    if local(c.tag) != "c":
+                        continue
+                    i = col_index(c.get("r"))
+                    i = len(cells) if i is None else i
+                    kind = c.get("t")
+                    v = next((x.text or "" for x in c if local(x.tag) == "v"), "")
+                    if kind == "s":
+                        try:
+                            text = shared[int(v)]
+                        except (ValueError, IndexError):
+                            text = ""
+                    elif kind == "inlineStr":
+                        text = "".join(t.text or "" for t in c.iter() if local(t.tag) == "t")
+                    elif kind == "b":
+                        text = "TRUE" if v == "1" else "FALSE"
+                    else:
+                        text = v
+                        if re.fullmatch(r"-?\d+\.0", text):
+                            text = text[:-2]
+                    cells[i] = text
+                if cells:
+                    rows.append([cells.get(i, "") for i in range(max(cells) + 1)])
+            tables.append(rows)
+        return tables
+
+
+def docx_tables(path):
+    what = path.name
+    try:
+        z = zipfile.ZipFile(path)
+    except (zipfile.BadZipFile, OSError) as e:
+        die(f"{what} isn't a readable DOCX file ({e})")
+    with z:
+        doc = zip_part(z, "word/document.xml", what)
+    if doc is None:
+        die(f"{what} has no document body; is it a DOCX file?")
+    tables = []
+    for tbl in doc.iter():
+        if local(tbl.tag) != "tbl":
+            continue
+        rows = []
+        for tr in tbl:
+            if local(tr.tag) != "tr":
+                continue
+            cells = []
+            for tc in tr:
+                if local(tc.tag) != "tc":
+                    continue
+                paras = []
+                for p in tc.iter():
+                    if local(p.tag) == "p":
+                        paras.append("".join(t.text or "" for t in p.iter() if local(t.tag) == "t"))
+                cells.append("\n".join(x for x in paras if x.strip()))
+                span = 1
+                for el in tc.iter():
+                    if local(el.tag) == "gridSpan":
+                        val = next((v for k, v in el.attrib.items() if local(k) == "val"), "1")
+                        span = int(val) if val.isdigit() else 1
+                        break
+                cells += [""] * (span - 1)
+            rows.append(cells)
+        tables.append(rows)
+    return tables
+
+
+def md_tables(text):
+    tables, cur, lines = [], None, text.splitlines()
+    for i, ln in enumerate(lines):
+        cs = kc.cells(ln)
+        if cs is None:
+            cur = None
+            continue
+        if kc.is_sep(cs):
+            continue
+        if cur is None:
+            cur = []
+            tables.append(cur)
+        cur.append([c.replace("\\|", "|").replace("<br>", "\n").replace("<br/>", "\n") for c in cs])
+    return tables
+
+
+def csv_tables(path):
+    text = path.read_text(encoding="utf-8-sig", errors="replace")
+    try:
+        dialect = csv.Sniffer().sniff(text[:4096], delimiters=",;\t")
+    except csv.Error:
+        dialect = csv.excel
+    rows = list(csv.reader(io.StringIO(text), dialect))
+    if rows and len(rows[0]) <= 1 and dialect is not csv.excel:
+        rows = list(csv.reader(io.StringIO(text)))
+    return [rows]
+
+
+def tables_in(path):
+    if not path.is_file():
+        die(f"no such file: {path}")
+    ext = path.suffix.lower()
+    if ext in (".csv", ".tsv", ".txt"):
+        return csv_tables(path)
+    if ext in (".xlsx", ".xlsm"):
+        return xlsx_tables(path)
+    if ext == ".docx":
+        return docx_tables(path)
+    if ext in (".md", ".markdown"):
+        return md_tables(path.read_text(encoding="utf-8-sig", errors="replace"))
+    die(f"can't read {path.name}: use CSV, XLSX, a Markdown table, or a DOCX table")
+
+
+def head_norm(h):
+    return " ".join(re.sub(r"[^a-z0-9#/]+", " ", (h or "").lower()).split())
+
+
+COLS = {
+    "id": re.compile(r"^(q(uestion)?\s*)?(id|ref|reference|no|number|#)$|^(req(uirement)?|item|q)\s*(id|no|#|ref)$"),
+    "question": re.compile(r"question|requirement|criteri|description"),
+    "answer": re.compile(r"answer|response|reply"),
+    "compliance": re.compile(r"complian|comply|meets|supported|y\s*/\s*n|yes\s*/\s*no"),
+    "comment": re.compile(r"comment|note|explanation|detail|remark"),
+    "score": re.compile(r"^score|rating|points|^mark"),
+}
+
+
+def header_map(row, wanted):
+    found = {}
+    for i, h in enumerate(row):
+        hn = head_norm(h)
+        if not hn:
+            continue
+        for key in wanted:
+            if key in found:
+                continue
+            if key == "question" and COLS["id"].match(hn):
+                continue
+            if COLS[key].search(hn):
+                found[key] = i
+                break
+    # With no Answer or Response column, a "Description" column the question didn't take is the vendor's text
+    # (Ref | Requirement | Compliance (Y/N) | Description). Next to a Response column it describes the question.
+    if "comment" in wanted and "answer" not in found and "comment" not in found:
+        for i, h in enumerate(row):
+            if i not in found.values() and re.search(r"descri", head_norm(h)):
+                found["comment"] = i
+                break
+    return found
+
+
+def find_rows(tables, need_any, wanted):
+    """The data rows of every table with a header that has an ID or a question column and one of
+    need_any, as dicts of the wanted columns."""
+    out = []
+    for rows in tables:
+        for hi, row in enumerate(rows[:30]):
+            cols = header_map(row, wanted)
+            if ("id" in cols or "question" in cols) and any(k in cols for k in need_any):
+                for r in rows[hi + 1:]:
+                    rec = {k: (r[i].strip() if i < len(r) else "") for k, i in cols.items()}
+                    if any(rec.values()):
+                        out.append(rec)
+                break
+    return out
+
+
+def match_question(data, rec, taken):
+    """(question, how) for one row: by ID, else by the question's text."""
+    if rec.get("id"):
+        want = norm_qid(rec["id"])
+        for q in data["questions"]:
+            if norm_qid(q["id"]) == want:
+                return q, "id"
+    text = " ".join(words(rec.get("question")))
+    if not text:
+        return None, None
+    best, best_r = None, 0.0
+    for q in data["questions"]:
+        if q["id"] in taken:
+            continue
+        qt = " ".join(words(q["text"]))
+        if qt == text:
+            return q, "text"
+        sm = difflib.SequenceMatcher(None, qt, text)
+        if sm.quick_ratio() >= 0.8:
+            r = sm.ratio()
+            if r > best_r:
+                best, best_r = q, r
+    return (best, "text") if best_r >= 0.8 else (None, None)
+
+
+# ------------------------------------------------------------------ commands
+def cmd_new(a):
+    path = folder(a.slug)
+    if (path / "eval.json").exists():
+        die(f"{a.slug} already exists in {root()}")
+    title = " ".join((a.title or "").split())
+    if not title:
+        die("new needs --title")
+    refuse_credentials(title, "title")
+    due = None
+    if a.due:
+        due = parse(a.due)
+        if not due:
+            die("--due must be DD-Mmm-YYYY or YYYY-MM-DD")
+    vendors = []
+    for n in re.split(r"[,;]", a.vendors or ""):
+        n = " ".join(n.split())
+        if n and n.lower() not in [v["name"].lower() for v in vendors]:
+            vendors.append({"name": n, "added": today().isoformat()})
+    qs, counts = [], {}
+    for sec, must, text in QUESTIONS:
+        counts[sec] = counts.get(sec, 0) + 1
+        qs.append({"id": f"{PREFIX[sec]}-{counts[sec]:02d}", "section": sec, "text": text, "must": must})
+    data = {"version": 1, "slug": a.slug, "title": title, "created": today().isoformat(),
+            "due": due.isoformat() if due else None, "weights": {k: w for k, _, _, w in SECTIONS},
+            "questions": qs, "vendors": vendors, "answers": {}, "scores": {}}
+    save(data)
+    print(f"{PROG}: started {a.slug} ({title}) in {path}: {len(qs)} questions, "
+          f"{sum(1 for q in qs if q['must'])} must-haves, {len(vendors)} vendor(s)"
+          + (f", answers due {fmt(due)}" if due else "") + ". [work]")
+    print(f"  Add the functional questions only you can write: {PROG} question {a.slug} add --section functional "
+          "\"...\"; then the questionnaire to send: " + f"{PROG} questions {a.slug} --csv FILE")
+    return 0
+
+
+def cmd_vendor(a):
+    data = load(a.slug)
+    name = " ".join(" ".join(a.name).split())
+    if not name:
+        die("vendor needs a name")
+    refuse_credentials(name, "vendor name")
+    if any(v["name"].lower() == name.lower() for v in data["vendors"]):
+        die(f"{name} is already in {a.slug}")
+    data["vendors"].append({"name": name, "added": today().isoformat()})
+    save(data)
+    print(f"{PROG}: added {name} to {a.slug} ({len(data['vendors'])} vendor(s))")
+    return 0
+
+
+def questionnaire_rows(data):
+    return [(q["id"], NAME[q["section"]], q["text"], "Yes" if q.get("must") else "") for q in data["questions"]]
+
+
+def cmd_questions(a):
+    data = load(a.slug)
+    rows = questionnaire_rows(data)
+    target = a.csv or a.md
+    if a.csv and a.md:
+        die("give --csv or --md, not both")
+    if target:
+        out = pathlib.Path(os.path.expanduser(target))
+        if out.exists() and not a.force:
+            die(f"{out} is there already; kept (--force replaces it)")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        if a.csv:
+            with open(str(out), "w", encoding="utf-8-sig", newline="") as f:   # the BOM tells Excel it's UTF-8
+                w = csv.writer(f)
+                w.writerow(["ID", "Section", "Question", "Must have", "Answer"])
+                for r in rows:
+                    w.writerow(list(r) + [""])
+        else:
+            lines = [f"# Questions for vendors: {data['title']}", ""]
+            if data.get("due"):
+                lines += [f"Please answer by {iso_fmt(data['due'])}.", ""]
+            lines += ["Answer each question in the Answer column and keep the IDs. A question marked must have is "
+                      "required.", "", "| ID | Section | Question | Must have | Answer |", "|---|---|---|---|---|"]
+            lines += [f"| {i} | {s} | {t.replace('|', '/')} | {m} | |" for i, s, t, m in rows]
+            out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        print(f"{PROG}: wrote {len(rows)} questions to {out}. Kit never sends it: check it, then send it yourself.")
+    else:
+        print(f"{PROG}: {data['title']} ({a.slug}): {len(rows)} questions [work]")
+        for key, name, _, _ in SECTIONS:
+            qs = [q for q in data["questions"] if q["section"] == key]
+            print(f"\n{name} (weight {data['weights'].get(key, 0)})")
+            if not qs:
+                print("  none yet" + (f": add yours with {PROG} question {a.slug} add --section {key} \"...\""
+                                      if key == "functional" else ""))
+            for q in qs:
+                print(f"  {q['id']:<8}{'[must] ' if q.get('must') else ''}{q['text']}")
+    if not any(q["section"] == "functional" for q in data["questions"]):
+        print(f"{PROG}: note: the functional section has no questions yet; it's yours to fill in", file=sys.stderr)
+    return 0
+
+
+def cmd_question(a):
+    data = load(a.slug)
+    rest = list(a.rest or [])
+    if a.action == "add":
+        if not a.section:
+            die("question add needs --section (security, resilience, integration, exit, commercial, functional)")
+        sec = section_key(a.section)
+        text = " ".join(" ".join(rest).split())
+        if len(text) < 8:
+            die("question add needs the question's text")
+        refuse_credentials(text, "question")
+        qid = a.id.strip().upper() if a.id else next_qid(data, sec)
+        if not QID.match(qid):
+            die(f"{qid!r} isn't a question ID like FUN-01")
+        if any(norm_qid(q["id"]) == norm_qid(qid) for q in data["questions"]):
+            die(f"{qid} is already a question in {a.slug}")
+        data["questions"].append({"id": qid, "section": sec, "text": text, "must": bool(a.must)})
+        order = [k for k, _, _, _ in SECTIONS]
+        data["questions"].sort(key=lambda q: order.index(q["section"]))
+        save(data)
+        print(f"{PROG}: added {qid} to {NAME[sec]}" + (" as a must-have" if a.must else "") + f" in {a.slug}")
+        return 0
+    if not rest:
+        die(f"question {a.action} needs a question ID")
+    q = question_of(data, rest[0])
+    if a.action == "remove":
+        data["questions"] = [x for x in data["questions"] if x["id"] != q["id"]]
+        dropped = 0
+        for book in (data["answers"], data["scores"]):
+            for v in book.values():
+                if v.pop(q["id"], None) is not None:
+                    dropped += 1
+        save(data)
+        print(f"{PROG}: removed {q['id']} from {a.slug}" + (f" with {dropped} answer(s) and score(s)" if dropped else ""))
+        return 0
+    flag = (rest[1].lower() if len(rest) > 1 else "on")
+    if flag not in ("on", "off", "yes", "no"):
+        die("question must ID takes on or off")
+    q["must"] = flag in ("on", "yes")
+    save(data)
+    print(f"{PROG}: {q['id']} is {'now' if q['must'] else 'no longer'} a must-have in {a.slug}")
+    return 0
+
+
+def cmd_weights(a):
+    data = load(a.slug)
+    if a.pairs:
+        new = dict(data["weights"])
+        for p in a.pairs:
+            m = re.match(r"^([A-Za-z]+)\s*=\s*(\d+(?:\.\d+)?)$", p.strip())
+            if not m:
+                die(f"{p!r}: give SECTION=N, for example security=30")
+            new[section_key(m.group(1))] = float(m.group(2)) if "." in m.group(2) else int(m.group(2))
+        if not any(float(v) > 0 for v in new.values()):
+            die("at least one section needs a weight above 0")
+        data["weights"] = new
+        save(data)
+    total = sum(float(v) for v in data["weights"].values())
+    print(f"{PROG}: weights for {a.slug}" + (" (saved)" if a.pairs else "") + f"; total {total:g}, so each counts its "
+          "share of that")
+    for key, name, _, _ in SECTIONS:
+        w = float(data["weights"].get(key, 0))
+        print(f"  {name:<12} {data['weights'].get(key, 0):>5}  ({w / total * 100:.0f}%)" if total else f"  {name}")
+    return 0
+
+
+COPY_HEADS = {"id": "ID", "question": "Question", "answer": "Answer", "compliance": "Compliance",
+              "comment": "Comments"}
+
+
+def credential_elsewhere(src):
+    """True when the file holds text that looks like a credential outside the table cells read: prose around a
+    Markdown table, or an Office file's paragraphs, headers, comments, and link targets. A file or part that can't
+    be checked counts as holding one, so the vendor's file is never kept unchecked."""
+    if src.suffix.lower() not in (".docx", ".xlsx", ".xlsm"):
+        return bool(scrub(src.read_text(encoding="utf-8-sig", errors="replace"))[1])
+    try:
+        with zipfile.ZipFile(src) as z:
+            for info in z.infolist():
+                if info.is_dir() or not info.filename.lower().endswith((".xml", ".rels", ".vml")):
+                    continue
+                if info.file_size > 50 * 1024 * 1024:
+                    return True
+                raw = z.read(info).decode("utf-8", errors="replace")
+                if scrub(raw)[1] or scrub(html.unescape(re.sub(r"<[^>]+>", "", raw)))[1]:
+                    return True
+    except Exception:
+        return True
+    return False
+
+
+def keep_private(path):
+    """The answers folder and the copy in it are readable only by you, like eval.json."""
+    if os.name != "nt":
+        os.chmod(str(path.parent), 0o700)
+        os.chmod(str(path), 0o600)
+
+
+def cmd_import(a):
+    data = load(a.slug)
+    v = vendor_of(data, a.vendor)
+    src = pathlib.Path(os.path.expanduser(a.file))
+    tables = tables_in(src)
+    recs = find_rows(tables, ("answer", "compliance", "comment"), ("id", "question", "answer", "compliance", "comment"))
+    if not recs:
+        die(f"{src.name} has no table with a question or ID column and an answer column")
+    # Text that looks like a credential anywhere in the file: then the copy kept is the rows read, with it removed,
+    # never the vendor's file itself.
+    hits = sum(scrub(c)[1] for rows in tables for row in rows for c in row)
+    found = hits or credential_elsewhere(src)
+    book = data["answers"].setdefault(v["name"], {})
+    taken, by, unmatched, blanks, kept = set(), {"id": 0, "text": 0}, [], 0, []
+    stamp = today().isoformat()
+    base, ext = f"{kc.slug(v['name'])}-{stamp}" + ("-scrubbed" if found else ""), (".csv" if found else
+                                                                                   src.suffix.lower())
+    copy = folder(a.slug) / "answers" / f"{base}{ext}"
+    n = 2
+    while copy.exists():
+        copy = copy.with_name(f"{base}-{n}{ext}")
+        n += 1
+    for rec in recs:
+        parts = []
+        for k in ("answer", "compliance", "comment"):
+            t = (rec.get(k) or "").strip()
+            if t and t not in parts:
+                parts.append(t)
+        text = scrub("; ".join(parts))[0]
+        q, how = match_question(data, rec, taken)
+        if not q:
+            if text and (rec.get("id") or rec.get("question")):
+                unmatched.append(scrub(rec.get("id") or clip(rec.get("question"), 50))[0])
+            continue
+        taken.add(q["id"])
+        by[how] += 1
+        if unanswered(text):
+            blanks += 1
+            old = book.get(q["id"])
+            if isinstance(old, dict) and not unanswered(old.get("text")):
+                kept.append(q["id"])                  # a blank never replaces an answer that's there
+                continue
+        book[q["id"]] = {"text": text, "file": copy.name, "date": stamp}
+    if not taken:
+        die(f"no row in {src.name} matched a question in {a.slug}, by ID or by text; nothing imported")
+    copy.parent.mkdir(parents=True, exist_ok=True)
+    if found:
+        cols = [k for k in COPY_HEADS if any(r.get(k) for r in recs)]
+        buf = io.StringIO()
+        w = csv.writer(buf, lineterminator="\n")
+        w.writerow([COPY_HEADS[k] for k in cols])
+        for r in recs:
+            w.writerow([scrub(r.get(k) or "")[0] for k in cols])
+        kc.write(copy, buf.getvalue())
+    else:
+        shutil.copyfile(str(src), str(copy))
+    keep_private(copy)
+    v.setdefault("responded", stamp)
+    save(data)
+    missing = sum(1 for q in data["questions"] if unanswered(answer_text(data, v["name"], q["id"])))
+    print(f"{PROG}: read {len(taken)} question(s) for {v['name']} from {src.name} ({by['id']} by ID, "
+          f"{by['text']} by question text" + (f"; {blanks} left blank" if blanks else "")
+          + (f"); the rows read are in answers/{copy.name}, without the text that looked like a credential"
+             if found else f"); a copy is in answers/{copy.name}"))
+    if kept:
+        print(f"  {len(kept)} blank answer(s) left the answer already there in place: {', '.join(kept)}")
+    if unmatched:
+        print(f"  {len(unmatched)} row(s) matched no question and were left out: " + "; ".join(unmatched[:8])
+              + (" ..." if len(unmatched) > 8 else ""))
+    if missing:
+        print(f"  {missing} question(s) still have no answer from {v['name']}")
+    if hits:
+        print(f"  {hits} piece(s) of text that looked like a credential were removed; the vendor's file isn't kept")
+    elif found:
+        print("  the file has text that looked like a credential outside the answers read; the vendor's file isn't "
+              "kept")
+    return 0
+
+
+def parse_score(raw):
+    t = (raw or "").strip()
+    if re.fullmatch(r"[0-5](\.0+)?", t):
+        return int(float(t))
+    return None
+
+
+def cmd_score(a):
+    data = load(a.slug)
+    v = vendor_of(data, a.vendor)
+    book = data["scores"].setdefault(v["name"], {})
+    stamp = today().isoformat()
+    if a.file:
+        recs = find_rows(tables_in(pathlib.Path(os.path.expanduser(a.file))), ("score",), ("id", "question", "score",
+                                                                                          "comment"))
+        if not recs:
+            die(f"{a.file} has no table with an ID (or question) column and a Score column")
+        done, skipped = 0, []
+        for rec in recs:
+            q, _ = match_question(data, rec, set())
+            label = rec.get("id") or clip(rec.get("question"), 40)
+            if not q:
+                skipped.append(f"{label}: no such question")
+                continue
+            raw = rec.get("score", "")
+            if not raw.strip():
+                continue
+            s = parse_score(raw)
+            if s is None:
+                skipped.append(f"{q['id']}: {raw!r} isn't 0 to 5")
+                continue
+            note = " ".join((rec.get("comment") or "").split())
+            if kc.cred_hits(note):
+                skipped.append(f"{q['id']}: the note looks like it holds a credential")
+                continue
+            book[q["id"]] = {"score": s, "note": note, "date": stamp}
+            done += 1
+        if done:
+            save(data)
+        print(f"{PROG}: {done} score(s) saved for {v['name']} in {a.slug}")
+        for s in skipped:
+            print(f"  skipped {s}")
+        return 0 if done else 1
+    if not a.qid or a.value is None:
+        die("score needs QID and a score from 0 to 5 (or --file FILE.csv)")
+    q = question_of(data, a.qid)
+    if a.value.lower() == "clear":
+        book.pop(q["id"], None)
+        save(data)
+        print(f"{PROG}: cleared {v['name']}'s score for {q['id']}")
+        return 0
+    s = parse_score(a.value)
+    if s is None:
+        die("a score is a whole number from 0 (doesn't meet) to 5 (exceeds); 3 meets")
+    note = " ".join((a.note or "").split())
+    refuse_credentials(note, "note")
+    book[q["id"]] = {"score": s, "note": note, "date": stamp}
+    save(data)
+    print(f"{PROG}: {v['name']} {q['id']} = {s}" + (f" ({note})" if note else "")
+          + (" [must-have: 0 fails the vendor]" if q.get("must") and s == 0 else ""))
+    return 0
+
+
+def cell_score(x):
+    return "-" if x is None else f"{x:.1f}"
+
+
+def due_words(data, on):
+    d = parse(data.get("due"))
+    if not d:
+        return ""
+    n = (d - on).days
+    return (f"due {fmt(d)}, late by {-n} day{'s' if n != -1 else ''}" if n < 0 else
+            f"due {fmt(d)}, today" if n == 0 else f"due {fmt(d)}, in {n} day{'s' if n != 1 else ''}")
+
+
+def show_json(data, res):
+    return {"slug": data["slug"], "title": data["title"], "due": data.get("due"), "weights": data["weights"],
+            "questions": len(data["questions"]), "must_haves": sum(1 for q in data["questions"] if q.get("must")),
+            "vendors": [{"name": r["name"], "responded": r["responded"], "sections": r["sections"], "total": r["total"],
+                         "partial": r["partial"], "rank": r["rank"],
+                         "fails": [{"id": q, "why": w} for q, w in r["fails"]],
+                         "answered": r["answered"], "unscored": r["unscored"]} for r in res]}
+
+
+def cmd_show(a):
+    data = load(a.slug)
+    res = results(data)
+    if a.json:
+        out = show_json(data, res)
+        if a.answers:
+            out["answers"] = {q["id"]: {r["name"]: {"answer": answer_text(data, r["name"], q["id"]),
+                                                    "score": score_of(data, r["name"], q["id"])} for r in res}
+                              for q in data["questions"] if not a.section or q["section"] == section_key(a.section)}
+        print(json.dumps(out, indent=2, ensure_ascii=False))
+        return 0
+    on = today()
+    musts = sum(1 for q in data["questions"] if q.get("must"))
+    print(f"{PROG}: {data['title']} ({data['slug']}) {WORK}")
+    print(f"{len(data['vendors'])} vendor(s), {len(data['questions'])} questions ({musts} must-haves)"
+          + (f"; answers {due_words(data, on)}" if data.get("due") else ""))
+    if not res:
+        print(f"No vendors yet: {PROG} vendor {a.slug} NAME")
+        return 0
+    table = [["Section (weight)"] + [clip(r["name"], 18) for r in res]]
+    for key, name, _, _ in SECTIONS:
+        table.append([f"{name} ({data['weights'].get(key, 0)})"] + [cell_score(r["sections"][key]) for r in res])
+    table.append(["Weighted total"] + [cell_score(r["total"]) + (" (partial)" if r["partial"] else "") for r in res])
+    table.append(["Rank"] + [str(r["rank"] if r["rank"] is not None else "-") for r in res])
+    table.append(["Must-haves failed"] + [str(len(r["fails"])) for r in res])
+    table.append(["Answered"] + [f"{r['answered']}/{len(data['questions'])}" if r["responded"] else "no answers yet"
+                                 for r in res])
+    table.append(["Unscored"] + [str(len(r["unscored"])) for r in res])
+    widths = [max(len(row[i]) for row in table) + 2 for i in range(len(table[0]))]
+    print()
+    for row in table:
+        print("".join(f"{c:<{widths[i]}}" for i, c in enumerate(row)).rstrip())
+    fails = [(r["name"], q, why) for r in res for q, why in r["fails"]]
+    if fails:
+        print("\nMust-haves failed:")
+        texts = {q["id"]: q["text"] for q in data["questions"]}
+        for name, q, why in fails:
+            print(f"  {name}: {q} {why} ({clip(texts.get(q), 70)})")
+    unscored = [(r["name"], r["unscored"]) for r in res if r["unscored"] and (r["responded"] or r["total"] is not None)]
+    if unscored:
+        print("\nUnscored questions:")
+        for name, qs in unscored:
+            print(f"  {name}: {len(qs)} ({', '.join(qs[:10])}{' ...' if len(qs) > 10 else ''})")
+    if a.answers:
+        sec = section_key(a.section) if a.section else None
+        dodged = {r["name"]: dict((x[0], x[1]) for x in dodges(data, r["name"])) for r in res}
+        for q in data["questions"]:
+            if sec and q["section"] != sec:
+                continue
+            print(f"\n{q['id']}{' [must]' if q.get('must') else ''} {q['text']}")
+            for r in res:
+                s = score_of(data, r["name"], q["id"])
+                text = answer_text(data, r["name"], q["id"])
+                why = dodged[r["name"]].get(q["id"])
+                print(f"  {clip(r['name'], 18)} ({'-' if s is None else s}): "
+                      + (clip(text, 160) if text.strip() else "(no answer)")
+                      + (f"  [dodged: {why}]" if why and why != "no answer" else ""))
+    return 0
+
+
+def cmd_gaps(a):
+    data = load(a.slug)
+    vendors = [vendor_of(data, a.vendor)["name"]] if a.vendor else [v["name"] for v in data["vendors"]]
+    found = {v: dodges(data, v) for v in vendors}
+    if a.json:
+        print(json.dumps({"slug": data["slug"], "gaps": {v: [{"id": q, "why": w, "answer": t} for q, w, t in g]
+                                                          for v, g in found.items()}}, indent=2, ensure_ascii=False))
+        return 0
+    total = sum(len(g) for g in found.values())
+    print(f"{PROG}: {total} dodged answer(s) in {data['slug']} {WORK}")
+    for v in vendors:
+        g = found[v]
+        if not responded(data, v):
+            print(f"{v}: no answers yet")
+            continue
+        print(f"{v} ({len(g)})")
+        for qid, why, text in g:
+            print(f"  {qid:<8}{why}" + (f": \"{clip(text, 90)}\"" if text.strip() else ""))
+    return 0
+
+
+def recommendation(data, res):
+    """(sentence, recommended vendor's result or None)."""
+    if not res:
+        return f"No vendors yet: add them with `{PROG} vendor {data['slug']} NAME`.", None
+    if all(r["total"] is None for r in res):
+        return "No recommendation yet: nothing is scored.", None
+    good = ranked(res)
+    if not good:
+        return "No recommendation: every scored vendor fails at least one must-have.", None
+    top = good[0]
+    if len(good) >= 2:
+        second = good[1]
+        margin = top["total"] - second["total"]
+        text = (f"**{top['name']}**, with {top['total']:.1f} of 100, ahead of {second['name']} "
+                f"({second['total']:.1f}) by {margin:.1f} points.")
+        if margin < CLOSE:
+            text += (f" A close call: under {CLOSE:g} points, so let the must-haves, the risks, and the commercial "
+                     "terms decide.")
+        partial = top["partial"] or second["partial"]
+    else:
+        others = [r for r in res if r is not top and r["total"] is not None]
+        text = (f"**{top['name']}**, with {top['total']:.1f} of 100: "
+                + ("the only vendor that meets every must-have." if others else "the only vendor scored so far."))
+        partial = top["partial"]
+    if partial:
+        text = "Provisional, as scoring isn't finished: " + text
+    return text, top
+
+
+def risks(data, r):
+    out = []
+    texts = {q["id"]: q for q in data["questions"]}
+    for qid, s in sorted(((q, score_of(data, r["name"], q)) for q in texts), key=lambda x: (x[1] if x[1] is not None else 9)):
+        if s is None:
+            continue
+        q = texts[qid]
+        note = (data["scores"].get(r["name"], {}).get(qid) or {}).get("note") or ""
+        if s <= 1 or (q.get("must") and s <= 2):
+            out.append(f"{qid} scored {s} of 5{' (a must-have)' if q.get('must') else ''}: {clip(q['text'], 70)}"
+                       + (f"; note: {clip(note, 80)}" if note else ""))
+    low = [(s, k) for k, s in r["sections"].items() if s is not None]
+    if low:
+        s, k = min(low)
+        if s < 60:
+            out.append(f"{NAME[k]} scores {s:.1f} of 100, its lowest section.")
+    d = dodges(data, r["name"])
+    if d:
+        out.append(f"{len(d)} dodged answer(s): " + "; ".join(f"{q} ({w})" for q, w, _ in d[:4])
+                   + (" ..." if len(d) > 4 else ""))
+    return out[:6]
+
+
+def build_report(data, res):
+    on = today()
+    musts = sum(1 for q in data["questions"] if q.get("must"))
+    rec, top = recommendation(data, res)
+    md = [f"# Vendor evaluation: {data['title']}", "",
+          f"- **Evaluation:** {data['slug']}, {len(data['vendors'])} vendor(s), {len(data['questions'])} questions "
+          f"({musts} must-haves)",
+          f"- **Prepared:** {fmt(on)} by kit-vendors {WORK}. Drafted by Kit for your review.", "",
+          "## Recommendation", "", rec, "", "## Scores", ""]
+    if res:
+        md += ["| Section (weight) | " + " | ".join(r["name"].replace("|", "/") for r in res) + " |",
+               "|---|" + "---|" * len(res)]
+        for key, name, _, _ in SECTIONS:
+            md.append(f"| {name} ({data['weights'].get(key, 0)}) | " + " | ".join(cell_score(r["sections"][key])
+                                                                              for r in res) + " |")
+        md.append("| **Weighted total** | " + " | ".join(cell_score(r["total"]) + (" (partial)" if r["partial"] else "")
+                                                         for r in res) + " |")
+        md.append("| Rank | " + " | ".join(str(r["rank"] if r["rank"] is not None else "-") for r in res) + " |")
+        md.append("| Must-haves failed | " + " | ".join(str(len(r["fails"])) for r in res) + " |")
+    else:
+        md.append("No vendors yet.")
+    md += ["", "## Must-haves", ""]
+    texts = {q["id"]: q["text"] for q in data["questions"]}
+    fails = [f"- {r['name']} fails {q} ({clip(texts.get(q), 70)}): {why}." for r in res for q, why in r["fails"]]
+    if fails:
+        md += fails
+    elif not musts:
+        md.append("- No question is marked as a must-have.")
+    else:
+        md.append("- No vendor fails a must-have so far.")
+    md += ["", "## Risks", ""]
+    good = ranked(res)
+    lines = []
+    for r in good[:2]:
+        lines += [f"- {r['name']}: {x}" for x in risks(data, r)]
+    md += lines or (["- None found in the scores so far."] if good else ["- No vendor is recommended yet."])
+    md += ["", "## Dodged questions", ""]
+    for r in res:
+        if not r["responded"]:
+            continue
+        d = dodges(data, r["name"])
+        named = [f"{q} {w}" for q, w, _ in d if w != "no answer"]
+        blank = sum(1 for _, w, _ in d if w == "no answer")
+        md.append(f"- {r['name']} ({len(d)})" + (": " if d else "")
+                  + "; ".join(([f"{blank} with no answer"] if blank else []) + named[:8])
+                  + (" ..." if len(named) > 8 else ""))
+    if not any(r["responded"] for r in res):
+        md.append("- No answers imported yet.")
+    md += ["", "## Open items", ""]
+    items = []
+    for r in res:
+        if not r["responded"]:
+            items.append(f"- {r['name']} hasn't sent answers" + (f": {due_words(data, on)}" if data.get("due") else "") + ".")
+        if r["unscored"] and (r["responded"] or r["total"] is not None):
+            items.append(f"- {r['name']}: {len(r['unscored'])} question(s) unscored ({', '.join(r['unscored'][:8])}"
+                         + (" ..." if len(r["unscored"]) > 8 else "") + ").")
+        musts = {q["id"] for q in data["questions"] if q.get("must")}
+        dodged_musts = [q for q, w, _ in dodges(data, r["name"])
+                        if q in musts and score_of(data, r["name"], q) is None and w != "no answer"]
+        if dodged_musts:
+            items.append(f"- {r['name']} dodged must-have(s) {', '.join(dodged_musts)}, not yet scored.")
+    if not any(q["section"] == "functional" for q in data["questions"]):
+        items.append("- The functional section has no questions yet: it's yours to fill in.")
+    md += items or ["- None."]
+    md += ["", "_Drafted by Kit for your review. Deterministic: from the scoring sheet in eval.json, no model call. "
+           "Nothing was sent to any vendor._", ""]
+    return "\n".join(md)
+
+
+def cmd_report(a):
+    data = load(a.slug)
+    text = build_report(data, results(data))
+    if not a.write:
+        print(text)
+        return 0
+    base = folder(a.slug)
+    out = base / f"report-{today().isoformat()}.md"
+    n = 2
+    while out.exists():
+        out = base / f"report-{today().isoformat()}-{n}.md"
+        n += 1
+    kc.write(out, text)
+    print(f"{PROG}: wrote {out} (drafted for your review; nothing was sent) {WORK}")
+    return 0
+
+
+def evaluations():
+    base = root()
+    out = []
+    for f in sorted(base.glob("*/eval.json")) if base.is_dir() else []:
+        try:
+            data = json.loads(f.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            out.append((f.parent.name, None))
+            continue
+        if isinstance(data, dict) and isinstance(data.get("questions"), list):
+            for k in ("vendors", "answers", "scores"):
+                data.setdefault(k, [] if k == "vendors" else {})
+            data.setdefault("weights", {k: w for k, _, _, w in SECTIONS})
+            out.append((f.parent.name, data))
+        else:
+            out.append((f.parent.name, None))
+    return out
+
+
+def cmd_list(a):
+    evs = evaluations()
+    rows = []
+    for slug, data in evs:
+        if data is None:
+            rows.append({"slug": slug, "error": "eval.json can't be read"})
+            continue
+        res = results(data)
+        good = ranked(res)
+        rows.append({"slug": slug, "title": data.get("title", ""), "vendors": len(data["vendors"]),
+                     "responded": sum(1 for r in res if r["responded"]), "due": data.get("due"),
+                     "leader": ({"name": good[0]["name"], "total": good[0]["total"]} if good else None)})
+    if a.json:
+        print(json.dumps({"folder": str(root()), "evaluations": rows}, indent=2, ensure_ascii=False))
+        return 0
+    if not rows:
+        print(f"{PROG}: no evaluations yet in {root()}; {PROG} new SLUG --title \"...\" starts one")
+        return 0
+    print(f"{PROG}: {len(rows)} evaluation(s) in {root()} {WORK}")
+    for r in rows:
+        if "error" in r:
+            print(f"  {r['slug']:<24} ({r['error']})")
+            continue
+        print(f"  {r['slug']:<24} {clip(r['title'], 36):<37} {r['responded']}/{r['vendors']} answered"
+              + (f", due {iso_fmt(r['due'])}" if r["due"] else "")
+              + (f", leading: {r['leader']['name']} ({r['leader']['total']:.1f})" if r["leader"] else ""))
+    return 0
+
+
+def cmd_due(a):
+    on, days = today(), (a.days if a.days is not None else 7)
+    if days < 0:
+        die("--days can't be negative")
+    rows = []
+    for slug, data in evaluations():
+        if data is None:
+            continue
+        d = parse(data.get("due"))
+        if not d:
+            continue
+        waiting = [v["name"] for v in data["vendors"] if not responded(data, v["name"])]
+        left = (d - on).days
+        if waiting and left <= days:
+            rows.append({"slug": slug, "title": data.get("title", ""), "due": d.isoformat(), "days_left": left,
+                         "late": left < 0, "waiting": waiting})
+    rows.sort(key=lambda r: r["days_left"])
+    if a.json:
+        print(json.dumps({"today": on.isoformat(), "days": days, "due": rows}, indent=2, ensure_ascii=False))
+        return 0
+    if not rows:
+        print(f"{PROG}: nothing due: no evaluation is waiting on answers due within {days} days")
+        return 0
+    print(f"{PROG}: {len(rows)} evaluation(s) waiting on answers {WORK}")
+    for r in rows:
+        n = r["days_left"]
+        when = (f"LATE by {-n} day{'s' if n != -1 else ''}" if n < 0 else "due today" if n == 0
+                else f"due in {n} day{'s' if n != 1 else ''}")
+        print(f"  {r['slug']}: {when} ({iso_fmt(r['due'])}); waiting on {', '.join(r['waiting'])}")
+    return 0
+
+
+def main(argv):
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except (AttributeError, ValueError):
+            pass
+    handlers = {"new": cmd_new, "vendor": cmd_vendor, "questions": cmd_questions, "question": cmd_question,
+                "weights": cmd_weights, "import": cmd_import, "score": cmd_score, "show": cmd_show, "gaps": cmd_gaps,
+                "report": cmd_report, "list": cmd_list, "due": cmd_due}
+    if not argv:
+        argv = ["list"]
+    if argv[0] not in handlers:
+        ap = argparse.ArgumentParser(prog=PROG, description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+        ap.add_argument("command", choices=list(handlers))
+        ap.parse_args(argv[:1])           # help, or which commands there are
+        return 2
+    cmd = argv[0]
+    p = argparse.ArgumentParser(prog=f"{PROG} {cmd}")
+    if cmd not in ("list", "due"):
+        p.add_argument("slug")
+    if cmd == "new":
+        p.add_argument("--title")
+        p.add_argument("--vendors")
+        p.add_argument("--due")
+    elif cmd == "vendor":
+        p.add_argument("name", nargs="+")
+    elif cmd == "questions":
+        p.add_argument("--csv")
+        p.add_argument("--md")
+        p.add_argument("--force", action="store_true")
+    elif cmd == "question":
+        p.add_argument("action", choices=("add", "remove", "must"))
+        p.add_argument("rest", nargs="*")
+        p.add_argument("--section")
+        p.add_argument("--must", action="store_true")
+        p.add_argument("--id")
+    elif cmd == "weights":
+        p.add_argument("pairs", nargs="*")
+    elif cmd == "import":
+        p.add_argument("vendor")
+        p.add_argument("file")
+    elif cmd == "score":
+        p.add_argument("vendor")
+        p.add_argument("qid", nargs="?")
+        p.add_argument("value", nargs="?")
+        p.add_argument("--note")
+        p.add_argument("--file")
+    elif cmd == "show":
+        p.add_argument("--answers", action="store_true")
+        p.add_argument("--section")
+    elif cmd == "gaps":
+        p.add_argument("vendor", nargs="?")
+    elif cmd == "report":
+        p.add_argument("--write", action="store_true")
+    elif cmd == "due":
+        p.add_argument("--days", type=int)
+    if cmd in ("show", "gaps", "list", "due"):
+        p.add_argument("--json", action="store_true")
+    a = p.parse_intermixed_args(argv[1:])   # options may come before or after the text (Python 3.7 and up)
+    return handlers[cmd](a)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -1,0 +1,656 @@
+#!/usr/bin/env python3
+"""kit-digest: the monthly architecture digest for leaders and engineers, one page from Kit's registers with no model call.
+
+  kit-digest                         last month's digest, printed
+  kit-digest --month YYYY-MM|this|last
+                                     another month (this: the month so far)
+  kit-digest --write                 save briefs/digest-YYYY-MM.md, drafted for your edit; one that's
+                                     there already is kept unless --force. A month not yet over is
+                                     saved as briefs/digest-YYYY-MM-as-of-YYYY-MM-DD.md instead, so a
+                                     mid-month draft never stands in for the month's digest (an older
+                                     one under the month's name is moved to that name)
+  kit-digest --json                  the digest as JSON
+  kit-digest --brief                 the lines for the weekly review: a title and one line pointing at
+                                     the file
+  kit-digest --calendar-json FILE    review board meetings next month from a calendar JSON file (the
+                                     format kit-meetprep reads)
+
+Sections, each "Nothing this month." when it's empty:
+  Decisions made in the month: ADRs accepted in it, from the decisions folder kit-decisions uses
+    (decisions.md's Folder, default decisions/ in the library root): each ADR file's Status and Date
+    decided, and INDEX.md's rows; proposed ones from the month are listed as waiting for a decision.
+  Reference architectures and patterns approved or changed: the rows of kit-refarch's index (standards.md's
+    "Reference architectures", default published/gds-index.md) dated in the month.
+  End of support: what reached it in the month and what reaches it in the next six months (kit-lifecycle
+    --json, from the inventory and eol.json in the radar folder).
+  Exceptions expiring in the next 60 days (kit-exceptions due --json), and expired ones still open.
+  Coming to the review board next month: pre-reads (kit-preread) and rehearsals (kit-rehearse) Kit has
+    written for a meeting next month, and review board meetings in --calendar-json FILE.
+  Portfolio: the At Risk or Critical count in the latest PPM Express pulse snapshot (kit-ppmx pulse
+    --save), only when there is one.
+Looking ahead counts from the end of the month (from today, for this month). A missing source never stops
+it: its section says nothing this month, and the digest lists what it couldn't read.
+
+On macOS, with ARCH_DIGEST="on" in Kit's config, the first weekly review of each month runs
+`kit-digest --write --month last --brief`; on Windows run it yourself. Work content, tagged [work]; never
+in a text; nothing is sent. KIT_TODAY sets the day (for tests).
+"""
+import argparse
+import datetime as dt
+import importlib.machinery
+import importlib.util
+import json
+import os
+import pathlib
+import re
+import subprocess
+import sys
+
+BIN = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(BIN.parent))
+import kit_arch as ka  # noqa: E402
+import kit_compliance as kc  # noqa: E402
+import kit_daily as kd  # noqa: E402
+
+try:
+    import kit_records
+    STRONG = [(re.compile(p), w) for p, w in kit_records.SECRET_PATTERNS
+              if w not in ("credential assignment", "account or card number", "Social Security number")]
+except ImportError:  # pragma: no cover
+    STRONG = []
+
+PROG = "kit-digest"
+KIT = kc.kit_dir()
+BRIEFS = KIT / "briefs"
+WORK = "[work]"
+MONTHS = "January February March April May June July August September October November December".split()
+NOTHING = "Nothing this month."
+MADE = ("accepted", "approved", "adopted", "decided", "superseded")
+REVIEW = re.compile(r"\b(design|architecture|architectural|solution|technical|gds|ia)\b.{0,40}\breview\b|"
+                    r"\b(arb|review board|change board|design authority)\b", re.I)   # kit-meetprep's, if it's missing
+SUPERSEDED = re.compile(r"supersed|withdrawn|retired|obsolete|replaced by", re.I)        # kit-refarch's rule
+
+
+def die(msg):
+    sys.exit(f"{PROG}: {msg}")
+
+
+def clean(text):
+    """Text for the digest: no addresses, nothing that looks like a credential."""
+    text = kd.mask(" ".join(str(text or "").split()))
+    for rx, _ in STRONG:
+        text = rx.sub("[removed]", text)
+    return text
+
+
+def clip(text, n=110):
+    text = clean(text)
+    return text if len(text) <= n else text[: n - 1].rstrip() + "…"
+
+
+def tool_module(name):
+    """Another Kit tool's helpers, or None when it's missing or won't load."""
+    path = BIN / name
+    if not path.exists():
+        return None
+    loader = importlib.machinery.SourceFileLoader(name.replace("-", "_"), str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    try:
+        loader.exec_module(mod)
+    except Exception:
+        return None
+    return mod
+
+
+def add_months(d, n):
+    y, m = divmod(d.month - 1 + n, 12)
+    y, m = d.year + y, m + 1
+    last = (dt.date(y + (m == 12), m % 12 + 1, 1) - dt.timedelta(days=1)).day
+    return dt.date(y, m, min(d.day, last))
+
+
+def month_range(spec, today):
+    """(first day, last day, first day of the next month) of the month spec names."""
+    spec = (spec or "last").strip().lower()
+    if spec == "this":
+        first = today.replace(day=1)
+    elif spec == "last":
+        first = add_months(today.replace(day=1), -1)
+    else:
+        m = re.fullmatch(r"(\d{4})-(\d{2})", spec)
+        if not m or not 1 <= int(m.group(2)) <= 12:
+            die("--month takes YYYY-MM, this, or last")
+        first = dt.date(int(m.group(1)), int(m.group(2)), 1)
+    nxt = add_months(first, 1)
+    return first, nxt - dt.timedelta(days=1), nxt
+
+
+def label(d):
+    return f"{MONTHS[d.month - 1]} {d.year}"
+
+
+def parse_day(text):
+    return kc.parse_date(text) if text else None
+
+
+def run_tool(name, args, env_extra=None):
+    """(JSON, None) from another Kit tool, or (None, why not)."""
+    tool = BIN / name
+    if not tool.exists():
+        return None, f"{name} isn't installed"
+    env = dict(os.environ, PYTHONUTF8="1", **(env_extra or {}))
+    try:
+        r = subprocess.run([sys.executable, str(tool)] + args, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=120, env=env)
+    except (OSError, subprocess.SubprocessError) as e:
+        return None, f"{name} didn't run ({e.__class__.__name__})"
+    if r.returncode != 0:
+        msg = (r.stderr or r.stdout).strip().splitlines()
+        why = msg[-1] if msg else f"exit {r.returncode}"
+        return None, clip(re.sub(r"^" + re.escape(name) + r":\s*", "", why), 150)
+    try:
+        return json.loads(r.stdout), None
+    except ValueError:
+        return None, f"{name} gave no JSON"
+
+
+# ------------------------------------------------------------------ decisions
+def adr_files(ddir):
+    """{ADR id: facts} from the ADR files and INDEX.md, the files winning."""
+    found = {}
+    lines = kc.read(ddir / "INDEX.md").splitlines()
+    head = None
+    for ln in lines:
+        cs = kc.cells(ln)
+        if cs is None or kc.is_sep(cs):
+            continue
+        if any(re.fullmatch(r"adr(\s*(id|no|#))?", c.strip().lower()) for c in cs) and \
+                any("status" in c.lower() for c in cs):
+            head = [c.strip().lower() for c in cs]
+            continue
+        if not cs or not re.fullmatch(r"ADR-\d+", cs[0].strip()):
+            continue
+        row = dict(zip(head, cs)) if head else dict(zip(["adr", "title", "status", "date", "project", "file"], cs))
+
+        def col(*names):
+            for k, v in row.items():
+                if any(n in k for n in names):
+                    return v.strip()
+            return ""
+        found[cs[0].strip()] = {"id": cs[0].strip(), "title": col("title"), "status": col("status"),
+                                "date": col("date"), "project": col("project"), "decided_by": ""}
+    for f in sorted(ddir.glob("*.md")):              # ADR-*.md, matched the same way on every platform
+        if not re.match(r"ADR-", f.name, re.I):
+            continue
+        try:
+            adr_file(f, found)
+        except Exception:                            # one file that can't be read never stops the digest
+            continue
+    return found
+
+
+def adr_file(f, found):
+    text = kc.read(f)
+    m = re.search(r"^#\s+(ADR-\d+)\s*:?\s*(.*)$", text, re.M | re.I)
+    n = re.match(r"(ADR-\d+)", f.name, re.I)
+    if not m and not n:
+        return                                       # no number: a template or a note, not an ADR
+    aid = (m.group(1) if m else n.group(1)).upper()
+    rec = found.setdefault(aid, {"id": aid, "title": "", "status": "", "date": "", "project": "", "decided_by": ""})
+    if m and m.group(2).strip():
+        rec["title"] = m.group(2).strip()
+    for ln in text.splitlines():
+        cs = kc.cells(ln)
+        if not cs or len(cs) < 2:
+            continue
+        key, val = cs[0].strip().lower(), cs[1].strip()
+        if not val or val.startswith("<"):
+            continue
+        if key == "status":
+            rec["status"] = val
+        elif key == "date decided":
+            rec["decided_text"] = val
+        elif key == "decided by":
+            rec["decided_by"] = re.sub(r"\s*\(as the minutes record it.*$", "", val)
+        elif key == "project":
+            rec["project"] = val
+
+
+def decisions(root, first, last):
+    sec = {"made": [], "proposed": [], "note": None}
+    dec = tool_module("kit-decisions")
+    ddir = None
+    if dec is not None:
+        try:
+            ddir = dec.decisions_dir(root)
+        except Exception:
+            ddir = None
+    elif root:
+        ddir = root / "decisions"
+    if not ddir:
+        sec["note"] = "decisions folder: no library root set (library.md)"
+        return sec
+    if not ddir.is_dir():
+        sec["note"] = "decisions folder: none yet"
+        return sec
+    for aid, r in sorted(adr_files(ddir).items(), key=lambda kv: kv[0]):
+        status = (r.get("status") or "").strip()
+        s = status.lower()
+        if s.startswith(MADE):
+            d = parse_day(r.get("decided_text")) or parse_day(r.get("date"))
+            if d and first <= d <= last:
+                sec["made"].append({"id": aid, "title": clip(r["title"], 90), "status": clip(status, 40),
+                                    "date": d.isoformat(), "project": clip(r.get("project"), 40),
+                                    "decided_by": clip(r.get("decided_by"), 60)})
+        elif s.startswith("proposed"):
+            d = parse_day(r.get("date")) or parse_day(r.get("decided_text"))
+            if d and first <= d <= last:
+                sec["proposed"].append({"id": aid, "title": clip(r["title"], 90), "date": d.isoformat()})
+    sec["made"].sort(key=lambda x: (x["date"], x["id"]))
+    return sec
+
+
+# ------------------------------------------------------------------ reference architectures and patterns
+def patterns(root, first, last):
+    sec = {"items": [], "note": None}
+    ra = tool_module("kit-refarch")
+    sources = ka.refarch_sources(root)
+    if not sources:
+        sec["note"] = "reference architecture index: no library root set (library.md)"
+        return sec
+    missing = [s for s in sources if not s.exists()]
+    if missing and len(missing) == len(sources):
+        sec["note"] = "reference architecture index: not found (standards.md's Reference architectures)"
+        return sec
+    for src in sources:
+        if not src.exists():
+            continue
+        for n, row in ka.table_rows(src):
+            title = ka.cell(row, "title", "name", "document")
+            if not title:
+                continue
+            raw = ka.cell(row, "modified", "date", "published", "updated", "approved")
+            d = (ra.parse_date(raw) if ra is not None else None) or parse_day(raw)
+            if not d or not first <= d <= last:
+                continue
+            notes = ka.cell(row, "notes", "summary", "description", "covers")
+            status = ka.cell(row, "status") or ("superseded or withdrawn (see notes)" if SUPERSEDED.search(notes) else "")
+            sec["items"].append({"title": clip(title, 90), "number": clip(ka.cell(row, "number", "id"), 30),
+                                 "version": clip(ka.cell(row, "version"), 20), "date": d.isoformat(),
+                                 "status": clip(status, 50)})
+    sec["items"].sort(key=lambda x: (x["date"], x["title"].lower()))
+    return sec
+
+
+# ------------------------------------------------------------------ end of support
+def lifecycle(first, last, ahead):
+    sec = {"reached": [], "coming": [], "past": 0, "extended": 0, "until": None, "note": None}
+    until = add_months(ahead, 6)
+    sec["until"] = until.isoformat()
+    data, why = run_tool("kit-lifecycle", ["--json", "--today", ahead.isoformat()])
+    if data is None:
+        sec["note"] = f"kit-lifecycle: {why}"
+        return sec
+    if not isinstance(data, dict) or not isinstance(data.get("items") or [], list):
+        sec["note"] = "kit-lifecycle: its JSON isn't in the form kit-digest reads"
+        return sec
+    for it in data.get("items") or []:
+        if not isinstance(it, dict):                 # one entry it can't read is skipped
+            continue
+        eol = parse_day(it.get("eol"))
+        name = clip(f"{it.get('product', '')} {it.get('version', '')}".strip(), 60)
+        fact = {"name": name, "eol": eol.isoformat() if eol else None, "instances": it.get("instances") or 0,
+                "extended": (parse_day(it.get("extended")).isoformat() if parse_day(it.get("extended")) else None)}
+        if eol and first <= eol < ahead:
+            sec["reached"].append(fact)
+        elif eol and ahead <= eol <= until:
+            sec["coming"].append(fact)
+        elif it.get("flag") == "past":
+            sec["past"] += 1
+        elif it.get("flag") == "extended":
+            sec["extended"] += 1
+    for k in ("reached", "coming"):
+        sec[k].sort(key=lambda x: (x["eol"], x["name"].lower()))
+    return sec
+
+
+# ------------------------------------------------------------------ exceptions
+def exceptions(ahead):
+    sec = {"expiring": [], "expired": [], "note": None}
+    data, why = run_tool("kit-exceptions", ["due", "--days", "60", "--json"], {"KIT_TODAY": ahead.isoformat()})
+    if data is None:
+        sec["note"] = f"kit-exceptions: {why}"
+        return sec
+    if not isinstance(data, dict) or not isinstance(data.get("due") or [], list):
+        sec["note"] = "kit-exceptions: its JSON isn't in the form kit-digest reads"
+        return sec
+    for it in data.get("due") or []:
+        if not isinstance(it, dict):                 # one entry it can't read is skipped
+            continue
+        fact = {"id": clip(it.get("id"), 20), "policy": clip(it.get("policy"), 60), "system": clip(it.get("system"), 50),
+                "owner": clip(it.get("owner"), 40), "status": clip(it.get("status"), 30), "date": it.get("date"),
+                "days": it.get("days")}
+        if it.get("kind") == "expiring":
+            sec["expiring"].append(fact)
+        elif it.get("kind") == "expired":
+            sec["expired"].append(fact)
+    sec["expiring"].sort(key=lambda x: (x["date"] or "", x["id"]))
+    return sec
+
+
+# ------------------------------------------------------------------ the review board next month
+def papers(folder, kind, nfirst, nlast, ahead):
+    out = []
+    head = re.compile(r"^#\s+(?:Pre-read|Rehearsal):\s*(.+)$", re.M)
+    for f in sorted(folder.glob("*.md")) if folder.is_dir() else []:
+        text = kc.read(f)
+        m = re.search(r"^- \*\*For:\*\* (.+)$", text, re.M)
+        meeting = m.group(1).strip() if m else ""
+        when = parse_day(meeting)
+        made = parse_day(f.name)
+        if when:
+            if not nfirst <= when <= nlast:
+                continue
+        elif not (made and dt.timedelta(0) <= ahead - made <= dt.timedelta(days=14)):
+            continue
+        name = head.search(text)
+        meeting = re.sub(r",?\s*\d{1,2}-[A-Z][a-z]{2}-\d{4}\s*$", "", meeting).strip()
+        out.append({"kind": kind, "date": when.isoformat() if when else None, "document": clip(name.group(1) if name
+                                                                                              else f.stem, 70),
+                    "for": clip(meeting, 70), "file": f"briefs/{folder.name}/{f.name}"})
+    return out
+
+
+def calendar(path, nfirst, nlast):
+    """(events, note): review board meetings next month from a calendar JSON file."""
+    try:
+        raw = json.loads(pathlib.Path(os.path.expanduser(path)).read_text(encoding="utf-8-sig", errors="replace"))
+    except (OSError, ValueError):
+        return [], "the calendar file can't be read"
+    events = raw.get("events") if isinstance(raw, dict) else raw
+    mp = tool_module("kit-meetprep")
+    rx = getattr(mp, "REVIEW", REVIEW) if mp is not None else REVIEW
+    out = []
+    for e in events if isinstance(events, list) else []:
+        if not isinstance(e, dict):
+            continue
+        title = str(e.get("subject") or e.get("title") or "")
+        start = str(e.get("start") or "")
+        d = parse_day(start)
+        if not d or not nfirst <= d <= nlast or not rx.search(title):
+            continue
+        if str(e.get("my_response") or "").lower() in ("declined", "decline"):
+            continue
+        t = re.search(r"[T ](\d{2}:\d{2})", start)
+        out.append({"date": d.isoformat(), "time": t.group(1) if t and not e.get("all_day") else "",
+                    "title": clip(title, 90)})
+    out.sort(key=lambda x: (x["date"], x["time"]))
+    return out, None
+
+
+def review_board(nfirst, nlast, ahead, cal):
+    sec = {"meetings": [], "papers": [], "note": None}
+    sec["papers"] = (papers(BRIEFS / "preread", "pre-read", nfirst, nlast, ahead)
+                     + papers(BRIEFS / "rehearse", "rehearsal", nfirst, nlast, ahead))
+    sec["papers"].sort(key=lambda x: (x["date"] or "9999", x["document"].lower()))
+    if cal:
+        sec["meetings"], sec["note"] = calendar(cal, nfirst, nlast)
+    return sec
+
+
+# ------------------------------------------------------------------ the portfolio pulse
+def portfolio(ahead):
+    """The latest pulse snapshot on or before the day it looks ahead from, or None (skipped quietly)."""
+    snaps = []
+    folder = BRIEFS / "ppmx"
+    for f in folder.glob("pulse-*.json") if folder.is_dir() else []:
+        try:
+            snaps.append((dt.date.fromisoformat(f.stem[6:]), f))
+        except ValueError:
+            pass
+    snaps = sorted(s for s in snaps if s[0] <= ahead)
+    if not snaps:
+        return None
+    day, f = snaps[-1]
+    try:
+        snap = json.loads(f.read_text(encoding="utf-8"))
+        projects = [p for p in (snap.get("projects") or {}).values() if isinstance(p, dict) and not p.get("done")]
+    except (OSError, ValueError, AttributeError):
+        return None
+    try:
+        from ppmx.pulse import at_risk
+    except ImportError:
+        def at_risk(p):
+            return p.get("status_code") in (1, 2) or any(w in (p.get("status") or "").lower()
+                                                          for w in ("at risk", "critical"))
+    risky = sorted(clip(p.get("name"), 50) for p in projects if at_risk(p))
+    return {"snapshot": day.isoformat(), "open": len(projects), "at_risk": len(risky), "names": risky[:5]}
+
+
+# ------------------------------------------------------------------ the digest
+EMPTY = {"decisions": {"made": [], "proposed": []}, "patterns": {"items": []},
+         "lifecycle": {"reached": [], "coming": [], "past": 0, "extended": 0, "until": None},
+         "exceptions": {"expiring": [], "expired": []}, "review_board": {"meetings": [], "papers": []}}
+NAMES = {"decisions": "decisions folder", "patterns": "reference architecture index", "lifecycle": "kit-lifecycle",
+         "exceptions": "kit-exceptions", "review_board": "pre-reads, rehearsals, and the calendar"}
+
+
+def guarded(key, fn, *args):
+    """A section, or an empty one with a note: a source that breaks never stops the digest."""
+    try:
+        return fn(*args)
+    except Exception as e:
+        return dict(json.loads(json.dumps(EMPTY[key])), note=f"{NAMES[key]}: couldn't be read ({e.__class__.__name__})")
+
+
+def build(a):
+    today = kc.today()
+    first, last, nxt = month_range(a.month, today)
+    ahead = min(today, nxt)
+    nfirst, nlast = nxt, add_months(nxt, 1) - dt.timedelta(days=1)
+    root = kc.library_root(None)
+    whole = ahead >= nxt                             # the month is over: its digest; else a draft as of today
+    d = {"month": first.strftime("%Y-%m"), "label": label(first), "from": first.isoformat(), "to": last.isoformat(),
+         "as_of": ahead.isoformat(), "next_month": label(nfirst), "whole_month": whole,
+         "file": f"briefs/digest-{first:%Y-%m}.md" if whole else f"briefs/digest-{first:%Y-%m}-as-of-{ahead}.md",
+         "decisions": guarded("decisions", decisions, root, first, last),
+         "patterns": guarded("patterns", patterns, root, first, last),
+         "lifecycle": guarded("lifecycle", lifecycle, first, last, ahead),
+         "exceptions": guarded("exceptions", exceptions, ahead),
+         "review_board": guarded("review_board", review_board, nfirst, nlast, ahead, a.calendar_json)}
+    try:
+        d["portfolio"] = portfolio(ahead)
+    except Exception:
+        d["portfolio"] = None
+    d["not_read"] = [d[k]["note"] for k in ("decisions", "patterns", "lifecycle", "exceptions", "review_board")
+                     if d[k]["note"]]
+    return d
+
+
+def tally(d):
+    return {"decisions": len(d["decisions"]["made"]), "patterns": len(d["patterns"]["items"]),
+            "eos": len(d["lifecycle"]["reached"]) + len(d["lifecycle"]["coming"]),
+            "exceptions": len(d["exceptions"]["expiring"]),
+            "board": len(d["review_board"]["meetings"]) + len(d["review_board"]["papers"])}
+
+
+def tally_file(text):
+    """The same counts, read from a digest file as it stands (with your edits)."""
+    secs, cur = {}, None
+    for ln in text.splitlines():
+        if ln.startswith("## "):
+            cur = ln[3:].strip()
+            secs.setdefault(cur, [])
+        elif cur is not None and ln.startswith("- "):
+            secs[cur].append(ln[2:].strip())
+
+    def items(prefix):
+        return [x for k, v in secs.items() if k.startswith(prefix) for x in v if x != NOTHING]
+    return {"decisions": sum(1 for x in items("Decisions made in") if re.match(r"ADR-\d+", x, re.I)),
+            "patterns": len(items("Reference architectures and patterns")),
+            "eos": sum(1 for x in items("End of support") if x.startswith(("Reached end of support", "By "))),
+            "exceptions": sum(1 for x in items("Exceptions expiring") if not x.startswith("Past expiry")),
+            "board": len(items("Coming to the review board"))}
+
+
+def counts(n):
+    parts = []
+    for key, one, many in (("decisions", "decision", "decisions"),
+                           ("patterns", "reference architecture change", "reference architecture changes"),
+                           ("eos", "end-of-support item", "end-of-support items"),
+                           ("exceptions", "exception expiring", "exceptions expiring"),
+                           ("board", "review board item", "review board items")):
+        if n.get(key):
+            parts.append(f"{n[key]} {one if n[key] == 1 else many}")
+    return ", ".join(parts) or "nothing new"
+
+
+def drafted_early(text, nxt):
+    """The day a digest file looked ahead from, when that was before its month ended (a mid-month draft)."""
+    m = re.search(r"looking ahead from (\d{1,2}-[A-Z][a-z]{2}-\d{4})", text)
+    day = parse_day(m.group(1)) if m else None
+    return day if day and day < nxt else None
+
+
+def fmt_iso(s):
+    day = parse_day(s)
+    return kc.fmt(day) if day else ""
+
+
+def to_markdown(d):
+    first, ahead = parse_day(d["from"]), parse_day(d["as_of"])
+    month = MONTHS[first.month - 1]
+    md = [f"# Architecture digest: {d['label']}", "",
+          f"- **Covers:** {fmt_iso(d['from'])} to {fmt_iso(d['to'])}; looking ahead from {kc.fmt(ahead)}",
+          f"- **Drafted:** {kc.fmt(kc.today())} by kit-digest {WORK}. Drafted by Kit for your edit, from Kit's "
+          "registers; no model call.", "", f"## Decisions made in {month}", ""]
+    dec = d["decisions"]
+    for x in dec["made"]:
+        extra = "; ".join(v for v in (x["project"], f"decided by {x['decided_by']}" if x["decided_by"] else "") if v)
+        status = x["status"][:1].lower() + x["status"][1:]
+        md.append(f"- {x['id']} {x['title']}: {status} {fmt_iso(x['date'])}" + (f" ({extra})" if extra else ""))
+    if not dec["made"]:
+        md.append(f"- {NOTHING}")
+    if dec["proposed"]:
+        md.append("- Proposed, waiting for a decision: " + "; ".join(f"{x['id']} {x['title']} ({fmt_iso(x['date'])})"
+                                                                     for x in dec["proposed"][:6])
+                  + (f"; and {len(dec['proposed']) - 6} more" if len(dec["proposed"]) > 6 else ""))
+    md += ["", "## Reference architectures and patterns approved or changed", ""]
+    for x in d["patterns"]["items"]:
+        md.append(f"- {(x['number'] + ' ') if x['number'] else ''}{x['title']}"
+                  + (f", version {x['version']}" if x["version"] else "") + f", {fmt_iso(x['date'])}"
+                  + (f": {x['status']}" if x["status"] else ""))
+    if not d["patterns"]["items"]:
+        md.append(f"- {NOTHING}")
+    lc = d["lifecycle"]
+    md += ["", "## End of support", ""]
+    for x in lc["reached"]:
+        md.append(f"- Reached end of support in {month}: {x['name']} ({x['instances']} instance"
+                  f"{'s' if x['instances'] != 1 else ''}), {fmt_iso(x['eol'])}"
+                  + (f"; paid extended support to {fmt_iso(x['extended'])}" if x["extended"] else ""))
+    for x in lc["coming"]:
+        md.append(f"- By {fmt_iso(lc['until'])}: {x['name']} ({x['instances']} instance"
+                  f"{'s' if x['instances'] != 1 else ''}), end of support {fmt_iso(x['eol'])}"
+                  + (f"; paid extended support to {fmt_iso(x['extended'])}" if x["extended"] else ""))
+    if not lc["reached"] and not lc["coming"]:
+        md.append(f"- {NOTHING}")
+    still = []
+    if lc["past"]:
+        still.append(f"{lc['past']} product version{'s' if lc['past'] != 1 else ''} past end of support")
+    if lc["extended"]:
+        still.append(f"{lc['extended']} inside paid extended support only")
+    if still:
+        md.append(f"- Still running: {', '.join(still)} (kit-lifecycle has the list).")
+    ex = d["exceptions"]
+    md += ["", "## Exceptions expiring in the next 60 days", ""]
+    for x in ex["expiring"]:
+        md.append(f"- {x['id']} {x['policy']} / {x['system']}: expires {fmt_iso(x['date'])} (in {x['days']} day"
+                  f"{'s' if x['days'] != 1 else ''}" + (f"; owner {x['owner']}" if x["owner"] else "") + ")")
+    if not ex["expiring"]:
+        md.append(f"- {NOTHING}")
+    if ex["expired"]:
+        md.append("- Past expiry and still open: " + "; ".join(f"{x['id']} {x['policy']} / {x['system']} "
+                                                                f"({fmt_iso(x['date'])})" for x in ex["expired"][:5]))
+    rb = d["review_board"]
+    md += ["", f"## Coming to the review board in {d['next_month'].split()[0]}", ""]
+    for x in rb["meetings"]:
+        md.append(f"- {fmt_iso(x['date'])}{(' ' + x['time']) if x['time'] else ''}: {x['title']}")
+    for x in rb["papers"]:
+        md.append(f"- {x['kind'].capitalize()} ready: {x['document']}" + (f", for {x['for']}" if x["for"] else "")
+                  + (f", {fmt_iso(x['date'])}" if x["date"] else " (no date given)"))
+    if not rb["meetings"] and not rb["papers"]:
+        md.append(f"- {NOTHING}")
+    if d["portfolio"]:
+        p = d["portfolio"]
+        md += ["", "## Portfolio (PPM Express)", "",
+               f"- At Risk or Critical: {p['at_risk']} of {p['open']} open projects (pulse snapshot of "
+               f"{fmt_iso(p['snapshot'])})" + (": " + ", ".join(p["names"]) if p["names"] else "")
+               + (" and more" if p["at_risk"] > len(p["names"]) else "")]
+    if d["not_read"]:
+        md += ["", "## Not read (delete before sharing)", ""] + [f"- {n}" for n in d["not_read"]]
+    md += ["", "_Drafted by Kit for your edit. Information only; nothing was sent._", ""]
+    return "\n".join(md)
+
+
+def main(argv):
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except (AttributeError, ValueError):
+            pass
+    ap = argparse.ArgumentParser(prog=PROG, description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--month", default="last", help="YYYY-MM, this, or last (the default)")
+    ap.add_argument("--write", action="store_true", help="save briefs/digest-YYYY-MM.md")
+    ap.add_argument("--force", action="store_true", help="with --write, replace a digest that's there")
+    ap.add_argument("--json", action="store_true", help="the digest as JSON")
+    ap.add_argument("--brief", action="store_true", help="a title and one line for the weekly review")
+    ap.add_argument("--calendar-json", help="a calendar JSON file, for next month's review board meetings")
+    a = ap.parse_args(argv)
+    d = build(a)
+    path = KIT / d["file"]
+    nxt = parse_day(d["to"]) + dt.timedelta(days=1)
+    there = kc.read(path) if path.exists() else None
+    early = drafted_early(there, nxt) if there is not None and d["whole_month"] else None
+    written = kept = False
+    moved = None
+    if a.write:
+        if there is not None and not a.force and not early:
+            kept = True                              # yours, with your edits: never written over
+        else:
+            if early and not a.force:                # a mid-month draft under the month's name: kept aside
+                moved = path.with_name(f"digest-{d['month']}-as-of-{early.isoformat()}.md")
+                n = 2
+                while moved.exists():
+                    moved = path.with_name(f"digest-{d['month']}-as-of-{early.isoformat()}-{n}.md")
+                    n += 1
+                os.replace(str(path), str(moved))
+            kc.write(path, to_markdown(d))
+            written = True
+    d.update(written=written, kept=kept, early_draft_moved_to=f"briefs/{moved.name}" if moved else None)
+    now = counts(tally(d))
+    aside = (f"; the draft from {kc.fmt(early)}, before the month ended, is now briefs/{moved.name}"
+             if moved else "")
+    if a.json:
+        print(json.dumps(d, indent=2, ensure_ascii=False))
+    elif a.brief:
+        print(f"Architecture digest, {d['label']}")
+        if written:
+            print(f"{WORK} Drafted for your edit: {d['file']} ({now}){aside}")
+        elif there is not None:
+            print(f"{WORK} Already drafted, kept as it is: {d['file']} ({counts(tally_file(there))})")
+        else:
+            print(f"{WORK} Not written yet: kit-digest --write --month {d['month']} ({now})")
+    elif a.write:
+        if written:
+            print(f"{PROG}: wrote {d['file']} {WORK}: {now}{aside}")
+        else:
+            print(f"{PROG}: kept the one already there (--force replaces it): {d['file']} {WORK}: "
+                  f"{counts(tally_file(there))}")
+    else:
+        print(to_markdown(d))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

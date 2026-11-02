@@ -48,6 +48,29 @@ versions follow [semantic versioning](https://semver.org).
 - `kit-wrap`: the end-of-day wrap from Kit's files, with no model call: what got done today, what moves to
   the next working day (Monday, after a Friday), and that day's first meeting and what it needs. Hooks in
   `.install/wrap.d/` add sections of your own.
+- `kit-vendors`: the vendor evaluation desk for a buy decision, with no model call. An RFP question set
+  (security, resilience, integration, exit, commercial, and a functional section you write) with must-haves
+  and section weights; the questionnaire as CSV or Markdown for you to send; each vendor's answers imported
+  from CSV, XLSX, a Markdown table, or a DOCX table, matched by question ID or by the question's text; scores
+  from 0 to 5; the side by side (section scores out of 100, the weighted total, the rank, failed must-haves,
+  unscored questions); the questions each vendor dodged (no answer, N/A, TBD, "see attached", "roadmap",
+  "contact sales", a bare yes to a how question, boilerplate pasted on many questions); a one-page
+  recommendation drafted for your review; and whose answers are due or late. One folder per evaluation in
+  `vendor-evaluations/` in the library. Nothing is sent to a vendor; the reading commands run without asking.
+- `kit-teammap`: the team coverage map. Who is on what and how loaded (allocation from PPM Express when it
+  gives it, else open projects and tasks; read only), anyone over `TEAMMAP_MAX_LOAD`, the systems and domains
+  only one person knows (from a coverage file you keep: `add`, `remove`, `import`), and a cross-training plan,
+  worst gaps first, each with a suggested backup: the person with related expertise (other systems, PPM
+  Express projects, or the team's shared records through kit-team) and the lowest load. When PPM Express can't
+  be reached the map is built without it; the token is never printed or stored. `--write` saves
+  `briefs/teammap-YYYY-MM-DD.md`.
+- `kit-digest`: the monthly architecture digest, one page from Kit's registers with no model call: the
+  month's decisions (ADRs), reference architectures approved or changed, end of support in the next six
+  months (kit-lifecycle), exceptions expiring in 60 days (kit-exceptions), what's coming to the review board
+  next month (pre-reads, rehearsals, and a calendar file), and the latest PPM Express pulse's at-risk count.
+  Each section says "nothing this month" when it's empty, and a missing source never stops it. With
+  `ARCH_DIGEST="on"`, the first weekly review of each month drafts last month's into
+  `briefs/digest-YYYY-MM.md` for your edit and points at it (macOS; on Windows, run it yourself).
 
 ### Changed
 - The end-of-day run uses `kit-wrap` instead of a Claude run (`EOD_MODEL="on"` keeps the old one), so it
@@ -57,6 +80,11 @@ versions follow [semantic versioning](https://semver.org).
 - KIT.md's ask-first rule now covers changing a record in an outside system: Kit changes PPM Express
   only when you ask in the session, after saying exactly what it will create or change, and only on
   your yes; never from a scheduled run, a text, or another agent.
+
+### Fixed
+- `kit-audit-export` dated the weekly audit reports it packs by when each file was last written, so a pack for
+  October made in November left them out (and its tests failed from the first of the month). A report is now
+  dated by its name (2026-10-19.md), and by when it was written only when its name has no date.
 
 ## [1.5.1] - 2026-10-29
 

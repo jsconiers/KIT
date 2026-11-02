@@ -296,5 +296,40 @@ fresh; rm -f "$KIT/briefs/extra-ppmx-pulse.txt"; run morning
 [ ! -f "$KIT/briefs/extra-ppmx-pulse.txt" ] && ok "pulse: off unless PPMX_PULSE=on" || bad "pulse default off"
 rm -f "$KIT/.install/shared/bin/kit-ppmx"
 
+# ---- Monthly architecture digest on the first weekly review of the month ---------------------------------------------
+cat > "$KIT/.install/shared/bin/kit-digest" <<'KD'
+import sys
+print("Architecture digest, last month")
+print("[work] args: " + " ".join(sys.argv[1:]))
+KD
+printf 'OUTLOOK_CHECK="off"\nARCH_DIGEST="on"\nARCH_DIGEST_WHEN="every-run"\n' > "$M/config"
+fresh; rm -f "$KIT/briefs/extra-arch-digest.txt"; run weekly
+grep -q "args: --write --month last --brief" "$KIT/briefs/extra-arch-digest.txt" 2>/dev/null \
+  && ok "digest: the weekly review gets kit-digest --write --month last --brief" || bad "digest on a weekly review"
+# The day of the month comes from a stand-in date (run.sh puts ~/.local/bin first on its PATH).
+cat > "$S/home/.local/bin/date" <<'FD'
+#!/bin/bash
+[ "$1" = "+%d" ] && [ -n "${FAKE_DAY:-}" ] && { echo "$FAKE_DAY"; exit 0; }
+exec /bin/date "$@"
+FD
+chmod +x "$S/home/.local/bin/date"
+printf 'OUTLOOK_CHECK="off"\nARCH_DIGEST="on"\n' > "$M/config"
+fresh; rm -f "$KIT/briefs/extra-arch-digest.txt"; FAKE_DAY=03 run weekly
+[ -s "$KIT/briefs/extra-arch-digest.txt" ] && ok "digest: on the first weekly review of the month (day 3)" || bad "digest in the first week"
+fresh; rm -f "$KIT/briefs/extra-arch-digest.txt"; FAKE_DAY=08 run weekly
+[ ! -f "$KIT/briefs/extra-arch-digest.txt" ] && ok "digest: not after the month's first week (day 8)" || bad "digest after the first week"
+rm -f "$S/home/.local/bin/date"
+fresh; rm -f "$KIT/briefs/extra-arch-digest.txt"; run morning
+[ ! -f "$KIT/briefs/extra-arch-digest.txt" ] && ok "digest: never in the morning brief" || bad "digest in the morning brief"
+printf 'OUTLOOK_CHECK="off"\nARCH_DIGEST_WHEN="every-run"\n' > "$M/config"
+fresh; rm -f "$KIT/briefs/extra-arch-digest.txt"; run weekly
+[ ! -f "$KIT/briefs/extra-arch-digest.txt" ] && ok "digest: off unless ARCH_DIGEST=on" || bad "digest default off"
+printf 'raise SystemExit(3)\n' > "$KIT/.install/shared/bin/kit-digest"
+printf 'OUTLOOK_CHECK="off"\nARCH_DIGEST="on"\nARCH_DIGEST_WHEN="every-run"\n' > "$M/config"
+fresh; rm -f "$KIT/briefs/extra-arch-digest.txt"; run weekly
+[ ! -f "$KIT/briefs/extra-arch-digest.txt" ] && grep -q "start weekly" "$LOG" \
+  && ok "digest: a failed digest leaves no section and the review still runs" || bad "digest failure"
+rm -f "$KIT/.install/shared/bin/kit-digest"
+
 echo "run.sh tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

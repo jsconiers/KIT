@@ -62,7 +62,14 @@ ALLOW = [f"Read({K}/**)", f"Edit({K}/memory/**)", f"Edit({K}/QUEUE.md)", f"Edit(
          "Bash(kit-ppmx setup)", "Bash(kit-ppmx setup *)", "Bash(kit-ppmx pulse)", "Bash(kit-ppmx pulse *)",
          "Bash(kit-ppmx actions)", "Bash(kit-ppmx actions *)",
          # The end-of-day wrap: it reads Kit's files and writes only its own wrap file.
-         "Bash(kit-wrap)", "Bash(kit-wrap *)"]
+         "Bash(kit-wrap)", "Bash(kit-wrap *)",
+         # The team coverage map and the monthly architecture digest: they read Kit's registers (and PPM Express,
+         # read only) and write only Kit's own files (the coverage file, briefs/teammap-*, briefs/digest-*).
+         "Bash(kit-teammap)", "Bash(kit-teammap *)", "Bash(kit-digest)", "Bash(kit-digest *)",
+         # The vendor evaluation desk's reading commands. The rest change an evaluation in the library or write a
+         # file you name, so they ask.
+         "Bash(kit-vendors)", "Bash(kit-vendors list)", "Bash(kit-vendors list *)", "Bash(kit-vendors due)",
+         "Bash(kit-vendors due *)", "Bash(kit-vendors show *)", "Bash(kit-vendors gaps *)"]
 # Always prompt, even if a broader allow rule exists: Kit's rules, Claude Code's own settings,
 # and commands that delete, push or post, install, or change system settings.
 ASK = [

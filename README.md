@@ -79,7 +79,7 @@ agent meant to reach outside systems; the connector guard keeps its calls read-o
 |---|---|---|
 | Weekdays 07:45 | Morning brief | A connector health line, to-dos, calendar, mail needing you, health and audit issues, queue hygiene |
 | Mon to Thu 09:00 | Work list | What Kit can do on its own today; you approve it in a session |
-| Monday 06:30 | Weekly review | The week, the queue, audit, what changed on your demands (optional refresh), horizon scan, watch, sprint review, cost, quality, retrospective (first Monday) |
+| Monday 06:30 | Weekly review | The week, the queue, audit, what changed on your demands (optional refresh), horizon scan, watch, sprint review, cost, quality, retrospective (first Monday), and the monthly architecture digest (optional, first Monday) |
 | Mon to Thu 17:30, Fri 15:30 | End-of-day wrap (optional) | What got done, what moves to the next working day, and that day's first meeting and what it needs; no model call (`kit-wrap`) |
 | Weekdays, every 30 minutes (optional) | Meeting prep | A prep pack per upcoming meeting (a plain script; no Claude run) |
 | Daily 12:30 | Backup | An encrypted, checked archive of Kit's folder and history, in the folder you choose |
@@ -140,6 +140,8 @@ The installer links these into `~/.local/bin` (all in `shared/bin/`):
 | `kit-controls` | Look up NIST SP 800-53 Rev 5 controls and MITRE ATT&CK techniques and mitigations, search both, and suggest techniques and controls for a threat model (marked "suggested"); offline |
 | `kit-exceptions` | Policy exception register: list, add, and what's expired, expiring, or overdue for review (with a morning alert) |
 | `kit-pbc` | Audit request (PBC) tracker: track auditors' requests, gather an evidence pack per request, draft responses (never sent) |
+| `kit-vendors` | Vendor evaluation desk for a buy decision: RFP questions with must-haves and weights, the questionnaire to send, vendors' answers imported from CSV, XLSX, Markdown, or DOCX, scores side by side, dodged questions, failed must-haves, and a one-page recommendation for your review; never sends anything |
+| `kit-digest` | Monthly architecture digest from Kit's registers, no model call: the month's decisions, reference architectures approved or changed, end of support in the next six months, exceptions expiring in 60 days, and what's coming to the review board; drafted for your edit, and on the first weekly review of each month with `ARCH_DIGEST="on"` |
 | `kit-questions` | Open-question tracker per project: extract questions from drafts and notes, draft messages by owner (never sent), record answers, show where each answer goes |
 | `kit-templatecheck` | Template drift check: sections missing, renamed, reordered, or added, the template version, and leftover placeholder text |
 | `doctor.py --readiness` | Agent readiness (no known limit, limits, blocked) and why, by cause; the source for readiness figures in the docs |
@@ -156,6 +158,7 @@ The installer links these into `~/.local/bin` (all in `shared/bin/`):
 | Tool | What it does |
 |---|---|
 | `kit-team` | Sharing between Kits: sync, list, search, inbox, send (with your yes), ack, purge, `load` (team demand load), `experts` (who has done X) |
+| `kit-teammap` | Team coverage map: who is on what and how loaded (PPM Express, read only), anyone over the limit, the systems and domains only one person knows, and a cross-training plan with a suggested backup for each |
 | `kit-plugin` | Packages agents, templates, shared lessons, and skills as a Claude Code plugin marketplace; checks it before merging; never publishes |
 
 **Models and agents**

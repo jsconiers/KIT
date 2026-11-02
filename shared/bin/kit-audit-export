@@ -143,7 +143,10 @@ def build(pack, start, end):
     reports = audit_dir / "reports"
     if reports.is_dir():
         for r in sorted(reports.glob("*.md")):
-            if in_range(dt.datetime.fromtimestamp(r.stat().st_mtime).date().isoformat(), start, end):
+            # A report is dated by its name (2026-10-19.md), else by when it was last written.
+            named = re.match(r"\d{4}-\d{2}-\d{2}", r.name)
+            stamp = named.group(0) if named else dt.datetime.fromtimestamp(r.stat().st_mtime).date().isoformat()
+            if in_range(stamp, start, end):
                 (pack / "kit-audit/reports").mkdir(parents=True, exist_ok=True)
                 shutil.copy2(r, pack / "kit-audit/reports" / r.name)
 

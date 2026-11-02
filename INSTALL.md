@@ -276,6 +276,13 @@ review (`REG_WATCH_WHEN="every-run"` to test it on any weekly review) and is ski
 warn level or when fewer than `REG_WATCH_MIN_LEFT` (15) minutes remain. It's separate from the weekly
 review's horizon watch, which follows the future tech planner's watch list.
 
+**Monthly architecture digest** (off by default). With `ARCH_DIGEST="on"`, the first weekly review of
+each month (day 1 to 7) runs `kit-digest --write --month last --brief`: last month's one-page digest goes
+to `briefs/digest-YYYY-MM.md` for your edit (one already there is kept), and the review points at it. It
+reads the decisions folder, the reference architecture index, the radar, and the exception register, so set
+the library root first; a missing source only empties its section. No model call. On Windows, run
+`kit-digest --write` yourself.
+
 The red team and threat modeler need no setup beyond `standards.md` and `compliance.md`; name a
 team copy of their templates under "Design review templates" in `standards.md`.
 
@@ -306,6 +313,8 @@ kit-settings email you@example.com            # where Outlook drafts are address
 | `EOD_MODEL` | off | "on" writes the wrap with Claude (prompt-eod.md) instead of kit-wrap |
 | `WRAP_CALENDAR_CMD` | empty | A command that prints one day's events as JSON, with `{day}` for the date; without it the wrap uses `CALENDAR_JSON_CMD`, which can't see past tomorrow (so Friday's wrap has no Monday meetings) |
 | `WRAP_CALENDAR_SIDE` | work | Which short text the calendar line goes in: work or personal |
+| `ARCH_DIGEST`, `ARCH_DIGEST_WHEN`, `ARCH_DIGEST_TIMEOUT` | off, first-week, 300 s | The monthly architecture digest on the first weekly review of each month (`every-run` runs it on every weekly review, to test it), and its time limit |
+| `TEAMMAP_MAX_LOAD`, `TEAMMAP_MAX_ITEMS` | 100, 8 | kit-teammap's limits: more than this percent allocated, or more than this many open projects and tasks when PPM Express gives no allocation, is over |
 | `PHONE_APPROVALS` | on | Single-use daily approval code in delivered work lists and briefs |
 | `ONEDRIVE_PUBLISH_DIR` | empty | Folder inside your OneDrive where briefs are published for your phone; empty is off |
 | `PUBLISH_PERSONAL` | off | Include personal items when publishing |

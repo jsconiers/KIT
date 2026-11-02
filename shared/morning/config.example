@@ -181,6 +181,23 @@ PPMX_TASK_DUE_FIELD="FinishDate"
 REHEARSE_MODEL="opus"
 REHEARSE_TIMEOUT="900"
 
+# Monthly architecture digest (kit-digest): "on" has the first weekly review of each month (day 1 to 7) draft last
+# month's digest into briefs/digest-YYYY-MM.md for your edit, with a line in the review pointing at it: the month's
+# decisions, reference architectures approved or changed, end of support in the next six months, exceptions
+# expiring in 60 days, and what's coming to the review board. No model call; [work]. ARCH_DIGEST_WHEN="every-run"
+# runs it on every weekly review (for a test); ARCH_DIGEST_TIMEOUT is its time limit in seconds. macOS only: on
+# Windows, run kit-digest yourself.
+ARCH_DIGEST="off"
+ARCH_DIGEST_WHEN="first-week"
+ARCH_DIGEST_TIMEOUT="300"
+
+# Team coverage map (kit-teammap): more than TEAMMAP_MAX_LOAD percent allocated is over the limit, or, when PPM
+# Express gives no allocation, more than TEAMMAP_MAX_ITEMS open projects and tasks. TEAMMAP_COVERAGE names another
+# coverage file (empty: briefs/team/coverage.json in Kit's folder).
+TEAMMAP_MAX_LOAD="100"
+TEAMMAP_MAX_ITEMS="8"
+TEAMMAP_COVERAGE=""
+
 # Phone and remote access, phase 1 (shared/kit_inbox.py). PHONE_APPROVALS adds a single-use code to
 # each delivered work list and brief for approving it from Kit Inbox (low-tier actions only).
 # ONEDRIVE_PUBLISH_DIR publishes the brief and a work summary page to a folder inside your

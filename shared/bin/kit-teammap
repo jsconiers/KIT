@@ -1,0 +1,849 @@
+#!/usr/bin/env python3
+"""kit-teammap: the team coverage map: who is on what and how loaded, the systems and domains only one person knows, and a cross-training plan for the worst gaps.
+
+  kit-teammap [--write] [--json] [--no-ppmx]
+                                     the map; --write saves briefs/teammap-YYYY-MM-DD.md
+  kit-teammap add SYSTEM --who NAME[,NAME] [--backup NAME[,NAME]] [--tags T,T] [--domain]
+                                     record who knows a system (or a domain); adding one that's there
+                                     already replaces it
+  kit-teammap remove SYSTEM
+  kit-teammap import FILE.csv        rows with System (or Domain), Who, and optional Backup, Tags, and
+                                     Kind (system or domain) columns; each row adds or replaces one
+  kit-teammap person NAME [--kit KIT_ID] [--alias "A, B"]
+                                     which Kit id on the team's shared records is this person, and
+                                     other spellings of the name (as PPM Express writes it)
+  kit-teammap coverage [--json]      the coverage file as it stands
+
+Sources. (1) The coverage file: which systems and domains each person knows, kept by you in
+briefs/team/coverage.json (TEAMMAP_COVERAGE in Kit's config names another file), readable only by
+you, next to the PPM Express work data kit-ppmx keeps in briefs/. (2) PPM Express, read only,
+through kit-ppmx's connector and its token (never printed or stored): open projects by manager, open
+tasks by assignee, and allocation when the tenant gives it. Any problem reaching it means "PPM Express
+not reached", and the map is built without it; --no-ppmx leaves it out. (3) The team's expertise
+through kit-team: declared topics and shared records in the team cache, by Kit id, matched to people
+with `person`. The team is everyone named in the coverage file and in kit-feedback's list of the people
+you lead; with nobody named there, everyone PPM Express shows. Names match as written, by an alias, or
+"Last, First"; someone you wrote by a first name only matches a PPM Express full name only when exactly one
+full name starts with it, and the map lists the names to check when more than one does.
+
+Load: allocation percent when PPM Express gives it (written as shares when every value is at or under 1,
+decided once for the tenant), else open projects and tasks. Over the limit means more than
+TEAMMAP_MAX_LOAD percent (default 100), or more than TEAMMAP_MAX_ITEMS projects and tasks (default 8)
+when there's no allocation. A system or domain one person knows is a single point of
+knowledge; its suggested backup is the person with related expertise (words shared with its name or
+tags: other systems they know, PPM Express projects they're on, or their shared records) and the lowest
+load, under the limit; with nobody like that, pair someone with that person for a quarter. The plan
+puts the worst gaps first: the person who alone knows it is over the limit, then by their load.
+
+Work content, tagged [work]; never in a text; nothing is sent. Settings: TEAMMAP_MAX_LOAD,
+TEAMMAP_MAX_ITEMS, TEAMMAP_PPMX_SECONDS (time for PPM Express, default 120), TEAMMAP_PPMX_MAX (most
+projects whose tasks are read, default 200), TEAMMAP_COVERAGE. KIT_TODAY sets the day (for tests).
+"""
+import argparse
+import csv
+import importlib.machinery
+import importlib.util
+import io
+import json
+import os
+import pathlib
+import re
+import sys
+import time
+
+BIN = pathlib.Path(__file__).resolve().parent
+SHARED = BIN.parent
+sys.path.insert(0, str(SHARED))
+import kit_arch as ka  # noqa: E402
+import kit_compliance as kc  # noqa: E402
+
+PROG = "kit-teammap"
+KIT = kc.kit_dir()
+CONFIG = KIT / ".install/shared/morning/config"
+FEEDBACK_PEOPLE = KIT / "feedback/people.json"
+WORK = "[work]"
+# Attributes that hold a person's allocation, in percent. PROVISIONAL, like ppmx/tools.py's FIELDS: check
+# them against your tenant (kit-ppmx call get_fields '{"entity": "Resource"}') and correct them here.
+ALLOCATION = ["Allocation", "AllocationPercent", "PercentAllocated", "PercentAllocation", "Utilization",
+              "UtilizationPercent"]
+GENERIC = set("""platform platforms app apps application applications tool tools server servers environment
+environments prod production core legacy stack layer internal external domain domains area areas""".split())
+UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+KIT_ID = re.compile(r"^[a-z0-9][a-z0-9-]{2,39}$")
+EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+
+
+def die(msg):
+    sys.exit(f"{PROG}: {msg}")
+
+
+def setting(key, default=""):
+    m = re.search(rf'^\s*(?:export\s+)?{key}="?([^"\n]*)"?\s*$', kc.read(CONFIG), re.M)
+    value = (os.environ.get(key) or "").strip() or (m.group(1).strip() if m else "")
+    return value or default
+
+
+def number(key, default):
+    try:
+        return float(setting(key, str(default)))
+    except ValueError:
+        return float(default)
+
+
+def clip(s, n):
+    s = " ".join(str(s or "").split())
+    return s if len(s) <= n else s[: n - 1].rstrip() + "…"
+
+
+def norm(name):
+    return " ".join(re.sub(r"[^\w@.\s-]+", " ", (name or "").lower()).replace(".", " ").split())
+
+
+def split_names(text):
+    return [" ".join(n.split()) for n in re.split(r"[,;]", text or "") if n.strip()]
+
+
+def keywords(text):
+    out = set()
+    for w in re.findall(r"[a-z0-9][a-z0-9+#]*", (text or "").lower()):
+        if len(w) >= 3 and w not in ka.STOP and w not in GENERIC and not w.isdigit():
+            out.add(w)
+    return out
+
+
+# ------------------------------------------------------------------ the coverage file
+def coverage_path():
+    raw = setting("TEAMMAP_COVERAGE")
+    return pathlib.Path(os.path.expanduser(raw)) if raw else KIT / "briefs/team/coverage.json"
+
+
+def load_coverage():
+    path = coverage_path()
+    if not path.exists():
+        return {"version": 1, "systems": [], "people": {}}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as e:
+        die(f"can't read {path}: {e}")
+    if not isinstance(data, dict):
+        die(f"{path} isn't a coverage file")
+
+    def names(v):   # a hand-edited entry may give a string instead of a list
+        if isinstance(v, str):
+            return split_names(v)
+        return [str(x).strip() for x in v if str(x).strip()] if isinstance(v, list) else []
+    data["systems"] = [dict(s, name=" ".join(str(s["name"]).split()), who=names(s.get("who")),
+                            backup=names(s.get("backup")), tags=names(s.get("tags")))
+                       for s in data.get("systems") or [] if isinstance(s, dict) and str(s.get("name") or "").strip()]
+    if not isinstance(data.get("people"), dict):
+        data["people"] = {}
+    return data
+
+
+def save_coverage(data):
+    path = coverage_path()
+    if os.name != "nt":
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(path.parent, 0o700)
+    kc.write(path, json.dumps(data, indent=1, ensure_ascii=False) + "\n")
+    return path
+
+
+def find_system(data, name):
+    n = norm(name)
+    for s in data["systems"]:
+        if norm(s["name"]) == n:
+            return s
+    return None
+
+
+def refuse_credentials(*texts):
+    hits = kc.cred_hits(" ".join(t for t in texts if t))
+    if hits:
+        die(f"refused: that has text that looks like a credential ({', '.join(hits)})")
+
+
+def put_system(data, name, who, backup, tags, kind):
+    name = " ".join((name or "").split())
+    if not name:
+        return None
+    entry = {"name": name, "kind": kind or "system", "who": who, "backup": [b for b in backup if norm(b) not in
+                                                                          [norm(w) for w in who]],
+             "tags": tags, "updated": kc.today().isoformat()}
+    old = find_system(data, name)
+    if old:
+        old.clear()
+        old.update(entry)
+        return "replaced"
+    data["systems"].append(entry)
+    data["systems"].sort(key=lambda s: s["name"].lower())
+    return "added"
+
+
+def cmd_add(a):
+    who = split_names(a.who)
+    if not who:
+        die("add needs --who NAME (or several, separated by commas)")
+    backup, tags = split_names(a.backup), [t.lower() for t in split_names(a.tags)]
+    system = " ".join(a.system)
+    refuse_credentials(system, a.who, a.backup, a.tags)
+    data = load_coverage()
+    how = put_system(data, system, who, backup, tags, "domain" if a.domain else "system")
+    if not how:
+        die("add needs the system's name")
+    path = save_coverage(data)
+    print(f"{PROG}: {how} {system}: {', '.join(who)}" + (f"; backup {', '.join(backup)}" if backup else
+                                                       "; nobody else knows it yet") + f" ({path})")
+    return 0
+
+
+def cmd_remove(a):
+    data = load_coverage()
+    s = find_system(data, " ".join(a.system))
+    if not s:
+        die(f"no {' '.join(a.system)!r} in the coverage file ({PROG} coverage lists them)")
+    data["systems"] = [x for x in data["systems"] if x is not s]
+    save_coverage(data)
+    print(f"{PROG}: removed {s['name']} from the coverage file")
+    return 0
+
+
+# Column names, checked in this order ("Backup expert" is a backup column, not who).
+HEADS = [("backup", re.compile(r"\b(backups?|secondary|deputy|second)\b")),
+         ("name", re.compile(r"^(system|domain|name|area|application|service)s?$")),
+         ("who", re.compile(r"\b(who|primary|experts?|knows|owner|person|people|sme)\b")),
+         ("tags", re.compile(r"^(tags?|keywords?|topics?)$")),
+         ("kind", re.compile(r"^(kind|type)$"))]
+
+
+def cmd_import(a):
+    path = pathlib.Path(os.path.expanduser(a.file))
+    if not path.is_file():
+        die(f"no such file: {path}")
+    text = path.read_text(encoding="utf-8-sig", errors="replace")
+    try:
+        dialect = csv.Sniffer().sniff(text[:4096], delimiters=",;\t")
+    except csv.Error:
+        dialect = csv.excel
+    rows = list(csv.reader(io.StringIO(text), dialect))
+    if not rows:
+        die(f"{path.name} is empty")
+    cols = {}
+    for i, h in enumerate(rows[0]):
+        hn = " ".join(re.sub(r"[^a-z0-9]+", " ", h.lower()).split())
+        for key, rx in HEADS:
+            if key not in cols and rx.search(hn):
+                cols[key] = i
+                break
+    if "name" not in cols or "who" not in cols:
+        die(f"{path.name} needs a System (or Domain) column and a Who column in its first row")
+    data = load_coverage()
+    counts = {"added": 0, "replaced": 0}
+    skipped = 0
+    for r in rows[1:]:
+        cell = {k: (r[i].strip() if i < len(r) else "") for k, i in cols.items()}
+        if not cell.get("name") or not split_names(cell.get("who")):
+            skipped += 1 if any(cell.values()) else 0
+            continue
+        if kc.cred_hits(" ".join(cell.values())):
+            skipped += 1
+            continue
+        kind = "domain" if cell.get("kind", "").lower().startswith("d") else "system"
+        how = put_system(data, cell["name"], split_names(cell["who"]), split_names(cell.get("backup")),
+                         [t.lower() for t in split_names(cell.get("tags"))], kind)
+        counts[how] += 1
+    if not counts["added"] and not counts["replaced"]:
+        die(f"no row in {path.name} names a system and who knows it; nothing imported")
+    save_coverage(data)
+    print(f"{PROG}: imported {path.name}: {counts['added']} added, {counts['replaced']} replaced"
+          + (f", {skipped} row(s) skipped (no system or no one named, or text that looks like a credential)"
+             if skipped else "") + f"; {len(data['systems'])} in the coverage file")
+    return 0
+
+
+def cmd_person(a):
+    name = " ".join(" ".join(a.name).split())
+    if not name:
+        die("person needs a name")
+    if a.kit is not None and a.kit and not KIT_ID.match(a.kit):
+        die(f"{a.kit!r} isn't a Kit id (3 to 40 lowercase letters, digits, or hyphens)")
+    refuse_credentials(name, a.alias)
+    data = load_coverage()
+    key = next((k for k in data["people"] if norm(k) == norm(name)), name)
+    p = data["people"].setdefault(key, {})
+    if a.kit is not None:
+        if a.kit:
+            p["kit"] = a.kit
+        else:
+            p.pop("kit", None)
+    if a.alias is not None:
+        p["aliases"] = split_names(a.alias)
+    save_coverage(data)
+    print(f"{PROG}: {key}" + (f": Kit id {p['kit']}" if p.get("kit") else ": no Kit id")
+          + (f"; also written {', '.join(p['aliases'])}" if p.get("aliases") else ""))
+    return 0
+
+
+def cmd_coverage(a):
+    data = load_coverage()
+    if a.json:
+        print(json.dumps(dict(data, file=str(coverage_path())), indent=2, ensure_ascii=False))
+        return 0
+    if not data["systems"] and not data["people"]:
+        print(f"{PROG}: no coverage file yet ({coverage_path()}); {PROG} add SYSTEM --who NAME starts one")
+        return 0
+    print(f"{PROG}: {len(data['systems'])} system(s) and domain(s) in {coverage_path()} {WORK}")
+    for s in data["systems"]:
+        print(f"  {s['name']} [{s.get('kind', 'system')}]: {', '.join(s.get('who') or []) or 'nobody named'}"
+              + (f"; backup {', '.join(s['backup'])}" if s.get("backup") else "")
+              + (f"; tags {', '.join(s['tags'])}" if s.get("tags") else ""))
+    for name, p in sorted(data["people"].items()):
+        print(f"  person {name}" + (f": Kit id {p['kit']}" if p.get("kit") else "")
+              + (f"; also written {', '.join(p['aliases'])}" if p.get("aliases") else ""))
+    return 0
+
+
+# ------------------------------------------------------------------ who is who
+def forms(raw):
+    """The spellings a name is matched by: as written, "Rivera, Alex" as Alex Rivera, an address by its local part."""
+    n = norm(raw)
+    if not n:
+        return []
+    out = [n]
+    if "," in (raw or ""):
+        last, first = raw.split(",", 1)
+        out.append(norm(f"{first} {last}"))
+    if "@" in n:
+        out.append(norm(n.split("@", 1)[0].replace("_", " ")))
+    return out
+
+
+def full_form(raw):
+    """The one spelling a name counts as: "Rivera, Alex" and "Alex Rivera" are one name."""
+    f = forms(raw)
+    return f[-1] if f else ""
+
+
+def display(raw):
+    """A name to show: an address becomes its local part, so no address reaches the map."""
+    raw = " ".join((raw or "").split())
+    return raw.split("@", 1)[0] if EMAIL.fullmatch(raw) else EMAIL.sub("[address]", raw)
+
+
+def pretty(raw):
+    s = display(raw)
+    if "," in s:
+        last, first = s.split(",", 1)
+        s = " ".join(f"{first} {last}".split())
+    return s
+
+
+class Roster:
+    """The team's people by one name each, with the other spellings that lead to them. Names match exactly
+    (as written, an alias, "Last, First" turned round, an address's local part); first names only through
+    link(), which decides over every name at once."""
+
+    def __init__(self):
+        self.people = {}       # name -> {"kit": id or None}
+        self.index = {}        # exact spelling -> name
+        self.loose = {}        # full name -> name, from first-name matches link() made
+        self.ambiguous = {}    # name -> the full names in PPM Express that share its first name
+
+    def exact(self, raw):
+        for f in forms(raw):
+            if f in self.index:
+                return self.index[f]
+        return None
+
+    def add(self, name, aliases=(), kit=None):
+        name = " ".join((name or "").split())
+        if not name:
+            return None
+        aliases = [str(x) for x in (aliases or []) if str(x).strip()]
+        canon = self.exact(name) or next((self.exact(x) for x in aliases if self.exact(x)), None)
+        if not canon:
+            canon = pretty(name)                     # "Rivera, Alex" shows as Alex Rivera
+        p = self.people.setdefault(canon, {"kit": None})
+        if kit:
+            p["kit"] = kit
+        for spelling in [name, canon] + aliases:
+            for f in forms(spelling):
+                self.index.setdefault(f, canon)
+        return canon
+
+    def link(self, raws):
+        """First-name matches for the names PPM Express gives. A teammate known only by a first name ("Alex")
+        takes the full name that starts with it ("Alex Rivera") only when exactly one distinct full name does;
+        with two ("Alex Rivera", "Alex Chen") it takes neither, and the map asks which. A one-word name takes
+        the teammate whose first name it is only when exactly one teammate has it. Every full name counts,
+        a teammate's own too: with "Alex" and "Alex Rivera" both on the team, "Alex Chen" isn't Alex either."""
+        has_full = {c for k, c in self.index.items() if len(k.split()) >= 2 and "@" not in k}
+        by_first, shown = {}, {}
+        for raw in raws:
+            f = full_form(raw)
+            toks = f.split()
+            if len(toks) >= 2:
+                by_first.setdefault(toks[0], set()).add(f)
+                shown.setdefault(f, pretty(raw))
+            elif toks and not self.exact(raw):
+                hits = {c for k, c in self.index.items() if k.split()[0] == toks[0]}
+                if len(hits) == 1:
+                    self.loose[f] = hits.pop()
+        for first, fulls in by_first.items():
+            canon = self.index.get(first)
+            if not canon or canon in has_full:       # a teammate whose full name is known isn't a first name only
+                continue
+            if len(fulls) == 1:
+                self.loose[next(iter(fulls))] = canon
+            else:
+                self.ambiguous[canon] = sorted(shown[f] for f in fulls)
+
+    def resolve(self, raw):
+        return self.exact(raw) or self.loose.get(full_form(raw))
+
+
+def build_roster(cov):
+    r = Roster()
+    for name, p in sorted(cov["people"].items()):
+        r.add(name, p.get("aliases") or [], p.get("kit"))
+    for s in cov["systems"]:
+        for n in (s.get("who") or []) + (s.get("backup") or []):
+            r.add(n)
+    try:
+        led = json.loads(FEEDBACK_PEOPLE.read_text(encoding="utf-8-sig")).get("people", [])
+    except (OSError, ValueError, AttributeError):
+        led = []
+    for p in led if isinstance(led, list) else []:
+        if isinstance(p, dict) and p.get("name"):
+            r.add(p["name"], p.get("aliases") or [])
+    return r
+
+
+# ------------------------------------------------------------------ PPM Express, read only
+def tool_module(name):
+    path = BIN / name
+    if not path.exists():
+        return None
+    loader = importlib.machinery.SourceFileLoader(name.replace("-", "_"), str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def names_in(value):
+    if value is None or value == "":
+        return []
+    if isinstance(value, (list, tuple)):
+        return [n for v in value for n in names_in(v)]
+    if isinstance(value, dict):
+        for k in ("name", "displayName", "Name", "fullName", "title", "email", "Email"):
+            if value.get(k):
+                return [str(value[k]).strip()]
+        return []
+    s = str(value).strip()
+    return [] if UUID.match(s) else [p.strip() for p in s.split(";") if p.strip() and not UUID.match(p.strip())]
+
+
+def allocation(row):
+    """(number, written with a % sign) from the first allocation attribute a record has, or None."""
+    for key in ALLOCATION:
+        value = row.get(key)
+        if value is None or isinstance(value, bool):
+            continue
+        m = re.match(r"^(\d+(?:\.\d+)?)\s*(%?)$", str(value).strip())
+        if m:
+            return float(m.group(1)), bool(m.group(2))
+    return None
+
+
+def tenant_scale(values):
+    """How the tenant writes allocation, decided once for all its values, never one by one: shares when every
+    plain number is at or under 1 (0.6 and 1.0 are 60% and 100%), else percent (1.0 is 1%). A value written with
+    a % sign is a percent either way."""
+    plain = [x for x, sign in values if not sign]
+    return 100.0 if plain and all(x <= 1.0 for x in plain) else 1.0
+
+
+def read_ppmx(args):
+    """What PPM Express says, read only: {"reached", "note", "projects": [{name, people}], "people": {raw name:
+    {"projects": set, "manages": n, "tasks": n, "res_alloc": pct or None, "task_alloc": pct or None}}}."""
+    out = {"reached": False, "note": "", "projects": [], "people": {}, "tasks_read": 0, "not_read": 0}
+    if args.no_ppmx:
+        out["note"] = "left out (--no-ppmx)"
+        return out
+    token = ""
+    try:
+        kp = tool_module("kit-ppmx")
+        if kp is None:
+            out["note"] = "the PPM Express connector (kit-ppmx) isn't installed"
+            return out
+        from ppmx import pulse as pulse_mod
+        from ppmx.tools import is_done, pick, text_of
+        env = kp.kit_env()
+        settings = kp.Settings(env)
+        if not settings.ready:
+            out["note"] = settings.problem
+            return out
+        token, problem = kp.get_token(env)
+        if not token:
+            out["note"] = problem
+            return out
+        ctx = kp.Context(kp.Client(settings), settings, kp.tables_for(settings), token)
+        deadline = time.monotonic() + number("TEAMMAP_PPMX_SECONDS", 120)
+        most = int(number("TEAMMAP_PPMX_MAX", 200))
+        people = out["people"]
+
+        def person(raw):
+            return people.setdefault(raw, {"projects": set(), "manages": 0, "tasks": 0, "res_raw": None,
+                                           "task_raw": []})
+        rows = [r for r in pulse_mod._rows(ctx, "projects", deadline, time.sleep) if r.get("id")]
+        open_rows = [r for r in rows if is_done(r) is not True]
+        for i, row in enumerate(open_rows):
+            name = text_of(pick(row, "name")[1]).strip() or "(no name)"
+            on = set()
+            for m in names_in(pick(row, "manager")[1]):
+                p = person(m)
+                p["projects"].add(name)
+                p["manages"] += 1
+                on.add(m)
+            if i >= most or time.monotonic() > deadline:
+                out["not_read"] += 1
+            else:
+                try:
+                    for t in pulse_mod._rows(ctx, "tasks", deadline, time.sleep, id=row["id"]):
+                        if is_done(t) is True:
+                            continue
+                        for m in names_in(pick(t, "assignee")[1]):
+                            p = person(m)
+                            p["projects"].add(name)
+                            p["tasks"] += 1
+                            share = allocation(t)
+                            if share is not None:
+                                p["task_raw"].append(share)
+                            on.add(m)
+                    out["tasks_read"] += 1
+                except Exception:   # one project's tasks: counted, never fatal
+                    out["not_read"] += 1
+            out["projects"].append({"name": name, "people": sorted(on)})
+        try:
+            for res in ctx.rows("resources"):
+                share = allocation(res)
+                if share is None:
+                    continue
+                for m in names_in(pick(res, "name")[1]):
+                    person(m)["res_raw"] = share
+        except Exception:   # allocation is a bonus: counts still give the load
+            pass
+        scale = tenant_scale([v for p in people.values() for v in ([p["res_raw"]] if p["res_raw"] else [])
+                              + p["task_raw"]])
+
+        def pct(v):
+            return v[0] if v[1] else v[0] * scale
+        for p in people.values():
+            p["res_alloc"] = round(pct(p["res_raw"]), 1) if p["res_raw"] else None
+            p["task_alloc"] = round(sum(pct(v) for v in p["task_raw"]), 1) if p["task_raw"] else None
+        out["reached"] = True
+        out["note"] = (f"{len(open_rows)} open project(s)" + (f"; tasks not read for {out['not_read']} (time or "
+                                                               "project limit)" if out["not_read"] else ""))
+        kp.audit_logger(settings)({"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "via": PROG,
+                                   "user": f"u:{kp.token_key(token)[:12]}", "tool": "teammap", "outcome": "ok",
+                                   "projects": len(open_rows)})
+    except Exception as e:   # any problem reaching it: the map goes on without it
+        why = str(e) or e.__class__.__name__
+        if token:
+            why = why.replace(token, "[hidden]")
+        if e.__class__.__name__ not in ("PPMXError", "ToolError"):   # those are written to be safe to show
+            try:
+                from ppmx.client import scrub
+                why = scrub(why, 160)
+            except ImportError:
+                why = clip(why, 160)
+        out.update(reached=False, note=clip(why, 200), projects=[], people={})
+    return out
+
+
+# ------------------------------------------------------------------ the team's shared expertise
+def team_expertise():
+    """(records, kit_teamviews, note): the team cache's records, read only."""
+    try:
+        import kit_transport as kt
+        import kit_teamviews as tv
+    except ImportError:
+        return [], None, "kit-team isn't installed"
+    if not kt.DEFAULT_DB.exists():
+        return [], tv, "no team cache yet (kit-team sync)"
+    try:
+        cache = kt.Cache(kt.DEFAULT_DB)
+        try:
+            recs = cache.records()
+        finally:
+            cache.close()
+    except Exception:
+        return [], tv, "the team cache can't be read"
+    return recs, tv, f"{len({r.get('kit_id') for r in recs})} Kit(s) in the team cache"
+
+
+# ------------------------------------------------------------------ the map
+def build(args):
+    max_load, max_items = number("TEAMMAP_MAX_LOAD", 100), number("TEAMMAP_MAX_ITEMS", 8)
+    cov = load_coverage()
+    roster = build_roster(cov)
+    named = bool(roster.people)
+    pp = read_ppmx(args)
+    recs, tv, team_note = team_expertise()
+
+    # Everyone on the team, with what PPM Express says about them.
+    def blank(name, kit=None):
+        return {"name": name, "kit": kit, "projects": set(), "manages": 0, "tasks": 0, "res_alloc": None,
+                "task_alloc": None, "knows": [], "only": [], "backup_for": []}
+    people, others = {name: blank(name, p["kit"]) for name, p in roster.people.items()}, set()
+    if named:
+        roster.link(list(pp["people"]))
+    alias_of = {}
+    for raw, facts in pp["people"].items():
+        canon = roster.resolve(raw)
+        if not canon:
+            if named:
+                others.add(full_form(raw))
+                continue
+            canon = roster.add(display(raw))         # nobody named: the team is who PPM Express shows
+            people.setdefault(canon, blank(canon))
+        alias_of[raw] = canon
+        q = people[canon]
+        q["projects"] |= facts["projects"]
+        q["manages"] += facts["manages"]
+        q["tasks"] += facts["tasks"]
+        if facts["res_alloc"] is not None:          # one person's allocation, under any of their spellings
+            q["res_alloc"] = max(q["res_alloc"] or 0, facts["res_alloc"])
+        if facts["task_alloc"] is not None:
+            q["task_alloc"] = round((q["task_alloc"] or 0) + facts["task_alloc"], 1)
+    for q in people.values():
+        q["alloc"] = q["res_alloc"] if q["res_alloc"] is not None else q["task_alloc"]
+
+    def canon_of(n):
+        return roster.resolve(n) or n
+    for s in cov["systems"]:
+        who = [canon_of(n) for n in s.get("who") or []]
+        backup = [canon_of(n) for n in s.get("backup") or []]
+        for n in who:
+            people[n]["knows"].append(s["name"])
+        for n in backup:
+            people[n]["backup_for"].append(s["name"])
+        if len(set(who + backup)) == 1:
+            people[(who or backup)[0]]["only"].append(s["name"])
+
+    for q in people.values():
+        q["items"] = len(q["projects"]) + q["tasks"]
+        if q["alloc"] is not None:
+            q["load"], q["over"] = q["alloc"], q["alloc"] > max_load
+            q["load_text"] = f"{q['alloc']:g}% allocated"
+        elif pp["reached"]:
+            q["load"], q["over"] = q["items"] / max_items * 100 if max_items else 0, q["items"] > max_items
+            q["load_text"] = (f"{len(q['projects'])} project{'s' if len(q['projects']) != 1 else ''}, "
+                              f"{q['tasks']} open task{'s' if q['tasks'] != 1 else ''}") if q["items"] else \
+                "nothing open in PPM Express"
+        else:
+            q["load"], q["over"], q["load_text"] = None, False, "load unknown"
+
+    # Who could back up each system only one person knows.
+    kit_person = {p["kit"]: n for n, p in people.items() if p.get("kit")}
+    single, nobody = [], []
+    for s in cov["systems"]:
+        who = [canon_of(n) for n in s.get("who") or []]
+        backup = [canon_of(n) for n in s.get("backup") or []]
+        everyone = set(who + backup)
+        if not everyone:
+            nobody.append(s["name"])
+            continue
+        if len(everyone) != 1:
+            continue
+        only = (who or backup)[0]
+        mine = keywords(s["name"]) | keywords(" ".join(s.get("tags") or []))
+        cands, unmapped = {}, set()
+
+        def credit(name, points, why):
+            if name == only or name not in people:
+                return
+            c = cands.setdefault(name, {"score": 0, "why": []})
+            c["score"] += points
+            if why not in c["why"]:
+                c["why"].append(why)
+        for other in cov["systems"]:
+            if other is s:
+                continue
+            shared = mine & (keywords(other["name"]) | keywords(" ".join(other.get("tags") or [])))
+            if shared:
+                for n in (other.get("who") or []) + (other.get("backup") or []):
+                    credit(canon_of(n), len(shared), f"knows {other['name']} ({', '.join(sorted(shared)[:3])})")
+        for proj in pp["projects"]:
+            shared = mine & keywords(proj["name"])
+            if shared:
+                for raw in proj["people"]:
+                    if raw in alias_of:
+                        credit(alias_of[raw], len(shared), f"is on {proj['name']} in PPM Express")
+        if tv is not None and recs:
+            for w in sorted(mine):
+                for k in tv.experts(recs, w):
+                    name = kit_person.get(k["kit_id"])
+                    if name:
+                        credit(name, 1, f"has shared records on {w}" + (f" (declares {k['declared']})"
+                                                                      if k.get("declared") else ""))
+                    elif k["kit_id"] not in kit_person:
+                        unmapped.add(f"{k['kit_id']} ({k.get('owner_role') or 'role not given'})")
+        fit = [n for n in cands if not people[n]["over"]]
+        fit.sort(key=lambda n: ((0, people[n]["load"]) if people[n]["load"] is not None else (1, 0),
+                                -cands[n]["score"], n.lower()))
+        pick_ = fit[0] if fit else None
+        over = sorted(n for n in cands if people[n]["over"])
+        single.append({"system": s["name"], "kind": s.get("kind", "system"), "only": only,
+                       "only_load": people[only]["load_text"], "only_over": people[only]["over"],
+                       "only_value": people[only]["load"], "backup": pick_,
+                       "backup_load": people[pick_]["load_text"] if pick_ else None,
+                       "why": cands[pick_]["why"][:2] if pick_ else [], "related_but_over": over,
+                       "unmapped_kits": sorted(unmapped)})
+    single.sort(key=lambda x: (0 if x["only_over"] else 1, -(x["only_value"] if x["only_value"] is not None else -1),
+                               x["system"].lower()))
+    for x in single:
+        if x["backup"]:
+            plan = (f"{x['backup']} learns it from {x['only']}. Why {x['backup']}: {'; '.join(x['why'])}; the lowest "
+                    f"load of those with related work ({x['backup_load']}).")
+        else:
+            plan = f"Pair someone with {x['only']} for a quarter."
+            over = x["related_but_over"]
+            if len(over) == 1:
+                plan += f" {over[0]} has related work but is over the load limit."
+            elif over:
+                plan += f" {', '.join(over)} have related work but are over the load limit."
+        if x["only_over"]:
+            plan += f" {x['only']} is over the load limit, so plan the handover time first."
+        if x["unmapped_kits"]:
+            plan += (f" Shared records show related work by {', '.join(x['unmapped_kits'][:3])}: say who that is with "
+                     f"`{PROG} person NAME --kit KIT_ID`.")
+        x["plan"] = plan
+    team = sorted(people.values(), key=lambda q: (-(q["load"] if q["load"] is not None else -1), q["name"].lower()))
+    return {"date": kc.today().isoformat(), "coverage_file": str(coverage_path()), "max_load": max_load,
+            "max_items": max_items,
+            "ppmx": {"reached": pp["reached"], "note": pp["note"], "projects": len(pp["projects"]),
+                     "others_left_out": len(others)},
+            "team_records": team_note,
+            "people": [{"name": q["name"], "load": q["load_text"], "over": q["over"],
+                        "allocation": q["alloc"], "projects": sorted(q["projects"]), "open_tasks": q["tasks"],
+                        "knows": q["knows"], "only_one": q["only"], "backup_for": q["backup_for"]} for q in team],
+            "over_limit": [{"name": q["name"], "load": q["load_text"]} for q in team if q["over"]],
+            "single_points": single, "nobody": nobody, "systems": len(cov["systems"]),
+            "names_to_check": [{"name": n, "ppmx_names": fulls} for n, fulls in sorted(roster.ambiguous.items())]}
+
+
+def to_markdown(m):
+    d = kc.parse_date(m["date"])
+    pp = m["ppmx"]
+    out = [f"# Team coverage map, {kc.fmt(d)}", "",
+           f"- **Prepared:** {kc.fmt(d)} by kit-teammap {WORK}, from the coverage file, PPM Express, and the "
+           "team's shared records; no model call.",
+           "- **PPM Express:** " + (f"read: {pp['note']}" if pp["reached"] else f"not reached: {pp['note']}; loads "
+                                    "unknown") + (f"; {pp['others_left_out']} other people on those projects left out "
+                                                  "(not on the team list)" if pp["others_left_out"] else ""),
+           f"- **Shared records:** {m['team_records']}",
+           f"- **Coverage file:** {m['systems']} system(s) and domain(s)" + (
+               "" if m["systems"] else f"; none yet: `{PROG} add SYSTEM --who NAME` starts it"), "",
+           "## Who is on what", ""]
+    if m["people"]:
+        out += ["| Person | Load | Projects | Knows |", "|---|---|---|---|"]
+        for p in m["people"]:
+            knows = [k + (" (only them)" if k in p["only_one"] else "") for k in p["knows"]]
+            knows += [f"{k} (backup)" for k in p["backup_for"]]
+            projects = ", ".join(clip(x, 40) for x in p["projects"][:4]) + (
+                f" (+{len(p['projects']) - 4} more)" if len(p["projects"]) > 4 else "")
+            out.append(f"| {p['name']} | {p['load']}{' (over)' if p['over'] else ''} | {projects or '-'} | "
+                       f"{'; '.join(knows) or '-'} |")
+    else:
+        out.append("Nobody yet: add the coverage file's first entries, or connect PPM Express.")
+    if m["names_to_check"]:
+        out += ["", "## Names to check", ""]
+        out += [f"- {x['name']}: PPM Express has {' and '.join(x['ppmx_names'])}, so none of them was counted as "
+                f"{x['name']}. Say which: `{PROG} person {x['name']} --alias \"FULL NAME\"`."
+                for x in m["names_to_check"]]
+    out += ["", "## Over the limit", ""]
+    if not pp["reached"]:
+        out.append("- Unknown: PPM Express wasn't read, so there are no loads.")
+    else:
+        out += [f"- {p['name']}: {p['load']}" for p in m["over_limit"]] or [
+            f"- Nobody over {m['max_load']:g}% allocated (or {m['max_items']:g} open projects and tasks)."]
+    out += ["", "## Known by one person only", ""]
+    if m["single_points"]:
+        out += ["| System or domain | Only | Their load | Suggested backup |", "|---|---|---|---|"]
+        for x in m["single_points"]:
+            out.append(f"| {x['system']} | {x['only']} | {x['only_load']}{' (over)' if x['only_over'] else ''} | "
+                       f"{(x['backup'] + ' (' + x['backup_load'] + ')') if x['backup'] else 'pair someone for a quarter'} |")
+    else:
+        out.append("- None in the coverage file." if m["systems"] else "- Nothing to check until the coverage file "
+                                                                       "has entries.")
+    out += ["", "## Cross-training plan", ""]
+    if m["single_points"]:
+        for i, x in enumerate(m["single_points"], 1):
+            out.append(f"{i}. **{x['system']}** (only {x['only']}): {x['plan']}")
+        out += ["", f"When a backup is agreed, record it: `{PROG} add \"SYSTEM\" --who NAME --backup NAME`."]
+    else:
+        out.append("- No gaps to close.")
+    if m["nobody"]:
+        out += ["", "## Nobody named", ""] + [f"- {s}: name who knows it with `{PROG} add \"{s}\" --who NAME`."
+                                              for s in m["nobody"]]
+    out += ["", "_Information only; nothing was sent._", ""]
+    return "\n".join(out)
+
+
+def cmd_map(a):
+    m = build(a)
+    if a.json:
+        print(json.dumps(m, indent=2, ensure_ascii=False))
+        if not a.write:
+            return 0
+    md = to_markdown(m)
+    if a.write:
+        out = KIT / "briefs" / f"teammap-{m['date']}.md"
+        kc.write(out, md)
+        if not a.json:
+            print(f"{PROG}: wrote briefs/{out.name} {WORK}: {len(m['people'])} people, {len(m['over_limit'])} over the "
+                  f"limit, {len(m['single_points'])} known by one person only")
+        return 0
+    print(md)
+    return 0
+
+
+def main(argv):
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except (AttributeError, ValueError):
+            pass
+    cmds = {"add", "remove", "import", "person", "coverage"}
+    if argv[:1] and argv[0] in cmds:
+        ap = argparse.ArgumentParser(prog=f"{PROG} {argv[0]}")
+        if argv[0] in ("add", "remove"):
+            ap.add_argument("system", nargs="+")
+        if argv[0] == "add":
+            ap.add_argument("--who", required=True)
+            ap.add_argument("--backup")
+            ap.add_argument("--tags")
+            ap.add_argument("--domain", action="store_true")
+        if argv[0] == "import":
+            ap.add_argument("file")
+        if argv[0] == "person":
+            ap.add_argument("name", nargs="+")
+            ap.add_argument("--kit")
+            ap.add_argument("--alias")
+        if argv[0] == "coverage":
+            ap.add_argument("--json", action="store_true")
+        a = ap.parse_intermixed_args(argv[1:])   # options before or after the name (Python 3.7 and up)
+        return {"add": cmd_add, "remove": cmd_remove, "import": cmd_import, "person": cmd_person,
+                "coverage": cmd_coverage}[argv[0]](a)
+    ap = argparse.ArgumentParser(prog=PROG, description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--write", action="store_true", help="save briefs/teammap-YYYY-MM-DD.md")
+    ap.add_argument("--json", action="store_true", help="the map as JSON")
+    ap.add_argument("--no-ppmx", action="store_true", help="leave PPM Express out")
+    return cmd_map(ap.parse_args(argv))
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

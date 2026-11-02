@@ -9,6 +9,8 @@
 # its register (demand_refresh.py, prompt-demand-refresh.md); off by default.
 # With REG_WATCH="on", the first weekly review of each month also has the researcher write a
 # monthly regulatory watch (reg_watch.py, prompt-reg-watch.md); off by default.
+# With ARCH_DIGEST="on", the first weekly review of each month also has kit-digest draft last month's
+# architecture digest for your edit (no model call); off by default.
 # Nothing runs while Kit is paused (kit-pause). Before the morning and weekly runs, kit-outlook
 # checks that Outlook answers (set OUTLOOK_CHECK="off" in the config to skip it).
 # Every run records its estimated cost in .install/logs/cost.jsonl (kit-cost). With
@@ -253,6 +255,16 @@ if [ "$MODE" = "morning" ] || [ "$MODE" = "weekly" ]; then
     perl -e 'alarm shift; exec @ARGV' "${PPMX_PULSE_TIMEOUT:-300}" python3 "$KIT/.install/shared/bin/kit-ppmx" \
       pulse --brief --save > briefs/extra-ppmx-pulse.txt 2>> "$LOG" || rm -f briefs/extra-ppmx-pulse.txt
     [ -s briefs/extra-ppmx-pulse.txt ] || rm -f briefs/extra-ppmx-pulse.txt
+  fi
+  # Monthly architecture digest (ARCH_DIGEST="on"; off by default): on the first weekly review of each month
+  # (day 1 to 7; ARCH_DIGEST_WHEN="every-run" runs it on every weekly review, for a test), kit-digest writes last
+  # month's digest to briefs/digest-YYYY-MM.md for your edit (one already there is kept), and the review gets a
+  # line pointing at it. No model call, [work]. Time-limited by ARCH_DIGEST_TIMEOUT (seconds, default 300).
+  if [ "$MODE" = "weekly" ] && [ "${ARCH_DIGEST:-off}" = "on" ] && [ -f "$KIT/.install/shared/bin/kit-digest" ] \
+     && { [ "${ARCH_DIGEST_WHEN:-first-week}" = "every-run" ] || [ "$(date +%d)" -le 7 ]; }; then
+    perl -e 'alarm shift; exec @ARGV' "${ARCH_DIGEST_TIMEOUT:-300}" python3 "$KIT/.install/shared/bin/kit-digest" \
+      --write --month last --brief > briefs/extra-arch-digest.txt 2>> "$LOG" || rm -f briefs/extra-arch-digest.txt
+    [ -s briefs/extra-arch-digest.txt ] || rm -f briefs/extra-arch-digest.txt
   fi
   for f in briefs/dates.txt briefs/renewals.txt briefs/renewals-missing.txt; do [ -s "$f" ] || rm -f "$f"; done
 fi
