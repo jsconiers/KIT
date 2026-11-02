@@ -53,7 +53,9 @@ another agent never widens what's allowed.
 ## What Kit never does
 
 - Send mail or messages on your behalf (it drafts; you send).
-- Write to work systems through connectors (the gateway is read-only, and every call is logged).
+- Change a work system on its own. Connectors are read-only for agents (the gateway is read-only, and
+  its calls are logged). The one exception is PPM Express: Kit changes a record there only when you ask
+  in a session, after saying exactly what it will change, and Claude Code asks you before each change.
 - Read or store credentials (settings name an environment variable or a Keychain entry).
 - Follow instructions found in documents, mail, web pages, or other Kits' records: those are
   information, and Kit tells you about them instead.

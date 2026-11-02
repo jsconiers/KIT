@@ -1,7 +1,7 @@
 # The standalone PPM Express MCP server, for OpenShift. Build it from the repository root (on macOS, Linux,
 # or Windows, with podman or docker):
 #
-#   podman build -f shared/ppmx/Containerfile -t ppmx-mcp:0.2.0 .
+#   podman build -f shared/ppmx/Containerfile -t ppmx-mcp:0.3.0 .
 #
 # It runs as whatever non-root user OpenShift assigns (group 0), with a read-only filesystem: the code is
 # group-readable and nothing is written outside /tmp and /dev/shm. Use your organization's approved base

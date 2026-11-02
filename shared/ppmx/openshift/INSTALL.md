@@ -27,9 +27,9 @@ service, set `PPMX_WRITES` to `"off"` in step 5.
 | Outbound HTTPS from the cluster to PPM Express, directly or through a proxy | The server calls PPM Express | your platform team can say which |
 | A personal access token | To test the service (yours; it's never stored in the cluster) | PPM Express > Automation |
 
-Before live use, check the endpoint paths and field names against your tenant's endpoint reference (PPM
-Express > Automation > Swagger), as `shared/ppmx/README.md` describes. Correcting them means changing
-`client.py` or `tools.py` and building a new image.
+The endpoint paths and field names were confirmed against PPM Express's OpenAPI description and a live
+tenant on 02-Nov-2026 (version 0.3.0; `shared/ppmx/README.md` says what was checked). If your tenant
+differs, correcting them means changing `client.py` or `tools.py` and building a new image.
 
 ## 1. Get the code
 
@@ -45,7 +45,7 @@ Every command below runs from the repository's top folder.
 **Option A: on your computer.** The same command works in bash, zsh, and PowerShell:
 
 ```bash
-podman build --platform linux/amd64 -f shared/ppmx/Containerfile -t ppmx-mcp:0.2.0 .
+podman build --platform linux/amd64 -f shared/ppmx/Containerfile -t ppmx-mcp:0.3.0 .
 ```
 
 - `--platform linux/amd64` matters on an Apple Silicon Mac: without it the image is built for Arm, and an
@@ -64,7 +64,7 @@ Containerfile as its Dockerfile:
 ```bash
 mkdir -p /tmp/ppmx-build/shared && cp -R shared/ppmx /tmp/ppmx-build/shared/
 cp shared/ppmx/Containerfile /tmp/ppmx-build/Dockerfile
-oc new-build --name ppmx-mcp --strategy docker --binary --to ppmx-mcp:0.2.0
+oc new-build --name ppmx-mcp --strategy docker --binary --to ppmx-mcp:0.3.0
 oc start-build ppmx-mcp --from-dir /tmp/ppmx-build --follow
 ```
 
@@ -72,11 +72,11 @@ oc start-build ppmx-mcp --from-dir /tmp/ppmx-build --follow
 New-Item -ItemType Directory -Force "$env:TEMP\ppmx-build\shared" | Out-Null
 Copy-Item -Recurse -Force shared\ppmx "$env:TEMP\ppmx-build\shared\"
 Copy-Item shared\ppmx\Containerfile "$env:TEMP\ppmx-build\Dockerfile"
-oc new-build --name ppmx-mcp --strategy docker --binary --to ppmx-mcp:0.2.0
+oc new-build --name ppmx-mcp --strategy docker --binary --to ppmx-mcp:0.3.0
 oc start-build ppmx-mcp --from-dir "$env:TEMP\ppmx-build" --follow
 ```
 
-The image is then `image-registry.openshift-image-registry.svc:5000/<namespace>/ppmx-mcp:0.2.0`. Add
+The image is then `image-registry.openshift-image-registry.svc:5000/<namespace>/ppmx-mcp:0.3.0`. Add
 `--build-arg` values to the BuildConfig's `dockerStrategy.buildArgs` if you need them.
 
 ## 3. Try it on your computer (optional)
@@ -85,12 +85,12 @@ Run the image the way OpenShift will (a random non-root user, read-only), pointi
 
 ```bash
 podman run --rm -p 8080:8080 --user 1000770000:0 --read-only --tmpfs /tmp \
-  -e PPMX_BASE_URL=https://<host>/@<tenant>/v1.0 ppmx-mcp:0.2.0
+  -e PPMX_BASE_URL=https://<host>/@<tenant>/v1.0 ppmx-mcp:0.3.0
 ```
 
 ```powershell
 podman run --rm -p 8080:8080 --user 1000770000:0 --read-only --tmpfs /tmp `
-  -e PPMX_BASE_URL=https://<host>/@<tenant>/v1.0 ppmx-mcp:0.2.0
+  -e PPMX_BASE_URL=https://<host>/@<tenant>/v1.0 ppmx-mcp:0.3.0
 ```
 
 In a second window, check it answers and that your token works. The token is read without showing it, so
@@ -121,8 +121,8 @@ production), with `PPMX_BASE_URL` set in the environment.
 
 ```bash
 podman login <registry>
-podman tag ppmx-mcp:0.2.0 <registry>/<namespace>/ppmx-mcp:0.2.0
-podman push <registry>/<namespace>/ppmx-mcp:0.2.0
+podman tag ppmx-mcp:0.3.0 <registry>/<namespace>/ppmx-mcp:0.3.0
+podman push <registry>/<namespace>/ppmx-mcp:0.3.0
 ```
 
 If the registry needs credentials to pull, give the project a pull secret, ideally with a robot or
@@ -141,12 +141,17 @@ All in `shared/ppmx/openshift/`. Nothing here holds a token.
 
 - **`kustomization.yaml`**: `namespace`, and under `images`, `newName` (the image without its tag, for
   example `<registry>/<namespace>/ppmx-mcp`, or the cluster registry's name from option B) and `newTag`
-  (`"0.2.0"`).
+  (`"0.3.0"`).
 - **`configmap.yaml`**:
   - `PPMX_BASE_URL`: your tenant's API address.
   - `PPMX_WRITES`: `"on"` offers the create and update tools; `"off"` makes a read-only service.
   - `PPMX_ALLOWED_ORIGINS`: leave empty. Claude Code and other MCP clients don't send a browser origin;
     a browser page that should call the server needs its origin listed here.
+  - `PPMX_WORK_MAX_PROJECTS` and `PPMX_WORK_SECONDS` (25 and 30) bound `list_my_work`, which scans projects
+    for the caller's tasks and deliverables: keep the seconds well under the route's and gunicorn's
+    60-second timeouts, and the projects within what the rate allows (each costs one or two requests).
+    `"me"` is always the caller's own token's user, resolved per request token; `PPMX_MY_NAME` is for the
+    single-user connector only and is ignored here.
   - The rest (rate, cache, page sizes) can stay as they are; `shared/ppmx/README.md` explains each.
   - If the cluster reaches the internet through a proxy, add `HTTPS_PROXY: "http://<proxy>:<port>"` and
     `NO_PROXY: ".cluster.local,.svc"`.

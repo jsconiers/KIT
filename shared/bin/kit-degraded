@@ -23,6 +23,7 @@ import os
 import pathlib
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 
@@ -78,6 +79,19 @@ def sprint(lines):
     return f"{head.strip()} ({done_n} done, {open_n} open)"
 
 
+def command_words(cmd):
+    """A configured command line as its words. On Windows, shlex's POSIX mode would drop the backslashes in
+    paths, so it splits in Windows mode (and takes the quotes off), and finds a bare command such as kitcal
+    through PATHEXT (kitcal.cmd), which starting it directly wouldn't."""
+    if os.name != "nt":
+        return [os.path.expanduser(p) for p in shlex.split(cmd)]
+    words = [w[1:-1] if len(w) > 1 and w[0] == w[-1] and w[0] in "\"'" else w for w in shlex.split(cmd, posix=False)]
+    words = [os.path.expanduser(w) for w in words]
+    if words and not os.path.dirname(words[0]):
+        words[0] = shutil.which(words[0]) or words[0]
+    return words
+
+
 def calendar(args):
     if args.no_calendar:
         return None, "left out (Outlook check failed or --no-calendar)"
@@ -89,9 +103,9 @@ def calendar(args):
         if not m or not m.group(1).strip():
             return None, "no calendar command set"
         try:
-            cmd = [os.path.expanduser(p) for p in shlex.split(m.group(1))]
+            cmd = command_words(m.group(1))
             raw = subprocess.run(cmd, capture_output=True, text=True, timeout=120).stdout
-        except (OSError, subprocess.TimeoutExpired):
+        except (OSError, ValueError, subprocess.TimeoutExpired):
             return None, "the calendar command didn't answer"
     try:
         events = json.loads(raw or "[]")

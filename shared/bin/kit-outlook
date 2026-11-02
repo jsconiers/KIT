@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""kit-outlook: check that classic Outlook answers before a run relies on it, retrying if it's slow.
+"""kit-outlook: check that classic Outlook answers before a run relies on it, retrying if it's slow (macOS only).
 
   kit-outlook                       check once now and say what's wrong, if anything
   kit-outlook check                 the same
@@ -20,7 +20,8 @@ The result file has one line: a status word, the time, and a plain message. Stat
   not-responding  Outlook is open but didn't answer, even after the retries
   blocked         macOS blocked Kit from controlling Outlook (Automation permission)
   error           something else went wrong; the message says what
-  skipped         not macOS (the Windows runs talk to Outlook through COM instead)
+  skipped         not macOS: kit-outlook is macOS only, and Windows has no command for it (the Windows runs
+                  talk to Outlook through COM instead)
 
 Exit status: 0 for ok or skipped, 1 for anything else.
 """
@@ -104,8 +105,10 @@ def check(retry):
 
 def main(argv):
     args = list(argv)
+    if args and args[0] in ("-h", "--help"):
+        args[0] = "help"      # print the help, rather than taking a flag as "check"
     cmd = args.pop(0) if args and not args[0].startswith("-") else "check"
-    if cmd in ("-h", "--help", "help"):
+    if cmd == "help":
         print(__doc__)
         return 0
     if cmd == "status":

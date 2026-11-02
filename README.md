@@ -12,6 +12,9 @@ affiliated with them.)
 
 - **New here?** Read this page, then [INSTALL.md](INSTALL.md) and [ONBOARDING.md](ONBOARDING.md).
 - **Changing Kit?** Read [DESIGN.md](DESIGN.md) and [GOVERNANCE.md](GOVERNANCE.md).
+- **Want the big picture?** Read the [overview](docs/OVERVIEW.md), the
+  [design guide](docs/DESIGN-GUIDE.md), and [connectivity](docs/CONNECTIVITY.md) (Word and PDF copies
+  are in `docs/`).
 - **Using Kit?** It isn't open source. All rights are reserved, and installing or using Kit takes
   the copyright holder's written permission. See [LICENSE](LICENSE).
 
@@ -77,6 +80,7 @@ agent meant to reach outside systems; the connector guard keeps its calls read-o
 
 | When | Run | What you get |
 |---|---|---|
+| Daily 06:45 and 15:45 | Preflight (login check) | Checks Claude Code can run and that the connectors in `PREFLIGHT_CONNECTORS` are signed in, with one tiny Claude call; tells you once per lapse |
 | Weekdays 07:45 | Morning brief | A connector health line, to-dos, calendar, mail needing you, health and audit issues, queue hygiene |
 | Mon to Thu 09:00 | Work list | What Kit can do on its own today; you approve it in a session |
 | Monday 06:30 | Weekly review | The week, the queue, audit, what changed on your demands (optional refresh), horizon scan, watch, sprint review, cost, quality, retrospective (first Monday), and the monthly architecture digest (optional, first Monday) |
@@ -84,8 +88,11 @@ agent meant to reach outside systems; the connector guard keeps its calls read-o
 | Weekdays, every 30 minutes (optional) | Meeting prep | A prep pack per upcoming meeting (a plain script; no Claude run) |
 | Daily 12:30 | Backup | An encrypted, checked archive of Kit's folder and history, in the folder you choose |
 | Every 15 minutes | To-do sync | Your queue mirrored to Outlook Tasks or Apple Reminders, and the "Kit Inbox" list pulled in |
+| Always on (optional, macOS) | Text-back | `kit-textback` answers texts you send yourself that start with "Kit" (`TEXTBACK="off"` by default) |
+| When you run it | Library index | `kit-library index` catalogs your collections; no scheduled job ships for it, so run it yourself or schedule it |
 
-Scheduled runs use launchd on macOS and Task Scheduler on Windows. See INSTALL.md. If the
+Scheduled runs use launchd on macOS and Task Scheduler on Windows (the end-of-day wrap runs at the
+same times on both). See INSTALL.md. If the
 budget's stop level is reached, or the morning run fails or times out, the brief still arrives:
 `kit-degraded` writes it from Kit's files with no model call, marked as degraded (`DEGRADED_MODE` in
 the config). A run that fails in a way that looks transient (overload, rate limit, network, an API 5xx
@@ -114,7 +121,7 @@ The installer links these into `~/.local/bin` (all in `shared/bin/`):
 | `kit-meetload` | Meeting load audit: hours and share of working hours, recurring meetings' weekly cost, back-to-back runs, focus time left, after-hours meetings, double bookings, suggestions; `--holds` drafts focus time; reads the calendar, a JSON file, or an .ics export |
 | `kit-dates` | Important dates (birthdays, anniversaries, work anniversaries), with a to-do and a drafted card or note when one comes up |
 | `kit-touch` | Keep in touch: who you haven't talked to in a while, by your own rhythm for each; calls and meals on the calendar count |
-| `kit-library` | Catalogs folders you choose (collections): tags, full-text and scripture search, scanned PDFs read on the Mac; delivers finished work to an output folder, mirrored to a synced folder if you like |
+| `kit-library` | Catalogs folders you choose (collections): tags, full-text and scripture search, scanned PDFs read on the Mac; delivers finished work to an output folder, mirrored to a synced folder if you like (Claude Code asks before mirror and fetch; work and confidential material is never mirrored) |
 | `kit-textback` | macOS: text Kit from your phone ("kit today", "kit find ..."); changes come back with a code to confirm |
 | `kit-letter` | A Word letter from plain text: `build` leaves room for a pen signature; `sign` adds your saved signature, and Claude Code asks you each time |
 | `kit-settings` | How briefs reach you and which app your to-dos sync with, work and personal |
@@ -176,7 +183,7 @@ The installer links these into `~/.local/bin` (all in `shared/bin/`):
 |---|---|
 | `kit-pause` | Kill switch: stops scheduled runs and connector calls until `kit-pause resume` |
 | `kit-connect` | Connector check: guard, credential variables by name, Claude Code health |
-| `kit-ppmx` | PPM Express from Claude Code or Claude Desktop, on macOS or Windows: reads portfolios, projects, tasks, key dates, ideas, and resources, and creates or updates them, asking you before each change (a stub until a tenant's endpoints are confirmed). `serve` (the MCP server), `check`, `tools`, `call`, `desktop` (adds it to Claude Desktop), and `setup` (the steps, changing nothing). `pulse`: the portfolio pulse (projects turned At Risk or Critical, key dates slipped or coming due, what changed since last week), in Monday's brief with `PPMX_PULSE="on"`. `actions`: meeting actions from the scribe's minutes as proposed tasks to create or update, each made only on your yes, one at a time (`actions apply N`). The same package runs as a team service on OpenShift: `shared/ppmx/openshift/INSTALL.md` |
+| `kit-ppmx` | PPM Express from Claude Code or Claude Desktop, on macOS or Windows: reads portfolios, projects, tasks, key dates, deliverables, ideas, and resources (with "me" in person filters, and `list_my_work` for your own tasks and deliverables across projects), and creates or updates them, asking you before each change (confirmed against the live API on 02-Nov-2026). `serve` (the MCP server), `check`, `tools`, `call`, `desktop` (adds it to Claude Desktop), and `setup` (the steps, changing nothing). `pulse`: the portfolio pulse (projects turned At Risk or Critical, key dates slipped or coming due, what changed since last week), in Monday's brief with `PPMX_PULSE="on"`. `actions`: meeting actions from the scribe's minutes as proposed tasks to create or update, each made only on your yes, one at a time (`actions apply N`). The same package runs as a team service on OpenShift: `shared/ppmx/openshift/INSTALL.md` |
 | `kit-backup` | Checked archive of Kit's folder and history to a folder you choose (local or shared), encrypted on request; `verify`, `restore` |
 | `kit-audit-export` | A dated evidence pack of Kit's controls for a compliance or security review; `--controls` organises it by control for an audit request, with gaps listed |
 | `kit-retention` | Retention rules with legal holds; reports, and only moves files with `--yes` |
@@ -273,7 +280,9 @@ shared/       cross-platform Python: kit_setup.py (installer logic), doctor.py, 
 platform/mac/      install.sh, uninstall.sh, morning/run.sh and launchd templates, mail and
                    calendar adapters
 platform/windows/  install.ps1, uninstall.ps1, morning/run.ps1 and Task Scheduler scripts,
-                   Outlook adapters (built on macOS; untested on Windows)
+                   Outlook adapters. The installer (install, reinstall, and repair) and the
+                   listed suites run in CI on Windows (PowerShell 5.1 and 7); the Outlook COM
+                   adapters and Task Scheduler haven't run on a real Windows machine
 tests/        test suites (bash tests/test_*.sh) and agent eval cases (tests/evals/)
 install.sh    dispatches to platform/mac/install.sh
 install.ps1   dispatches to platform/windows/install.ps1
@@ -303,6 +312,9 @@ yourself." INSTALL.md covers Windows, scheduled runs, connectors, and the rest.
 | [GOVERNANCE.md](GOVERNANCE.md) | Roles and how changes are made (draft) |
 | [CHANGELOG.md](CHANGELOG.md) | What each release changed |
 | [DEPENDENCIES.md](DEPENDENCIES.md) | What each agent and tool needs, and what happens without it |
+| [docs/OVERVIEW.md](docs/OVERVIEW.md) | What Kit is, the problem it solves, and how it works, in about ten pages |
+| [docs/DESIGN-GUIDE.md](docs/DESIGN-GUIDE.md) | The architecture, guardrails, and extension model in depth |
+| [docs/CONNECTIVITY.md](docs/CONNECTIVITY.md) | How Kit reaches outside systems, and a connectivity matrix template |
 | [shared/KIT-RUN.md](shared/KIT-RUN.md) | Running agents outside Claude Code, and its limits |
 | `shared/records/README.md` | Shared record formats and trust rules |
 | `shared/sql/README.md` | The SQL transport (MySQL and PostgreSQL tested; SQL Server untested) |

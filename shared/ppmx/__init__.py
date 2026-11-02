@@ -1,5 +1,5 @@
 """ppmx: a Model Context Protocol (MCP) server for PPM Express's public REST API. It reads portfolios,
-programs, projects, tasks, key dates, ideas, challenges, and resources, and creates and updates them
+programs, projects, tasks, key dates, deliverables, ideas, challenges, and resources, and creates and updates them
 (PPM Express's API has no delete). PPMX_WRITES=off makes it read-only.
 
 One package, two ways to run it:
@@ -14,9 +14,9 @@ One package, two ways to run it:
 Standard library only (the container adds gunicorn to serve HTTP). See README.md, and
 openshift/INSTALL.md for the standalone service.
 
-STATUS: stub. The endpoint paths (client.ENDPOINTS) and the attribute names (tools.FIELDS) follow PPM
-Express's published API descriptions and still need checking against a tenant's own endpoint reference
-(PPM Express > Automation > Swagger) before live use. The code tables (codes.TABLES) are the ones PPM
-Express publishes.
+STATUS: confirmed on 02-Nov-2026. The endpoint paths (client.ENDPOINTS) match PPM Express's OpenAPI
+description, and the reads, response shapes, and attribute names (tools.FIELDS) were checked against a
+live tenant, read-only; the writes follow the description and are tested against tests/fake_ppmx.py.
+The code tables (codes.TABLES) are the ones PPM Express publishes.
 """
-__version__ = "0.2.0"
+__version__ = "0.3.0"

@@ -103,14 +103,32 @@ def unfold(text):
 
 
 def ics_time(value, params):
+    """(local time, all day) for an ICS date or date-time. A UTC time (…Z) or one with a TZID is turned into
+    this computer's local time; a time with neither is already local ("floating")."""
     v = value.strip()
     if "VALUE=DATE" in params.upper() and len(v) == 8:
         return dt.datetime.strptime(v, "%Y%m%d"), True
     utc = v.endswith("Z")
     t = dt.datetime.strptime(v.rstrip("Z")[:15], "%Y%m%dT%H%M%S")
+    zone = re.search(r"TZID=\"?([^\";:]+)", params, re.I)
     if utc:
         t = t.replace(tzinfo=dt.timezone.utc).astimezone().replace(tzinfo=None)
+    elif zone:
+        try:
+            from zoneinfo import ZoneInfo
+            t = t.replace(tzinfo=ZoneInfo(zone.group(1).strip())).astimezone().replace(tzinfo=None)
+        except Exception:  # noqa: BLE001 - an unknown zone name (a Windows one, say): read the time as local
+            pass
     return t, False
+
+
+def ics_until(value):
+    """RRULE's UNTIL as the last moment it allows. A bare date (20261130) means the whole of that day, so
+    a meeting at 10:00 on the UNTIL date still counts."""
+    v = value.strip()
+    if len(v) == 8 and v.isdigit():
+        return dt.datetime.strptime(v, "%Y%m%d") + dt.timedelta(days=1) - dt.timedelta(microseconds=1)
+    return ics_time(v, "")[0]
 
 
 def expand(ev, rule, start, end):
@@ -119,7 +137,7 @@ def expand(ev, rule, start, end):
     r = dict(p.split("=", 1) for p in rule.split(";") if "=" in p)
     freq, step = r.get("FREQ", ""), int(r.get("INTERVAL", "1") or 1)
     count = int(r["COUNT"]) if r.get("COUNT", "").isdigit() else None
-    until = ics_time(r["UNTIL"], "VALUE=DATE" if len(r["UNTIL"]) == 8 else "")[0] if r.get("UNTIL") else None
+    until = ics_until(r["UNTIL"]) if r.get("UNTIL") else None
     codes = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"]
     days = [d[-2:] for d in r.get("BYDAY", "").split(",") if d[-2:] in codes]
     first, out, n, k, cur = ev["start"], [], 0, 0, ev["start"]
@@ -510,8 +528,11 @@ def deliver(path):
     lib = HERE / "kit-library"
     if not lib.exists():
         return False
-    r = subprocess.run([sys.executable, str(lib), "deliver", str(path), "--kind", "reports", "--replace"],
-                       capture_output=True, text=True, timeout=900)
+    try:
+        r = subprocess.run([sys.executable, str(lib), "deliver", str(path), "--kind", "reports", "--replace"],
+                           capture_output=True, text=True, timeout=900)
+    except (OSError, subprocess.SubprocessError):
+        return False                  # the report stays in briefs/; delivering it is a convenience
     return r.returncode == 0
 
 
@@ -531,9 +552,12 @@ def propose_holds(meetings, blocks, profile, wh, focus_min):
     plan.write_text("".join(f"{s:%Y-%m-%d %H:%M} {min(120, int(g.total_seconds() // 60))}m Focus time\n"
                             for g, s in sorted(picks, key=lambda x: x[1])))
     holds = HERE / "kit-holds"
-    r = subprocess.run([sys.executable, str(holds), "propose", "--from-plan", str(plan), "--days", "12"],
-                       capture_output=True, text=True, timeout=300)
-    return (r.stdout or r.stderr).strip()
+    try:
+        r = subprocess.run([sys.executable, str(holds), "propose", "--from-plan", str(plan), "--days", "12"],
+                           capture_output=True, text=True, timeout=300)
+    except (OSError, subprocess.SubprocessError) as e:
+        return f"Couldn't propose the holds ({type(e).__name__}); the plan is in {plan.name}."
+    return (r.stdout or r.stderr).strip() or f"kit-holds gave no answer; the plan is in {plan.name}."
 
 
 def opt(argv, name, default=None):

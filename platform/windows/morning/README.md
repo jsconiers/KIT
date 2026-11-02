@@ -3,15 +3,21 @@
 The Windows counterpart to `platform/mac/morning/` (the launchd plists + `run.sh`). It uses
 **Windows Task Scheduler** and **PowerShell** instead of launchd and zsh.
 
-> **UNTESTED on Windows.** Every script here carries a top-of-file warning. Validate on a real
-> Windows box before relying on any of it.
+> **What's tested.** `run.ps1`'s logic is tested under PowerShell 7 against a fake `claude`
+> (`tests/test_runps1.sh`: every mode, the end-of-day wrap, runs of your own, the brief's extra
+> sections, the budget guard, time limits, the lock, retries, and the connection check), and CI checks
+> that every script here parses. CI also runs the installer for real on GitHub's Windows runners, under
+> Windows PowerShell 5.1 and PowerShell 7 (install, reinstall, and repair), with the Python suites it
+> lists. **Not yet run on a real Windows machine:** registering and running the Task Scheduler tasks,
+> `preflight.ps1`, and the Outlook COM calls (mail, calendar, Outlook Tasks) a run makes.
 
 Files:
 
 | File | Role | Mac equivalent |
 |---|---|---|
-| `run.ps1` | The scheduled run: modes (including the work list), skip-days, once-per-day markers, the kit-pause kill switch, the kit-cost budget guard, headless `claude -p` with JSON output and cost recording, the model from `models.env`, a time limit per kind of run (a stopped run's claude process is found by its run id and ended), one run at a time (a lock), delivery, dashboard refresh, git auto-commit. No Outlook check before runs (kit-outlook is macOS-only). | `run.sh` |
-| `register-tasks.ps1` | Creates the Task Scheduler tasks. | the four `.plist.template` files |
+| `run.ps1` | The scheduled run: modes (morning, weekly, work list, end-of-day wrap, open, journal, and runs of your own from `.install\prompts\prompt-NAME.md` with `ALLOW_TOOLS_<NAME>`), skip-days, once-per-day markers, the kit-pause kill switch, the kit-cost budget guard, the dates, renewals, `brief.d` hook, PPM Express pulse, and architecture digest sections, headless `claude -p` with JSON output and cost recording, the model from `models.env`, a time limit per kind of run (a stopped run's claude process is found by its run id and ended), one run at a time (a lock), the connection check (`ANTHROPIC_BASE_URL` and proxies honoured), delivery, dashboard refresh, git auto-commit. The end-of-day wrap is `kit-wrap`, with no model call, unless `EOD_MODEL="on"`. No Outlook check before runs (kit-outlook is macOS-only). | `run.sh` |
+| `preflight.ps1` | The login check before the runs: Claude Code and the connectors in `PREFLIGHT_CONNECTORS`. | `preflight.sh` |
+| `register-tasks.ps1` | Creates the Task Scheduler tasks. | the `.plist.template` files |
 | `unregister-tasks.ps1` | Removes those tasks. | `launchctl bootout` |
 
 ## Register / unregister the tasks
@@ -39,7 +45,11 @@ when that user is logged on (launchd runs in the user's GUI session; these match
 | Kit Post-Open Read | Weekdays (Mon-Fri) 09:45 | `run.ps1 open` | `com.USER.kit.open` |
 | Kit Weekly Review | Monday 06:30 | `run.ps1 weekly` | `com.USER.kit.weekly` |
 | Kit Work List | Monday-Thursday 09:00 | `run.ps1 worklist` | `com.USER.kit.worklist` |
+| Kit End of Day | Monday-Thursday 17:30, Friday 15:30 | `run.ps1 eod` | `com.USER.kit.eod` |
+| Kit Meeting Prep | Weekdays every 30 min, 07:00-18:00 | `kit-meetprep --from-config --minutes 45` (skipped while paused) | `com.USER.kit.meetprep` |
+| Kit Backup | Daily 12:30 | `kit-backup` | `com.USER.kit.backup` |
 | Kit Reminders Sync | Every 15 min + at logon | `reminders_sync_win.py` | `com.USER.kit.sync` |
+| Kit Login Check | Daily 06:45 and 15:45 | `preflight.ps1` | `com.USER.kit.preflight` |
 | Kit Trade Journal | Weekdays (Mon-Fri) 16:20 | `run.ps1 journal` | *(no plist; see note)* |
 
 The journal task has **no** launchd plist — `run.sh` documents a 16:20 journal run but ships no
@@ -94,7 +104,7 @@ $kit = "$env:USERPROFILE\Claude\Agents\kit"
 # 1. Drop the test-run marker:
 New-Item -ItemType File "$kit\.install\platform\windows\morning\test-run" -Force
 
-# 2. Trigger a run (pick a mode): morning | open | weekly | journal
+# 2. Trigger a run (pick a mode): morning | open | weekly | worklist | eod | journal | NAME
 powershell -ExecutionPolicy Bypass -NoProfile -File "$kit\.install\platform\windows\morning\run.ps1" morning
 
 # --- or trigger the registered task instead of calling run.ps1 directly: ---

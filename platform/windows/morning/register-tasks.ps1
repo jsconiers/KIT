@@ -2,7 +2,8 @@
 #
 #   powershell -ExecutionPolicy Bypass -NoProfile -File register-tasks.ps1
 #
-# UNTESTED on Windows -- validate on a real Windows box before relying on it.
+# Not yet run on a real Windows machine: registering these tasks and Task Scheduler starting them. CI
+# checks that this script parses; run it once on a test machine and check Get-ScheduledTask before relying on it.
 #
 # Replaces the four macOS launchd plists with Task Scheduler tasks, each invoking run.ps1 with
 # the matching mode (and the sync task invoking the Windows reminders sync). Schedules mirror
@@ -12,6 +13,8 @@
 #   Kit Post-Open Read    weekdays (Mon-Fri)  09:45   -> run.ps1 open      (optional; see note)
 #   Kit Weekly Review     Monday              06:30   -> run.ps1 weekly    (before the brief)
 #   Kit Work List         Monday-Thursday     09:00   -> run.ps1 worklist
+#   Kit End of Day        Monday-Thursday     17:30, Friday 15:30 -> run.ps1 eod
+#   Kit Meeting Prep      weekdays, every 30 min 07:00-18:00 -> kit-meetprep --from-config --minutes 45 (optional)
 #   Kit Backup            Daily               12:30   -> kit-backup
 #   Kit Reminders Sync    every 15 min + at logon     -> reminders_sync_win.py
 #   Kit Trade Journal     weekdays (Mon-Fri)  16:20   -> run.ps1 journal   (optional; see note)
@@ -32,6 +35,7 @@ $ErrorActionPreference = "Stop"
 
 $RegisterOpen    = $true   # optional trading extra: set $false to skip the 09:45 post-open read
 $RegisterJournal = $true   # optional trading extra: set $false to skip the 16:20 trade journal
+$RegisterMeetprep = $true  # optional meeting prep packs (optional on the Mac too): set $false to skip them
 
 $KitHome   = Join-Path $env:USERPROFILE "Claude\Agents\kit"
 $RunPs1    = Join-Path $KitHome ".install\platform\windows\morning\run.ps1"
@@ -94,6 +98,32 @@ Register-KitTask -Name "Kit Work List" `
     -Description "Kit's proposed work list for the owner to approve (port of com.USER.kit.worklist)." `
     -Trigger (New-ScheduledTaskTrigger -Weekly -DaysOfWeek @("Monday", "Tuesday", "Wednesday", "Thursday") -At "9:00am") `
     -ActionArgs @("-ExecutionPolicy", "Bypass", "-NoProfile", "-WindowStyle", "Hidden", "-File", "`"$RunPs1`"", "worklist")
+
+# --- Kit End of Day: Monday to Thursday 17:30, Friday 15:30 (port of com.USER.kit.eod) -------
+# kit-wrap writes the end-of-day wrap with no model call; EOD="off" in the config makes the run do nothing.
+Register-KitTask -Name "Kit End of Day" `
+    -Description "Kit's end-of-day wrap (port of com.USER.kit.eod)." `
+    -Trigger @((New-ScheduledTaskTrigger -Weekly -DaysOfWeek @("Monday", "Tuesday", "Wednesday", "Thursday") -At "5:30pm"),
+               (New-ScheduledTaskTrigger -Weekly -DaysOfWeek "Friday" -At "3:30pm")) `
+    -ActionArgs @("-ExecutionPolicy", "Bypass", "-NoProfile", "-WindowStyle", "Hidden", "-File", "`"$RunPs1`"", "eod")
+
+# --- Kit Meeting Prep: weekdays every 30 minutes, 07:00 to 18:00 (port of com.USER.kit.meetprep) ----
+# A pure script, no Claude run: kit-meetprep makes prep packs for the meetings starting in the next 45
+# minutes, from CALENDAR_JSON_CMD. Nothing runs while Kit is paused (kit-pause). A weekly trigger can't
+# repeat by itself, so it borrows the repetition of a one-off trigger: every 30 minutes for 11 hours
+# (and a minute, so 18:00 is included). The paths are in single quotes, which survive the task's command line.
+if ($RegisterMeetprep) {
+    $meetprepPy = Join-Path $KitHome ".install\shared\bin\kit-meetprep"
+    $pausedFile = Join-Path $KitHome ".install\PAUSED"
+    $meetprepTrigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek $weekdays -At "7:00am"
+    $meetprepTrigger.Repetition = (New-ScheduledTaskTrigger -Once -At "7:00am" `
+        -RepetitionInterval (New-TimeSpan -Minutes 30) -RepetitionDuration (New-TimeSpan -Hours 11 -Minutes 1)).Repetition
+    Register-KitTask -Name "Kit Meeting Prep" `
+        -Description "Kit's meeting prep packs, made 45 minutes ahead with no model call (port of com.USER.kit.meetprep)." `
+        -Trigger $meetprepTrigger `
+        -ActionArgs @("-ExecutionPolicy", "Bypass", "-NoProfile", "-WindowStyle", "Hidden", "-Command",
+                      "`$env:PYTHONUTF8='1'; if (-not (Test-Path -LiteralPath '$pausedFile')) { if (Get-Command py -ErrorAction SilentlyContinue) { py -3 '$meetprepPy' --from-config --minutes 45 } else { python '$meetprepPy' --from-config --minutes 45 } }")
+}
 
 # --- Kit Backup: daily 12:30 (port of com.USER.kit.backup) ----------------------------------
 # Runs kit-backup with the config's BACKUP_* settings. On Windows, encryption reads the passphrase

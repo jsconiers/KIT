@@ -87,5 +87,21 @@ python3 "$P" list --marketplace "$M" > "$S/l.txt" 2>&1 && grep -q "arch-pack" "$
   && ok "list shows plugins and review state" || { bad "list"; cat "$S/l.txt"; }
 grep -rq "git push\|subprocess.run(\[\"git\"" "$P" && bad "kit-plugin never pushes" || ok "kit-plugin never pushes or publishes"
 
+# ---- rebuilds: swap in a temp build; never replace files kit-plugin didn't write without --force ----
+M2="$S/market2"; R2="$M2/plugins/swap-pack"
+b2() { python3 "$P" build swap-pack --agents poc-lead --marketplace "$M2" "$@" > "$S/o5.txt" 2>&1; }
+b2 && b2 && ok "an unchanged plugin rebuilds" || { bad "rebuild"; cat "$S/o5.txt"; }
+printf '\nreviewed by: architect, 2026-11-01\n' >> "$R2/REVIEW.md"
+b2 && ok "a filled-in REVIEW.md doesn't block a rebuild" || { bad "REVIEW.md blocks"; cat "$S/o5.txt"; }
+printf 'notes\n' > "$R2/my-notes.txt"
+b2; [ $? -ne 0 ] && grep -q "didn't write" "$S/o5.txt" && [ -f "$R2/my-notes.txt" ] && [ -f "$R2/agents/poc-lead.md" ] \
+  && ok "a folder with someone's own file is refused and left as it was" || { bad "foreign file"; cat "$S/o5.txt"; }
+rm "$R2/my-notes.txt"; printf '\nedited\n' >> "$R2/agents/poc-lead.md"
+b2; [ $? -ne 0 ] && grep -q "agents/poc-lead.md" "$S/o5.txt" && ok "an edited file is refused too" || bad "edited file"
+b2 --force && ! grep -q "^edited" "$R2/agents/poc-lead.md" && ok "--force replaces it" || { bad "--force"; cat "$S/o5.txt"; }
+python3 "$P" build swap-pack --agents no-such-agent --marketplace "$M2" > "$S/o6.txt" 2>&1
+[ -f "$R2/agents/poc-lead.md" ] && ! ls -a "$M2/plugins" | grep -q "building" \
+  && ok "a build that fails leaves the old plugin and no temp folder" || bad "failed build cleanup"
+
 echo "kit-plugin tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

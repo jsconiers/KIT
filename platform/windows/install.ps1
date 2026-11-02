@@ -212,11 +212,11 @@ try {
     Write-Shim "kitmail" $mailPy
     Write-Shim "kitcal" $calPy
     # The everyday commands from shared\bin (the Mac links the same ones into ~/.local/bin).
-    # kit-outlook is macOS-only, so it has no shim here.
+    # kit-outlook and kit-textback are macOS-only, so they have no shim here.
     $sharedBin = Join-Path $kitHome ".install\shared\bin"
     foreach ($tool in @("todo", "kit-settings", "kit-update", "kit-version", "kit-pause", "kit-backup",
                         "kit-retention", "kit-team", "kit-precedent", "kit-cost", "kit-queue",
-                        "kit-models", "kit-labcheck", "kit-refarch", "kit-sysprofile", "kit-onepager", "kit-sizing", "kit-diagram-diff", "kit-diaglint", "kit-wins", "kit-oneonone", "kit-meetprep", "kit-triage", "kit-awaiting", "kit-plugin", "kit-quality", "kit-commitments", "kit-connect", "kit-evals", "kit-lifecycle", "kit-roadmap", "kit-metrics", "kit-project", "kit-delegate", "kit-run", "kit-audit-export", "kit-exceptions", "kit-pbc", "kit-holds", "kit-degraded", "kit-reliability", "kit-alerts", "kit-csf", "kit-controls", "kit-trace", "kit-decisions", "kit-stakeholders", "kit-viewpoints", "kit-coverage", "kit-questions", "kit-templatecheck", "kit-letter", "kit-expiry", "kit-dates", "kit-touch", "kit-feedback", "kit-meetload", "kit-preread", "kit-ppmx", "kit-rehearse", "kit-wrap", "kit-vendors", "kit-teammap", "kit-digest")) {
+                        "kit-models", "kit-labcheck", "kit-refarch", "kit-sysprofile", "kit-onepager", "kit-sizing", "kit-diagram-diff", "kit-diaglint", "kit-wins", "kit-oneonone", "kit-meetprep", "kit-triage", "kit-awaiting", "kit-plugin", "kit-quality", "kit-commitments", "kit-connect", "kit-evals", "kit-lifecycle", "kit-roadmap", "kit-metrics", "kit-project", "kit-delegate", "kit-run", "kit-audit-export", "kit-exceptions", "kit-pbc", "kit-holds", "kit-degraded", "kit-reliability", "kit-alerts", "kit-csf", "kit-controls", "kit-trace", "kit-decisions", "kit-stakeholders", "kit-viewpoints", "kit-coverage", "kit-questions", "kit-templatecheck", "kit-letter", "kit-expiry", "kit-dates", "kit-touch", "kit-feedback", "kit-meetload", "kit-preread", "kit-ppmx", "kit-rehearse", "kit-wrap", "kit-vendors", "kit-teammap", "kit-digest", "kit-library", "kit-audit")) {
         $toolPy = Join-Path $sharedBin $tool
         if (Test-Path -LiteralPath $toolPy) {
             Write-Shim $tool $toolPy

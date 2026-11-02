@@ -3,7 +3,7 @@
 # through deliver.py, so there's time to fix it before the runs fail. Port of the Mac preflight.sh;
 # register-tasks.ps1 registers it as "Kit Login Check" at 06:45 and 15:45.
 #
-# UNTESTED on Windows -- validate on a real Windows box before relying on it.
+# Not yet run on a real Windows machine (CI checks that it parses); try it by hand once before relying on it.
 #
 # Long-lived login (optional): put a token from `claude setup-token` in the user environment variable
 # CLAUDE_CODE_OAUTH_TOKEN (setx CLAUDE_CODE_OAUTH_TOKEN "<token>"); run.ps1 and this check inherit it.
@@ -66,9 +66,38 @@ function Invoke-Claude([string[]]$ArgList, [int]$Seconds) {
     return $out
 }
 
-# 1. Claude Code: one tiny headless call, the same path the scheduled runs use.
-$out = Invoke-Claude @("-p", "Reply with the single word OK.", "--model", "haiku", "--max-turns", "1",
-                       "--output-format", "text") 120
+# 1. Claude Code: one tiny headless call, the same path the scheduled runs use. It's a paid call, so it
+# asks for JSON output and goes in the cost ledger (kit-cost, mode "preflight") like every scheduled run.
+$outFile = Join-Path $LogDir ".preflight-$PID.json"
+$errFile = Join-Path $LogDir ".preflight-$PID.err"
+$job = Start-Job -ScriptBlock {
+    param($a, $o, $e)
+    Set-Location ([System.IO.Path]::GetTempPath())
+    & claude @a 1> $o 2> $e
+    $LASTEXITCODE
+} -ArgumentList @("-p", "Reply with the single word OK.", "--model", "haiku", "--max-turns", "1",
+                  "--output-format", "json"), $outFile, $errFile
+$rc = 124
+if (Wait-Job $job -Timeout 120) {
+    $got = Receive-Job $job | Select-Object -Last 1
+    $rc = if ("$got" -match '^-?\d+$') { [int]"$got" } else { 1 }
+} else {
+    Stop-Job $job
+}
+Remove-Job $job -Force
+$kitCost = Join-Path $KitHome ".install\shared\bin\kit-cost"
+$pyc = Resolve-Python
+if ($null -ne $pyc -and (Test-Path -LiteralPath $kitCost) -and (Test-Path -LiteralPath $outFile)) {
+    & $pyc.Exe @($pyc.Args + @($kitCost, "record", "--mode", "preflight", "--rc", "$rc", "--json-file", $outFile)) 2>&1 |
+        Out-Null
+}
+$out = ""
+foreach ($f in @($outFile, $errFile)) {
+    if (Test-Path -LiteralPath $f) { $out += (Get-Content -LiteralPath $f -Raw -Encoding UTF8 -ErrorAction SilentlyContinue) + "`n" }
+}
+if ($rc -eq 124) { $out += "timed out after 120 s`n" }
+$out += "RC=$rc"
+Remove-Item -LiteralPath $outFile, $errFile -Force -ErrorAction SilentlyContinue
 $first = (($out -split "`r?`n") | Where-Object { $_ -and $_ -notmatch '^RC=' } | Select-Object -First 1)
 $lapsed = Join-Path $LogDir "login-lapsed"
 if ($out -match "RC=0" -and $out -match "\bOK\b") {

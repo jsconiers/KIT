@@ -2,7 +2,7 @@
 #
 #   powershell -ExecutionPolicy Bypass -File uninstall.ps1
 #
-# UNTESTED on Windows -- validate on a real Windows box before relying on it.
+# Not yet run on a real Windows machine (CI runs install.ps1 there, not this; it checks that this parses).
 #
 # Mirror of platform/mac/uninstall.sh. Removes Kit's line from
 # %USERPROFILE%\.claude\CLAUDE.md and exactly the entries install added to

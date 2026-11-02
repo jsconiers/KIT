@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""kit-ppmx: PPM Express from Claude Code or Claude Desktop: read projects, tasks, key dates, and ideas,
-and create or update them, each change approved by you.
+"""kit-ppmx: PPM Express from Claude Code or Claude Desktop: read projects, tasks, key dates, deliverables,
+and ideas (with "me" in person filters, and list_my_work for your own tasks and deliverables across
+projects), and create or update them, each change approved by you.
 
   kit-ppmx serve              the MCP server on standard input and output; Claude Code or Claude Desktop
                               starts it (kit-ppmx setup gives the commands)
@@ -27,7 +28,8 @@ and create or update them, each change approved by you.
 
 Works on macOS and Windows. Settings: PPMX_BASE_URL (https://<host>/@<tenant>/v1.0, from PPM Express >
 Automation) and the other PPMX_* settings in shared/ppmx/README.md, from the environment or Kit's config
-(~/Claude/Agents/kit/.install/shared/morning/config); PPMX_WRITES="off" there makes it read-only. The
+(~/Claude/Agents/kit/.install/shared/morning/config); PPMX_WRITES="off" there makes it read-only, and
+PPMX_MY_NAME (your name as PPM Express shows it) makes "me" exact, as PPM Express's /me gives no name. The
 personal access token: the environment variable PPMX_TOKEN (PPMX_TOKEN_ENV names another), or the Mac
 Keychain or Windows Credential Manager entry PPMX_TOKEN (PPMX_TOKEN_KEYCHAIN names another, or "off").
 It's never written to a file, printed, or logged, and a token in Kit's config is ignored.
@@ -166,7 +168,8 @@ def audit_logger(settings):
 
 
 def dispatcher_for(settings, tables, client, hint):
-    return Dispatcher(lambda token: Context(client, settings, tables, token, hint=hint()), writes=settings.writes)
+    return Dispatcher(lambda token: Context(client, settings, tables, token, hint=hint(), owner=True),
+                      writes=settings.writes)
 
 
 def cmd_serve(env):
@@ -386,7 +389,7 @@ def cmd_setup(env):
     print(f"""Connect PPM Express to Kit on this computer (kit-ppmx {__version__}; this changes nothing).
 
 1. A token (now: {token}). In PPM Express > Automation, create a personal access token: read scopes to
-   look, and write scopes (such as Write Projects) for the changes you approve. Store it {where}:
+   look, and write scopes (such as project:write) for the changes you approve. Store it {where}:
 {chr(10).join(store)}
 
 2. The address (now: {status}). In Kit's config, {CONFIG}, add
@@ -394,7 +397,7 @@ def cmd_setup(env):
    with your tenant's API address from PPM Express > Automation. {writes}
 
 3. Claude Code. Add the server for your user:
-     claude mcp add --scope user --env PYTHONUTF8=1 ppmx -- "{py}" "{me}" serve
+     claude mcp add --scope user ppmx --env PYTHONUTF8=1 -- "{py}" "{me}" serve
    Kit's rules make Claude Code ask before every create or update (rerun Kit's installer to add them).
 
 4. Claude Desktop, if you use it: run  kit-ppmx desktop  (it adds the same server to Desktop's config,
@@ -404,9 +407,11 @@ def cmd_setup(env):
 5. Kit's connector guard, so Kit's agents can read PPM Express (they can never change it). In
    {GUARD}:
      "allowed_servers": [..., "ppmx"],
-     "credential_env": {{"ppmx": ["{var}"]}},
+     "credential_env": {{"ppmx": ["{entry or var}"]}},
      "probe_tools": {{"ppmx": "mcp__ppmx__get_current_user"}}
-   and add PPM Express (connector ppmx) under Systems in connectors.md, next to it.
+   credential_env holds only the name of what has the token ({where}), never the token; kit-connect
+   test looks the name up in the environment and, on a Mac, the Keychain. Add PPM Express (connector
+   ppmx) under Systems in connectors.md, next to it.
 
 6. Check: kit-ppmx check, then kit-connect test ppmx (add --read for one call through the gateway).""")
     return 0
@@ -452,7 +457,17 @@ def my_names(ctx):
         me = t_current_user(ctx, {})
     except (PPMXError, ToolError):
         return []
-    return [str(me[k]) for k in ("displayName", "name", "email", "logonAccount") if me.get(k)]
+    mine = [ctx.settings.my_name] if ctx.settings.my_name else []
+    return mine + [str(me[k]) for k in ("displayName", "name", "email", "logonAccount") if me.get(k)]
+
+
+def whole(env, key, default):
+    """A whole-number PPMX_* setting, or the default with a warning when it isn't one."""
+    raw = str(env.get(key) or default).strip()
+    if raw.isdigit() and int(raw) > 0:
+        return int(raw)
+    print(f"kit-ppmx: warning: {key}={raw!r} isn't a whole number; using {default}", file=sys.stderr)
+    return default
 
 
 def cmd_pulse(env, argv):
@@ -486,15 +501,21 @@ def cmd_pulse(env, argv):
     token, problem = get_token(env)
     if not token:
         return fail(problem, 2)
-    ctx = Context(Client(settings), settings, tables_for(settings), token)
+    ctx = Context(Client(settings), settings, tables_for(settings), token, owner=True)
     raw = (a.scope or env.get("PPMX_PULSE_SCOPE") or "all").strip()
     scope = raw.lower() if raw.lower() in ("all", "mine") else [s.strip() for s in raw.split(",") if s.strip()]
-    me = my_names(ctx) if scope == "mine" else None
     try:
-        snap = pulse_mod.snapshot(ctx, scope, me, max_projects=int(env.get("PPMX_PULSE_MAX") or 300),
-                                  deadline_seconds=int(env.get("PPMX_PULSE_SECONDS") or 240),
+        me = ctx.me() if scope == "mine" else None
+    except (PPMXError, ToolError) as e:
+        return fail(str(e), 1)
+    try:
+        snap = pulse_mod.snapshot(ctx, scope, me, max_projects=whole(env, "PPMX_PULSE_MAX", 300),
+                                  deadline_seconds=whole(env, "PPMX_PULSE_SECONDS", 240),
                                   now=datetime.datetime.combine(ctx.today, datetime.datetime.now().time()))
     except PPMXError as e:
+        audit_logger(settings)({"ts": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+                                "via": "kit-ppmx pulse", "user": f"u:{token_key(token)[:12]}", "tool": "pulse",
+                                "outcome": "error", "status": getattr(e, "status", None)})
         return fail(str(e), 1)
     today = ctx.today
     rep = pulse_mod.compare(baseline(today, since), snap, today)
@@ -607,13 +628,16 @@ def cmd_actions(env, argv):
     if not got:
         return 2
     settings, token = got
-    ctx = Context(Client(settings), settings, tables_for(settings), token)
+    ctx = Context(Client(settings), settings, tables_for(settings), token, owner=True)
     names = my_names(ctx)
     me = next((n for n in names if "@" in n), names[0] if names else None)
     try:
         props = actions_mod.propose(ctx, acts, project_map(), me, a.project,
                                     due_key=env.get("PPMX_TASK_DUE_FIELD") or "FinishDate")
     except PPMXError as e:
+        audit_logger(settings)({"ts": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+                                "via": "kit-ppmx actions", "user": f"u:{token_key(token)[:12]}", "tool": "propose",
+                                "outcome": "error", "status": getattr(e, "status", None)})
         print(f"kit-ppmx: {e}", file=sys.stderr)
         return 1
     audit_logger(settings)({"ts": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
@@ -698,7 +722,7 @@ def map_project(env, slug, project):
     if not got:
         return 2
     settings, token = got
-    ctx = Context(Client(settings), settings, tables_for(settings), token)
+    ctx = Context(Client(settings), settings, tables_for(settings), token, owner=True)
     try:
         rows = [r for r in ctx.rows("projects") if r.get("id")]
     except PPMXError as e:

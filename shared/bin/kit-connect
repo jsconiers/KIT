@@ -38,10 +38,10 @@ KIT = pathlib.Path(os.path.expanduser(os.environ.get("KIT_DIR", "~/Claude/Agents
 GUARD = KIT / "memory/context/connector-guard.json"
 STATUS_LINE = re.compile(r"^(?P<name>\S+?):\s.*\s-\s(?P<status>[✔✓✘✗⏸!].*)$")
 MISSING = re.compile(r"\[(?P<name>[^\]]+)\]\s+mcpServers\.[^:]+:\s+Missing environment variables?:\s*(?P<vars>.+)$")
-PROBE_PROMPT = ("Connection check. Call the one tool you're allowed to call exactly once, with the "
-                "smallest possible read-only request (for example, one item). Then reply with only "
-                "OK if it returned data, or FAILED and the error message if it didn't. Don't call "
-                "any other tool and don't summarize the data.")
+PROBE_PROMPT = ("Connection check for the {server} server only. Call the tool {tool} exactly once, with "
+                "the smallest possible read-only request (for example, one item), and no other tool on "
+                "any server. Then reply with only OK if it returned data, or FAILED and the error message "
+                "if it didn't. Don't summarize the data.")
 
 
 def guard_config():
@@ -131,7 +131,7 @@ def probe(claude, server, tool):
     if not tool.startswith(f"mcp__{server}__"):
         return False, f"probe tool {tool!r} isn't one of {server}'s tools"
     # The gateway reads its setup files before calling, so allow enough turns for that.
-    cmd = [claude, "-p", PROBE_PROMPT, "--agent", "gateway", "--allowedTools", tool,
+    cmd = [claude, "-p", PROBE_PROMPT.format(server=server, tool=tool), "--agent", "gateway", "--allowedTools", tool,
            "--output-format", "json", "--max-turns", "10"]
     started = datetime.datetime.now().astimezone()
     try:

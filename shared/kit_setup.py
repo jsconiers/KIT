@@ -6,6 +6,8 @@
                then install Kit's skills (as "skills" does)
   skills       copy kit/skills/<name> into ~/.claude/skills/<name> when no skill of that name is
                there; a skill Kit installed earlier is refreshed only if it hasn't been edited since
+  agents       copy Kit's staff (~/Claude/Agents/kit/agents) into ~/.claude/agents; scaffold does this too,
+               after refreshing the agents in Kit's folder that you haven't edited
   activate     add Kit's import line to ~/.claude/CLAUDE.md and Kit's rules to ~/.claude/settings.json
                (Claude Code's auto memory is left alone)
   deactivate   remove exactly what activate added, as recorded in .install/manifest.json
@@ -35,6 +37,8 @@ CLAUDE_MD = CLAUDE_DIR / "CLAUDE.md"
 SETTINGS = CLAUDE_DIR / "settings.json"
 SKILLS_HOME = Path(os.path.expanduser(os.environ.get("KIT_SKILLS_DIR", str(CLAUDE_DIR / "skills"))))
 SKILL_MARK = ".kit-installed.json"           # written into each skill folder Kit installs
+AGENT_MARK = INSTALL_DIR / "agents-installed.json"   # hash of each agent file as Kit last wrote it
+AGENTS_HOME = CLAUDE_DIR / "agents"
 PACKAGE = Path(__file__).resolve().parent   # this file lives in shared/
 REPO = PACKAGE.parent                        # repo root: holds kit/, shared/, platform/, README.md
 
@@ -53,7 +57,11 @@ ALLOW = [f"Read({K}/**)", f"Edit({K}/memory/**)", f"Edit({K}/QUEUE.md)", f"Edit(
          "Bash(kit-library recent *)", "Bash(kit-library collections *)", "Bash(kit-library tags *)",
          "Bash(kit-library rules *)", "Bash(kit-library output *)", "Bash(kit-library status *)",
          "Bash(kit-library --check *)", "Bash(kit-library deliver *)", "Bash(kit-library index *)",
-         "Bash(kit-library flush *)", "Bash(kit-library mirror *)", "Bash(kit-library fetch *)",
+         "Bash(kit-library flush *)",
+         # The same reading commands with nothing after them.
+         "Bash(kit-library)", "Bash(kit-library search)", "Bash(kit-library find)", "Bash(kit-library recent)",
+         "Bash(kit-library collections)", "Bash(kit-library tags)", "Bash(kit-library output)",
+         "Bash(kit-library status)", "Bash(kit-library --check)",
          # Kit's own lists (keep in touch, the private feedback log) and the read-only meeting audit.
          "Bash(kit-touch *)", "Bash(kit-feedback *)", "Bash(kit-meetload *)",
          # PPM Express: the connection check, the tool list, and the setup steps, which change nothing; the
@@ -84,13 +92,15 @@ ASK = [
     "Bash(defaults write *)", "Bash(launchctl *)", "Bash(softwareupdate *)", "Bash(osascript *)",
     # Signing a letter with the saved signature asks every time (kit-letter build is allowed).
     "Bash(kit-letter sign *)",
-    # Answering a text as a test can add to-dos and ask Claude, so it asks first.
+    # A test answer changes and sends nothing, but a question still asks Claude (a paid run), so it asks first.
     "Bash(kit-textback test *)",
     # Changing what the library catalogs (collections, tags, rules, exclusions) asks first.
     "Bash(kit-library add *)", "Bash(kit-library remove *)", "Bash(kit-library about *)",
     "Bash(kit-library tag *)", "Bash(kit-library untag *)", "Bash(kit-library rule *)",
     "Bash(kit-library unrule *)", "Bash(kit-library exclude *)", "Bash(kit-library include *)",
     "Bash(kit-library define *)",
+    # Copying to the phone mirror (iCloud) and staging a file to text both send files off the Mac, so they ask.
+    "Bash(kit-library mirror)", "Bash(kit-library mirror *)", "Bash(kit-library fetch *)",
     # A pre-read or a rehearsal runs Claude on a document (a paid run), so it asks first.
     "Bash(kit-preread *)", "Bash(kit-rehearse *)",
     # A PPM Express call from the command line can change PPM Express (a create_ or update_ tool), so it
@@ -105,6 +115,10 @@ ASK = [
     "mcp__ppmx__create_idea", "mcp__ppmx__update_idea", "mcp__ppmx__set_idea_stage",
     "mcp__ppmx__create_record", "mcp__ppmx__update_record",
 ]
+
+# Allow rules earlier versions added that now ask instead. Activate takes them out again, but only
+# where the install record shows Kit added them (an owner's own rule of the same text stays).
+RETIRED_ALLOW = ["Bash(kit-library mirror *)", "Bash(kit-library fetch *)"]
 
 
 class Fail(Exception):
@@ -334,12 +348,15 @@ def cmd_scaffold(args):
     date = today()
     before = kit_version.inventory(INSTALL_DIR)     # what the last install had, for release notes
     created, kept, newer = [], [], []
+    marks = _read_agent_marks()
+    agents = {"created": [], "updated": [], "current": [], "kept": []}
     for path in sorted(p for p in src.rglob("*") if p.is_file()):
         rel = path.relative_to(src)
         dest = KIT / rel
-        text = path.read_text(encoding="utf-8").replace("{{DATE}}", date).replace("{{COMPUTER}}", COMPUTER)
-        if "{{OWNER}}" in text:
-            text = text.replace("{{OWNER}}", owner())
+        text = _render(path.read_text(encoding="utf-8"), date)
+        if rel.parts[0] == "agents" and rel.suffix == ".md" and len(rel.parts) == 2:
+            agents[_scaffold_agent(rel, dest, text, date, marks)].append(rel.stem)
+            continue
         if not dest.exists():
             write_text_atomic(dest, text)
             created.append(str(rel))
@@ -370,7 +387,14 @@ def cmd_scaffold(args):
             p = INSTALL_DIR / rel
             if p.exists():
                 os.chmod(p, 0o700)
+    if any(agents.values()):
+        write_text_atomic(AGENT_MARK, json.dumps(marks, indent=2, sort_keys=True) + "\n")
     print(f"Kit's files: {len(created)} created, {len(kept)} kept as they were.")
+    print(f"Kit's staff in {KIT / 'agents'}: {len(agents['created'])} added, {len(agents['updated'])} updated, "
+          f"{len(agents['current'])} already current, {len(agents['kept'])} kept (edited by you).")
+    for name in agents["kept"]:
+        print(f"Kept agent {name}: you've edited {KIT / 'agents' / (name + '.md')}, so it was left as it is. "
+              f"Kit's version is in {INSTALL_DIR / 'kit' / 'agents' / (name + '.md')}.")
     prev, cur = kit_version.record(REPO, INSTALL_DIR)
     notes = kit_version.write_release_notes(KIT, REPO, prev, cur, before, kit_version.inventory(INSTALL_DIR))
     if notes:
@@ -381,6 +405,106 @@ def cmd_scaffold(args):
     if newer:
         print("Kept your KIT.md; the packaged version is KIT.md.new, so compare and merge if you like.")
     report_skills(install_skills())
+    report_agents(install_agents())
+    return 0
+
+
+def _render(text, date):
+    text = text.replace("{{DATE}}", date).replace("{{COMPUTER}}", COMPUTER)
+    return text.replace("{{OWNER}}", owner()) if "{{OWNER}}" in text else text
+
+
+def _agent_hash(text):
+    """sha256 of an agent file without its `model:` line, which kit-models apply sets."""
+    return hashlib.sha256(re.sub(r"(?m)^model:.*\n?", "", text, count=1).encode("utf-8")).hexdigest()
+
+
+def _read_agent_marks():
+    try:
+        data = json.loads(AGENT_MARK.read_text(encoding="utf-8-sig"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _models_line(name, live_text):
+    """The `model:` value the agent should carry: models.json's choice when there is one, else the
+    line the live file already has (None to keep the packaged one)."""
+    try:
+        import kit_models as km
+        cfg = km.load(KIT)
+        if cfg.get("_path") or cfg.get("_per_agent"):
+            return km.resolve_agent(cfg, name)["model"]
+    except Exception:   # a broken models.json is kit-models check's to report, not the installer's
+        pass
+    m = re.search(r"(?m)^model:\s*(\S+)", live_text or "")
+    return m.group(1) if m else None
+
+
+def _with_model(text, model):
+    if not model:
+        return text
+    try:
+        import kit_models as km
+        return km.set_model_line(text, model)
+    except Exception:
+        return text
+
+
+def _scaffold_agent(rel, dest, text, date, marks):
+    """Install or refresh one agent in Kit's folder. Returns created, updated, current, or kept.
+    An agent is refreshed only when it is Kit's unedited copy: it matches the hash recorded when Kit
+    last wrote it or, for installs from before that record, the previously installed package copy.
+    The `model:` line is left out of the comparison and kept as models.json sets it."""
+    name, want = rel.stem, _agent_hash(text)
+    if not dest.exists():
+        write_text_atomic(dest, _with_model(text, _models_line(name, None)))
+        marks[name] = want
+        return "created"
+    live = dest.read_text(encoding="utf-8")
+    have = _agent_hash(live)
+    if have == want:
+        marks[name] = want
+        return "current"
+    base = marks.get(name)
+    if base is None:
+        prev = INSTALL_DIR / "kit" / rel   # the last install's package copy, before it's replaced below
+        if prev.is_file() and prev.resolve() != (REPO / "kit" / rel).resolve():
+            base = _agent_hash(_render(prev.read_text(encoding="utf-8"), date))
+    if have != base:
+        return "kept"     # the owner's edits win over Kit's version
+    write_text_atomic(dest, _with_model(text, _models_line(name, live)))
+    marks[name] = want
+    return "updated"
+
+
+def install_agents(src=None, dest_root=None):
+    """Copy Kit's agents into ~/.claude/agents, where Claude Code loads them (as doctor.py
+    --fix-agents does). Returns (installed, updated, current) name lists."""
+    src = src or KIT / "agents"
+    dest_root = dest_root or AGENTS_HOME
+    installed, updated, current = [], [], []
+    if not src.is_dir():
+        return installed, updated, current
+    dest_root.mkdir(parents=True, exist_ok=True)
+    for f in sorted(src.glob("*.md")):
+        dest, text = dest_root / f.name, f.read_text(encoding="utf-8")
+        if dest.exists() and dest.read_text(encoding="utf-8") == text:
+            current.append(f.stem)
+            continue
+        (updated if dest.exists() else installed).append(f.stem)
+        write_text_atomic(dest, text)
+    return installed, updated, current
+
+
+def report_agents(result):
+    installed, updated, current = result
+    print(f"Kit's staff in {AGENTS_HOME}: {len(installed)} installed, {len(updated)} updated, "
+          f"{len(current)} already current.")
+
+
+def cmd_agents(args):
+    report_agents(install_agents())
     return 0
 
 
@@ -454,6 +578,10 @@ def cmd_activate(args):
     if perms is None:
         perms = data["permissions"] = {}
         s["created_permissions"] = True
+    for item in RETIRED_ALLOW:
+        if item in s["added"]["allow"] and item in (perms.get("allow") or []):
+            perms["allow"].remove(item)
+            s["added"]["allow"].remove(item)
     for key, wanted in (("allow", ALLOW), ("ask", ASK), ("additionalDirectories", [str(KIT)])):
         if key not in perms:
             perms[key] = []
@@ -562,10 +690,11 @@ def main(argv=None):
     sub.add_parser("check")
     sub.add_parser("scaffold")
     sub.add_parser("skills")
+    sub.add_parser("agents")
     sub.add_parser("activate")
     sub.add_parser("deactivate")
     args = parser.parse_args(argv)
-    handlers = {"check": cmd_check, "scaffold": cmd_scaffold, "skills": cmd_skills, "activate": cmd_activate,
+    handlers = {"check": cmd_check, "scaffold": cmd_scaffold, "skills": cmd_skills, "agents": cmd_agents, "activate": cmd_activate,
                 "deactivate": cmd_deactivate}
     try:
         return handlers[args.cmd](args) or 0

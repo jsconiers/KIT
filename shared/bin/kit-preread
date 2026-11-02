@@ -84,6 +84,15 @@ def setting(key, default):
     return os.environ.get(key) or (m.group(1).strip() if m and m.group(1).strip() else default)
 
 
+def number_setting(key, default):
+    """A whole-number setting, or the default with a warning when it isn't one (a typo never stops a run)."""
+    raw = str(setting(key, str(default))).strip()
+    if raw.isdigit() and int(raw) > 0:
+        return int(raw)
+    print(f"warning: {key}={raw!r} isn't a whole number of seconds; using {default}", file=sys.stderr)
+    return default
+
+
 def library():
     loader = importlib.machinery.SourceFileLoader("kit_library", str(BIN / "kit-library"))
     spec = importlib.util.spec_from_loader("kit_library", loader)
@@ -150,7 +159,7 @@ def critique(prompt, pdf=None):
             shutil.copyfile(pdf, pathlib.Path(work) / pdf.name)
             deny = DENY + PRIVATE
         return ask_claude(prompt, mode="preread", allowed=[], deny=deny,
-                          model=setting("PREREAD_MODEL", "opus"), timeout=int(setting("PREREAD_TIMEOUT", "900")),
+                          model=setting("PREREAD_MODEL", "opus"), timeout=number_setting("PREREAD_TIMEOUT", 900),
                           cwd=work, extra_args=("--setting-sources", "project,local"), prompt_stdin=True)
 
 

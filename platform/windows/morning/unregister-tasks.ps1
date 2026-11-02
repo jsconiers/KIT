@@ -2,7 +2,7 @@
 #
 #   powershell -ExecutionPolicy Bypass -NoProfile -File unregister-tasks.ps1
 #
-# UNTESTED on Windows -- validate on a real Windows box before relying on it.
+# Not yet run on a real Windows machine (CI checks that it parses): check Get-ScheduledTask afterwards.
 #
 # Removes exactly the tasks register-tasks.ps1 creates, under the "\Kit\" task folder. Kit's
 # files and logs are left untouched. Safe to run even if some tasks are already gone.
@@ -14,7 +14,7 @@ $Names = @(
     "Kit Morning Brief",
     "Kit Post-Open Read",
     "Kit Weekly Review",
-    "Kit Work List", "Kit Backup",
+    "Kit Work List", "Kit End of Day", "Kit Meeting Prep", "Kit Backup",
     "Kit Reminders Sync",
     "Kit Trade Journal",
     "Kit Login Check"

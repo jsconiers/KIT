@@ -54,7 +54,7 @@ def main(argv=None):
         client, tables = Client(settings), load(settings.codes_file)
         env_name = os.environ.get("PPMX_TOKEN_ENV") or "PPMX_TOKEN"
         hint = f"No personal access token: set the environment variable {env_name}."
-        dispatcher = Dispatcher(lambda token: Context(client, settings, tables, token, hint=hint),
+        dispatcher = Dispatcher(lambda token: Context(client, settings, tables, token, hint=hint, owner=True),
                                 writes=settings.writes)
         return serve(dispatcher, lambda: os.environ.get(env_name, "").strip(),
                      log=stderr_log if settings.audit else None)

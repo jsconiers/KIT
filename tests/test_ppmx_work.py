@@ -192,7 +192,7 @@ ok(data["proposals"][0]["args"] == {"project_id": F.A1, "task_id": F.T1, "fields
 rc, o, e = kp("actions", "apply", "1", PPMX_TODAY="2026-11-03")
 ok(rc == 0 and "making 1 from actions-2026-11-03-network-refresh-sync.json: update the task" in o
    and "kit-ppmx: done" in o, "apply 1 says which proposal from which file, then makes that change", o + e)
-ok(fake.writes and fake.writes[-1][1:] == ("PATCH", f"Projects/{F.A1}/Tasks/{F.T1}", {"updates": {"DueDate": "2026-11-13"}}),
+ok(fake.writes and fake.writes[-1][1:] == ("PATCH", f"projects/{F.A1}/tasks/{F.T1}", {"updates": {"DueDate": "2026-11-13"}}),
    "PPM Express got exactly the proposed change", str(fake.writes[-1:]))
 rc, o, e = kp("actions", "apply", "1")
 ok(rc == 2 and "made already" in e and len(fake.writes) == 1, "a proposal is never made twice")
@@ -208,7 +208,7 @@ ok(rc == 1 and "didn't make it" in e and json.loads(props.read_text())["proposal
 rc, o, e = kp("actions", "apply", "3", PPMX_WRITES="off")
 ok(rc == 1 and len(fake.writes) == 1, "PPMX_WRITES=off: nothing is sent", e)
 rc, o, e = kp("actions", "apply", "3")
-ok(rc == 0 and fake.writes[-1][1] == "POST" and fake.writes[-1][2] == f"Projects/{F.A2}/Tasks"
+ok(rc == 0 and fake.writes[-1][1] == "POST" and fake.writes[-1][2] == f"projects/{F.A2}/tasks"
    and fake.writes[-1][3] == {"attributes": {"Name": "Book the data hall walkthrough"}},
    "apply 3 creates the task, with only its name", str(fake.writes[-1:]))
 rc, o, e = kp("actions", "show")
@@ -226,7 +226,7 @@ rc, o, e = kp("actions", PPMX_TODAY="2026-11-03")
 ok(rc == 0 and '4. create the task "Draft the vendor RFP" in Mobile app: due 2026-11-20, assigned to you' in o,
    "with the map, the action goes to its project, assigned to you (owner)", o)
 d2 = json.loads((WORK / "actions-pending-actions.json").read_text())
-ok(d2["proposals"][3]["args"]["fields"] == {"FinishDate": "2026-11-20", "AssignedTo": "alex@example.com"},
+ok(d2["proposals"][3]["args"]["fields"] == {"FinishDate": "2026-11-20", "AssignedTo": "arivera@example.com"},
    "with no tasks to copy, the due date goes in FinishDate (PPMX_TASK_DUE_FIELD changes it)", str(d2["proposals"][3]))
 rc, o, e = kp("actions", str(minutes), "--project", "Mobile app")
 ok(o.count("in Mobile app") == 4, "--project puts every action in one project", o)
@@ -273,7 +273,7 @@ for line, why in (("export PPMX_WRITES='off'  # read only for now", "export, sin
     ok(rc == 1 and len(fake.writes) == n0, f"PPMX_WRITES in Kit's config, {why}: nothing is sent", o + e)
 cfg.write_text(base_cfg + "PPMX_WRITES=on  # changes allowed\n")
 rc, o, e = kp("actions", "apply", "4")
-ok(rc == 0 and len(fake.writes) == n0 + 1 and fake.writes[-1][2] == f"Projects/{F.A1}/Tasks",
+ok(rc == 0 and len(fake.writes) == n0 + 1 and fake.writes[-1][2] == f"projects/{F.A1}/tasks",
    "PPMX_WRITES=on with a comment: the change is made", o + e)
 cfg.write_text(base_cfg)
 rc, o, e = kp("actions", "apply", "1", PPMX_TOKEN=LOST)
@@ -290,7 +290,7 @@ ok("1. NOT CONFIRMED" in o and '4. already in PPM Express as the task "Investiga
 rc, o, e = kp("actions", "apply", "1")
 ok(rc == 2 and len(fake.writes) == n1, "so it still isn't sent twice", e)
 rc, o, e = kp("actions", "apply", "1", "--again")
-ok(rc == 0 and len(fake.writes) == n1 + 1 and fake.writes[-1][2] == f"Projects/{F.A3}/Tasks",
+ok(rc == 0 and len(fake.writes) == n1 + 1 and fake.writes[-1][2] == f"projects/{F.A3}/tasks",
    "--again sends it, once you've checked", o + e)
 rc, o, e = kp("actions", str(minutes2), PPMX_TODAY="2026-11-04")
 ok('1. already in PPM Express as the task "Set up the beta feedback form"' in o, "and then it's found there", o)

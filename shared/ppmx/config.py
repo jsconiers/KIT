@@ -19,6 +19,9 @@ DEFAULTS = {
     "PPMX_CODES_FILE": "",          # optional JSON file of code tables (see codes.py)
     "PPMX_WRITES": "on",            # "off" makes the server read-only: no create or update tools at all
     "PPMX_AUDIT": "on",             # audit lines on standard error, one per message ("off" stops them)
+    "PPMX_MY_NAME": "",             # stdio only: your name as PPM Express shows it, for "me" (the API's /me has none)
+    "PPMX_WORK_MAX_PROJECTS": "25", # list_my_work: the most projects one call scans (each costs one or two requests)
+    "PPMX_WORK_SECONDS": "30",      # list_my_work: stop scanning after this long (well under gunicorn's 60-second timeout)
     "PPMX_TODAY": "",               # tests only: the date to treat as today (YYYY-MM-DD)
 }
 
@@ -41,6 +44,9 @@ class Settings:
                                 if o.strip()}
         self.max_body = int(_number(get("PPMX_MAX_BODY"), 1048576, 1024, 16 * 1048576))
         self.codes_file = get("PPMX_CODES_FILE")
+        self.my_name = get("PPMX_MY_NAME")[:120]
+        self.work_max_projects = int(_number(get("PPMX_WORK_MAX_PROJECTS"), 25, 1, 200))
+        self.work_seconds = _number(get("PPMX_WORK_SECONDS"), 30, 0, 300)
         self.writes = get("PPMX_WRITES").lower() not in ("off", "0", "false", "no")
         self.audit = get("PPMX_AUDIT").lower() not in ("off", "0", "false", "no")
         try:

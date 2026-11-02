@@ -15,14 +15,17 @@
                            writes nothing unless --out is given.
 
 Options (mostly for testing):
-  --log-dir <folder>       read connectors-YYYY-MM.jsonl from here instead of the library's audit folder
+  --log-dir <folder>       read connectors-YYYY-MM.jsonl (and ppmx-YYYY-MM.jsonl) from here instead of the
+                           library's audit folder
   --kit-dir <folder>       Kit's home (default ~/Claude/Agents/kit): setup in memory/context, agents in
                            agents/, output in briefs/
   --out-dir <folder>       write audit-status.json and audit.txt here instead of <kit>/briefs
   --now <ISO time>         pretend it's this time
 
 What it reads: the audit logs the connector guard writes (one JSON line per call, result, and session
-end), the guard settings (connector-guard.json, or KIT_CONNECTOR_GUARD_CONFIG), connectors.md for the
+end), PPM Express's own audit logs (ppmx-YYYY-MM.jsonl, one line per tool call that kit-ppmx serves, in
+the same folders and in the folder kit-ppmx writes to; they're counted on their own line, with changes,
+refused changes, and errors), the guard settings (connector-guard.json, or KIT_CONNECTOR_GUARD_CONFIG), connectors.md for the
 direct callers, library.md for the library root, audit.md for working hours and thresholds, and the
 frontmatter of Kit's agents for the structural checks.
 
@@ -317,6 +320,72 @@ class Audit:
             except OSError as ex:
                 self.add("critical", "log-unreadable", "An audit log can't be read", f"{path}: {ex.strerror or ex}")
         self.events.sort(key=lambda e: e["_t"])
+
+    def read_ppmx(self):
+        """PPM Express's audit lines (kit-ppmx writes them itself, not the guard): {"ts", "via", "user",
+        "method", "tool", "args", "write", "outcome", "status", "rows", "id", "fields", "ms"}."""
+        self.ppmx, dirs = [], list(self.log_dirs)
+        if not self.args.log_dir:     # kit-ppmx writes to the guard's audit_dir, or <kit>/audit
+            own = os.path.expanduser((self.guard or {}).get("audit_dir") or os.path.join(self.kit, "audit"))
+            if os.path.normcase(os.path.abspath(own)) not in {os.path.normcase(os.path.abspath(d)) for d in dirs}:
+                dirs.append(own)
+        self.ppmx_files = []
+        for d in dirs:
+            if os.path.isdir(d):
+                self.ppmx_files += sorted(glob.glob(os.path.join(d, "ppmx-*.jsonl")))
+        for path in self.ppmx_files:
+            try:
+                self.sizes[path] = os.path.getsize(path)
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    for n, line in enumerate(f, 1):
+                        if not line.strip():
+                            continue
+                        try:
+                            ev = json.loads(line)
+                            t = parse_time(ev.get("ts"))
+                            if not isinstance(ev, dict) or t is None:
+                                raise ValueError
+                        except (ValueError, AttributeError):
+                            self.malformed[path] += 1
+                            continue
+                        if not ev.get("tool"):
+                            continue          # initialize, tools/list, ping: not calls
+                        ev["_t"], ev["_where"] = t, f"{os.path.basename(path)}:{n}"
+                        self.ppmx.append(ev)
+            except OSError as ex:
+                self.add("critical", "log-unreadable", "An audit log can't be read", f"{path}: {ex.strerror or ex}")
+        self.ppmx.sort(key=lambda e: e["_t"])
+
+    def ppmx_counts(self, evs):
+        return {"calls": len(evs), "changes": sum(bool(e.get("write")) and e.get("outcome") == "ok" for e in evs),
+                "refused": sum(e.get("outcome") == "refused" for e in evs),
+                "errors": sum(e.get("outcome") == "error" for e in evs),
+                "by_tool": dict(Counter(str(e.get("tool")) for e in evs).most_common(10))}
+
+    def check_ppmx(self, start, end):
+        evs = [e for e in self.ppmx if start <= e["_t"] < end]
+        changes = [e for e in evs if e.get("write") and e.get("outcome") == "ok"]
+        refused = [e for e in evs if e.get("outcome") == "refused"]
+        errors = [e for e in evs if e.get("outcome") == "error"]
+        tools = lambda es: ", ".join(f"{k} {v}" for k, v in Counter(str(e.get("tool")) for e in es).most_common(5))  # noqa: E731
+        if changes:
+            self.add("info", "ppmx-change", "PPM Express changes",
+                     f"{len(changes)} change{'s' if len(changes) != 1 else ''} made ({tools(changes)}); last at "
+                     f"{fmt(changes[-1]['_t'])}. Each should match a change you approved.", len(changes))
+            s, en, wd = self.hours
+            odd = [e for e in changes if not (e["_t"].astimezone().weekday() in wd and
+                                              s <= e["_t"].astimezone().hour * 60 + e["_t"].astimezone().minute < en)]
+            if odd:
+                self.add("warning", "ppmx-change", "PPM Express changes outside working hours",
+                         f"{len(odd)} ({tools(odd)}), first at {fmt(odd[0]['_t'])}.", len(odd))
+        if refused:
+            self.add("warning", "ppmx-refused", "PPM Express changes refused",
+                     f"{len(refused)} change{'s' if len(refused) != 1 else ''} tried while writes were off "
+                     f"({tools(refused)}).", len(refused))
+        if errors:
+            self.add("warning", "ppmx-failure", "Failed PPM Express calls", f"{len(errors)} ({tools(errors)}).",
+                     len(errors))
+        return evs
 
     def between(self, start, end):
         return [e for e in self.events if start <= e["_t"] < end]
@@ -701,6 +770,7 @@ class Audit:
     def run(self, mode):
         self.load_setup()
         self.read_logs()
+        self.read_ppmx()
         self.check_files()
         if mode == "weekly":
             start = self.now - dt.timedelta(days=7)
@@ -710,6 +780,7 @@ class Audit:
             if last and last < start:
                 start = max(last, self.now - dt.timedelta(days=31))
         evs = self.check_window(start, self.now)
+        ppmx = self.check_ppmx(start, self.now)
         self.check_structure()
         sev = Counter(f["severity"] for f in self.findings)
         self.findings.sort(key=lambda f: SEVERITIES.index(f["severity"]))
@@ -719,6 +790,9 @@ class Audit:
                   "severity_counts": {s: sev[s] for s in SEVERITIES},
                   "counts": self.counts(evs), "findings": self.findings, "notes": self.notes,
                   "log_dirs": self.log_dirs, "log_files": len(self.files)}
+        if self.ppmx_files:
+            result["ppmx"] = self.ppmx_counts(ppmx)
+            result["ppmx_files"] = len(self.ppmx_files)
         if mode == "weekly":
             result["summary"] = self.weekly_summary(evs, self.between(start - dt.timedelta(days=7), start))
         text = self.render(result)
@@ -752,6 +826,12 @@ class Audit:
         lines.append(f"{label}, {fmt(parse_time(w['start']))} to {fmt(parse_time(w['end']))}: "
                      f"{c['calls']} calls ({c['allowed']} allowed, {c['denied']} denied), {c['failures']} failed, "
                      f"{kb(c['result_bytes'])} of results, {c['sessions']} session{'s' if c['sessions'] != 1 else ''}.")
+        if r.get("ppmx"):
+            pc = r["ppmx"]
+            lines.append(f"PPM Express: {pc['calls']} call{'s' if pc['calls'] != 1 else ''} ({pc['changes']} "
+                         f"change{'s' if pc['changes'] != 1 else ''}, {pc['refused']} refused, {pc['errors']} failed)"
+                         + (f"; by tool: {', '.join(f'{k} {v}' for k, v in pc['by_tool'].items())}" if pc["calls"]
+                            and r["mode"] == "weekly" else "") + ".")
         if r["mode"] == "weekly":
             s = r["summary"]
             fmtc = lambda d: ", ".join(f"{k} {v}" for k, v in d.items()) or "none"  # noqa: E731

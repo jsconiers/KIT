@@ -120,8 +120,8 @@ def main():
         s, b = mcp({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, headers={"MCP-Protocol-Version": "2025-06-18"})
         tools = (b or {}).get("result", {}).get("tools", [])
         reads = [t for t in tools if t["annotations"]["readOnlyHint"]]
-        ok(len(tools) == 22 and len(reads) == 11 and all(t["name"].startswith(("get_", "list_")) for t in reads),
-           "tools/list: 11 reads and 11 changes", str([t["name"] for t in tools]))
+        ok(len(tools) == 25 and len(reads) == 14 and all(t["name"].startswith(("get_", "list_")) for t in reads),
+           "tools/list: 14 reads and 11 changes", str([t["name"] for t in tools]))
         _, err, alex, _ = call("list_projects", {}, ALEX)
         _, err2, blake, _ = call("list_projects", {}, BLAKE)
         ok(not err and alex["total"] == 3 and not err2 and blake["total"] == 1
@@ -130,11 +130,17 @@ def main():
                                                "fields": {"Status": "At Risk"}}, ALEX)
         _, err2, _, text = call("create_task", {"project_id": fake_ppmx.A1, "name": "Not allowed"}, BLAKE)
         ok(not err and made["result"] == "created" and made["record"]["Status"] == "At Risk"
-           and err2 and "write scopes" in text, "a change is made with the caller's own token", text)
+           and err2 and "write scope" in text, "a change is made with the caller's own token", text)
         _, err, _, text = call("list_projects", {}, None)
         ok(err and "X-PPMX-Token" in text, "no token: the tool says how to send one", text)
         _, err, me, _ = call("get_current_user", {}, None, {"Authorization": f"Bearer {BLAKE}"})
-        ok(not err and me["email"] == "blake@example.com", "a token as Authorization: Bearer works too")
+        ok(not err and me["email"] == "blake.chen@example.com", "a token as Authorization: Bearer works too")
+        _, err, work, _ = call("list_my_work", {}, ALEX)
+        _, err2, work2, _ = call("list_my_work", {}, BLAKE)
+        ok(not err and not err2 and work["me"]["user_id"] != work2["me"]["user_id"] and work["projects_scanned"] >= 1
+           and [i["Name"] for i in work2["items"]] == ["Card vault review"], "list_my_work: each caller's own work")
+        _, err, dl, _ = call("list_deliverables", {"project_id": fake_ppmx.A1}, ALEX)
+        ok(not err and dl["total"] == 2, "list_deliverables")
         s, _ = mcp({"jsonrpc": "2.0", "id": 3, "method": "ping"}, ALEX, {"Origin": "https://evil.example.com"})
         ok(s == 403, "a request from a browser origin is refused", str(s))
         s, _ = get("/mcp")

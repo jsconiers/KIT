@@ -23,10 +23,13 @@
                                        find documents. WORDS may use "quoted phrases", OR, and word*;
                                        --ref finds the documents that cite a passage (scripture
                                        collections), with or without WORDS
-  kit-library show ID [--text] [--chars N] [--json]
+  kit-library show ID [--text] [--chars N] [--safe] [--json]
                                        one document: where it is, its tags, the passages it cites;
                                        --text adds its text from the catalog (so agents can read Word
-                                       and PowerPoint files); --chars caps it (default 20000, 0 = all)
+                                       and PowerPoint files); --chars caps it (default 20000, 0 = all);
+                                       --safe (text-safe mode, also KIT_LIBRARY_SAFE=1, which texting Kit
+                                       sets) refuses work and confidential documents and anything in Kit's
+                                       folders that are closed to texts; search takes --safe too
   kit-library recent [--days 14] [--in NAME] [--json]
   kit-library output [KIND] [--json]   the output folder (Kit Output), or the folder for one kind
   kit-library deliver FILE... [--kind KIND] [--sub FOLDER] [--name NAME] [--replace] [--no-date]
@@ -37,14 +40,19 @@
                                        --no-date; an existing file is never overwritten unless --replace
   kit-library mirror                   copy Kit Output one way to the synced folder in output.mirror (an
                                        iCloud Drive folder, say): new and changed files only, never deletes;
-                                       every delivery does this on its own
+                                       every delivery does this on its own. Work and confidential material
+                                       (collections or output kinds marked so, or tagged work or confidential)
+                                       is never mirrored, and nothing is when sharing-policy.json blocks the
+                                       mirror folder
   kit-library fetch ID [--to-phone] [--json]
                                        stage a cataloged file for sending (texting Kit uses this); --to-phone
-                                       also puts a copy in the mirror's "Sent to phone" folder
+                                       also puts a copy in the mirror's "Sent to phone" folder, and refuses
+                                       work and confidential documents
   kit-library --check                  one line for kit doctor
 
 Collections and tags are in ~/Claude/Agents/kit/library/collections.json (change them with the
-commands above, or edit it). The catalog, with each document's text, is .install/library/index.db: it
+commands above, or edit it). Mark a collection "classification": "work" (or "confidential") there, or an
+output kind in output.classification ({"reports": "work"}), to keep it off the phone and out of texts. The catalog, with each document's text, is .install/library/index.db: it
 is rebuilt from the folders, readable only by you, and never committed or backed up. Long runs of
 digits (account, card, and ID numbers) are blanked out of the stored text, so they can't surface in
 a search, a brief, or a text.
@@ -97,6 +105,16 @@ APP = pathlib.Path(os.environ.get("KIT_LIBRARY_APP", MACLIB / "KitLibrary.app"))
 PDFTEXT = pathlib.Path(os.environ.get("KIT_PDFTEXT", MACLIB / "kit-pdftext"))
 IN_APP = os.environ.get("KIT_LIBRARY_IN_APP") == "1"
 APP_COMMANDS = {"index", "flush", "mirror", "fetch", "--check"}
+# Work and confidential material never goes to the phone mirror: a collection marked
+# "classification": "work" (or "confidential"), or tagged work or confidential, and an output kind
+# marked so in output.classification ({"reports": "work"}). Text-safe mode (KIT_LIBRARY_SAFE=1, which
+# kit-textback sets, or --safe) also keeps these Kit folders and output kinds out of show and search;
+# kit-textback closes the same folders to its file tools.
+WORK_CLASSES = {"work", "confidential"}
+TEXT_CLOSED = ("care", "letters", "feedback", ".install", "journal", "receipts", "church", "memory/personal")
+TEXT_CLOSED_KINDS = ("letters", "receipts")
+SAFE = os.environ.get("KIT_LIBRARY_SAFE") == "1"
+NO_MIRROR = STATE / "no-mirror.txt"          # delivered files that came from work material
 SEND = OUTBOX.parent / "send"                 # copies made for "kit send" (cleared after a day)
 MAX_SEND = 30 * 1024 * 1024
 MAX_CHARS = 600_000
@@ -298,6 +316,87 @@ def excluded(cfg, coll, rel):
 
 def output_root(cfg):
     return expand(cfg["output"]["folder"])
+
+
+def _under(path, root):
+    try:
+        pathlib.Path(path).resolve().relative_to(pathlib.Path(root).resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def output_kind(cfg, path):
+    """The output kind (letters, reports, ...) a file in Kit Output sits under, or None."""
+    root = output_root(cfg)
+    if not _under(path, root):
+        return None
+    first = pathlib.Path(path).resolve().relative_to(root.resolve()).parts[:1]
+    for k, v in cfg["output"]["kinds"].items():
+        if first and first[0].lower() == str(v).lower():
+            return k
+    return None
+
+
+def work_reason(cfg, path, coll_name=None, tags=()):
+    """Why a document (or a file in Kit Output) is work or confidential, or None."""
+    names = {coll_name} if coll_name else set()
+    names |= {c["name"] for folder, c in folder_pairs(cfg) if _under(path, folder)}
+    for c in cfg["collections"]:
+        if c["name"] not in names:
+            continue
+        cls = str(c.get("classification") or "").lower()
+        if cls in WORK_CLASSES:
+            return f"the {c.get('label', c['name'])} collection is marked {cls}"
+        hit = WORK_CLASSES & {slug(t) for t in c.get("tags", [])}
+        if hit:
+            return f"the {c.get('label', c['name'])} collection is tagged {sorted(hit)[0]}"
+    hit = WORK_CLASSES & {slug(t) for t in (tags.split() if isinstance(tags, str) else tags)}
+    if hit:
+        return f"it's tagged {sorted(hit)[0]}"
+    kind = output_kind(cfg, path)
+    cls = str((cfg["output"].get("classification") or {}).get(kind or "", "")).lower()
+    if cls in WORK_CLASSES:
+        return f"the {kind} output kind is marked {cls}"
+    return None
+
+
+def text_closed_reason(cfg, path, coll_name=None, tags=()):
+    """Why a document is closed to texted questions (text-safe mode), or None."""
+    why = work_reason(cfg, path, coll_name, tags)
+    if why:
+        return why
+    for folder in TEXT_CLOSED:
+        if _under(path, KIT / folder):
+            return f"Kit's {folder}/ folder is closed to texts"
+    if output_kind(cfg, path) in TEXT_CLOSED_KINDS:
+        return f"{output_kind(cfg, path)} are closed to texts"
+    return None
+
+
+def mirror_refusal(cfg):
+    """Why the phone mirror (output.mirror) may not be used at all, or None: the organization's sharing
+    policy (memory/context/sharing-policy.json, read the way kit-team and kit doctor read it) blocks it."""
+    root = mirror_root(cfg)
+    if not root:
+        return None
+    try:
+        sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+        import kit_transport as kt
+    except ImportError:
+        if (KIT / "memory/context/sharing-policy.json").exists():
+            return "the sharing policy can't be checked (kit_transport.py is missing), so nothing is mirrored"
+        return None
+    target = type("Mirror", (), {"kind": "folder", "layout": "shared", "root": str(root)})()
+    why = kt.root_verdict(target, kt.load_policy(KIT))
+    return f"the phone mirror isn't allowed: {why}" if why else None
+
+
+def no_mirror_paths():
+    try:
+        return {ln.strip() for ln in NO_MIRROR.read_text(encoding="utf-8").splitlines() if ln.strip()}
+    except OSError:
+        return set()
 
 
 # ------------------------------------------------------------------ scripture references
@@ -1065,7 +1164,7 @@ def fts_query(words):
     return " ".join(out)
 
 
-def search(cfg, db, words="", coll=None, tag=None, ext=None, ref=None, year=None, limit=10, offset=0):
+def search(cfg, db, words="", coll=None, tag=None, ext=None, ref=None, year=None, limit=10, offset=0, safe=False):
     where, args, joins = [], [], ""
     rank = "0"
     if words:
@@ -1117,6 +1216,8 @@ def search(cfg, db, words="", coll=None, tag=None, ext=None, ref=None, year=None
         order = "(SELECT COUNT(*) FROM refs r WHERE r.doc = d.id) DESC, d.mtime DESC"
     rows = db.execute(f"SELECT d.id, d.path, d.collection, d.title, d.ext, d.mtime, d.tags, d.area, d.rel, d.status "
                       f"FROM docs d{joins}{sql_where} ORDER BY {order} LIMIT 400", args).fetchall()
+    if safe:
+        rows = [r for r in rows if not text_closed_reason(cfg, r[1], r[2], r[6] or "")]
     # One result per piece of work: "Sermon.docx" and "Sermon.pdf" side by side are one hit.
     groups, order_keys = {}, []
     for r in rows:
@@ -1176,11 +1277,12 @@ def cmd_search(argv):
     ref, year = opt(argv, "--ref"), opt(argv, "--year")
     limit = int(opt(argv, "--limit", "10"))
     offset = int(opt(argv, "--offset", "0"))
+    safe = flag(argv, "--safe") or SAFE
     words = " ".join(argv).strip()
     cfg = load_config()
     db = connect(create=False)
-    hits, total = search(cfg, db, words, coll, tag, ext, ref, year, limit, offset)
-    if not hits and words and not (coll or tag or ext or ref or year):
+    hits, total = search(cfg, db, words, coll, tag, ext, ref, year, limit, offset, safe)
+    if not hits and words and not safe and not (coll or tag or ext or ref or year):
         extra = spotlight(cfg, words)
     else:
         extra = []
@@ -1222,12 +1324,16 @@ def doc_row(db, ident):
 def cmd_show(argv):
     as_json = flag(argv, "--json")
     with_text = flag(argv, "--text")
+    safe = flag(argv, "--safe") or SAFE
     chars = int(opt(argv, "--chars", "20000"))
     if not argv:
         raise Fail("kit-library show ID (the #number search shows)")
     cfg = load_config()
     db = connect(create=False)
     d = doc_row(db, argv[0])
+    why = text_closed_reason(cfg, d["path"], d["collection"], d["tags"] or "") if safe else None
+    if why:
+        raise Fail(f"#{d['id']} is closed to texts ({why}); open it in a session")
     refs = [ref_label(*r) for r in db.execute("SELECT book, chapter, v1, v2 FROM refs WHERE doc=? ORDER BY rowid",
                                               (d["id"],))]
     siblings = db.execute("SELECT id, path FROM docs WHERE path LIKE ? AND id != ?",
@@ -1645,6 +1751,161 @@ def md_to_html(md, title):
             f"<body>{''.join(out)}</body></html>")
 
 
+TEXTUTIL = "/usr/bin/textutil"
+# Word itself, over COM, saves an HTML page as a .docx (16 = wdFormatXMLDocument). The paths come in through
+# the environment, so no quoting is needed; Word is always quit, and nothing is shown.
+WORD_COM = ("$ErrorActionPreference = 'Stop'; $w = New-Object -ComObject Word.Application; $w.Visible = $false; "
+            "$w.DisplayAlerts = 0; try { $d = $w.Documents.Open($env:KIT_DOCX_IN, $false, $true); "
+            "$d.SaveAs2($env:KIT_DOCX_OUT, 16); $d.Close($false) } finally { $w.Quit() }")
+
+
+def html_to_docx(page, dest):
+    """md_to_html's page as a Word file, with python-docx (ImportError when it isn't installed)."""
+    import docx  # noqa: F401  (python-docx)
+    from docx.shared import Pt
+    from html.parser import HTMLParser
+
+    d = docx.Document()
+    d.styles["Normal"].font.name = "Georgia"
+    d.styles["Normal"].font.size = Pt(12)
+
+    def add_runs(par, runs):
+        for text, fmt in runs:
+            r = par.add_run(text)
+            r.bold = "b" in fmt or None
+            r.italic = "i" in fmt or None
+            r.underline = "a" in fmt or None
+            if "code" in fmt:
+                r.font.name = "Consolas"
+
+    class Page(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.runs, self.block, self.fmt, self.lists = None, None, [], []
+            self.table = self.row = None
+            self.title, self.where = "", None
+
+        def start_block(self, kind):
+            self.block, self.runs = kind, []
+
+        def end_block(self):
+            if self.runs is None:
+                return
+            kind, runs = self.block, self.runs
+            self.block = self.runs = None
+            if kind.startswith("h"):
+                par = d.add_heading(level=int(kind[1]))
+            elif kind == "li":
+                par = d.add_paragraph(style="List Number" if self.lists and self.lists[-1] == "ol" else "List Bullet")
+            elif kind == "blockquote":
+                par = d.add_paragraph(style="Quote")
+            else:
+                par = d.add_paragraph()
+            add_runs(par, runs)
+
+        def handle_starttag(self, tag, attrs):
+            if tag in ("title", "style"):
+                self.where = tag
+            elif tag in ("h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "blockquote"):
+                self.end_block()
+                self.start_block(tag)
+            elif tag in ("ul", "ol"):
+                self.lists.append(tag)
+            elif tag == "hr":
+                d.add_paragraph("\u2014" * 3)
+            elif tag == "table":
+                self.table = []
+            elif tag == "tr" and self.table is not None:
+                self.row = []
+                self.table.append(self.row)
+            elif tag in ("td", "th") and self.row is not None:
+                self.runs = []
+                self.row.append((tag, self.runs))
+            elif tag in ("b", "strong", "i", "em", "code", "a"):
+                self.fmt.append({"strong": "b", "em": "i"}.get(tag, tag))
+
+        def handle_endtag(self, tag):
+            if tag in ("title", "style"):
+                self.where = None
+            elif tag in ("h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "blockquote"):
+                self.end_block()
+            elif tag in ("ul", "ol") and self.lists:
+                self.lists.pop()
+            elif tag in ("td", "th"):
+                self.runs = None
+            elif tag == "tr":
+                self.row = None
+            elif tag == "table" and self.table is not None:
+                rows, self.table = [r for r in self.table if r], None
+                if rows:
+                    t = d.add_table(rows=len(rows), cols=max(len(r) for r in rows))
+                    t.style = "Table Grid"
+                    for i, r in enumerate(rows):
+                        for j, (kind, runs) in enumerate(r):
+                            par = t.cell(i, j).paragraphs[0]
+                            add_runs(par, [(x, f | ({"b"} if kind == "th" else set())) for x, f in runs])
+            elif tag in ("b", "strong", "i", "em", "code", "a"):
+                want = {"strong": "b", "em": "i"}.get(tag, tag)
+                if want in self.fmt:
+                    del self.fmt[len(self.fmt) - 1 - self.fmt[::-1].index(want)]
+
+        def handle_data(self, data):
+            if self.where == "title":
+                self.title += data
+            elif self.where is None and self.runs is not None and data:
+                self.runs.append((data, set(self.fmt)))
+
+    parser = Page()
+    parser.feed(page)
+    parser.close()
+    parser.end_block()
+    d.core_properties.title = parser.title.strip()
+    tmp = dest.with_name(dest.name + ".part")
+    d.save(str(tmp))
+    tmp.replace(dest)
+
+
+def md_to_docx(md, title, dest):
+    """Markdown as a Word file at dest: textutil on macOS; elsewhere python-docx when it's installed, else Word
+    itself over COM (Windows). (True, "") once the file is there, else (False, why not)."""
+    page = md_to_html(md, title)
+    why = []
+    tmp = dest.with_name(".page.html")
+    if os.path.exists(TEXTUTIL):
+        tmp.write_text(page, encoding="utf-8")
+        try:
+            r = subprocess.run([TEXTUTIL, "-convert", "docx", "-output", str(dest), str(tmp)], capture_output=True,
+                               timeout=120)
+            if r.returncode == 0 and dest.exists():
+                return True, ""
+            why.append(f"textutil exit {r.returncode}")
+        except (OSError, subprocess.SubprocessError) as e:
+            why.append(f"textutil: {type(e).__name__}")
+        finally:
+            tmp.unlink(missing_ok=True)
+    try:
+        html_to_docx(page, dest)
+        return True, ""
+    except ImportError:
+        why.append("python-docx isn't installed")
+    except Exception as e:  # noqa: BLE001
+        why.append(f"python-docx: {type(e).__name__}: {str(e)[:80]}")
+    if os.name == "nt":
+        tmp.write_text(page, encoding="utf-8")
+        try:
+            r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", WORD_COM],
+                               env=dict(os.environ, KIT_DOCX_IN=str(tmp), KIT_DOCX_OUT=str(dest)),
+                               capture_output=True, timeout=180)
+            if r.returncode == 0 and dest.exists():
+                return True, ""
+            why.append("Word didn't save it (is desktop Word installed?)")
+        except (OSError, subprocess.SubprocessError) as e:
+            why.append(f"Word: {type(e).__name__}")
+        finally:
+            tmp.unlink(missing_ok=True)
+    return False, "; ".join(why) or "no converter"
+
+
 def free_name(path):
     if not path.exists():
         return path
@@ -1683,6 +1944,10 @@ def flush(cfg):
                 dest = dest_dir / check_part(e["as"])
                 if dest.exists() and not m.get("replace"):
                     dest = free_name(dest)
+                if m.get("no_mirror"):          # recorded before the copy, so no mirror run can race it
+                    STATE.mkdir(parents=True, exist_ok=True)
+                    with open(NO_MIRROR, "a", encoding="utf-8") as f:
+                        f.write(f"{dest.resolve()}\n")
                 shutil.copyfile(job / check_part(e["file"]), dest)
                 delivered.append((m.get("kind", "other"), dest))
         except (ValueError, KeyError, OSError, Fail) as e:
@@ -1726,7 +1991,11 @@ def mirror_files(cfg, files=None):
         for dp, dns, fns in os.walk(root):
             dns[:] = [d for d in dns if not d.startswith(".")]
             files += [pathlib.Path(dp) / f for f in fns if not f.startswith(".")]
-    copied = 0
+    why = mirror_refusal(cfg)
+    if why:
+        log(f"mirror: refused; {why}")
+        return 0
+    copied, held = 0, no_mirror_paths()
     for src in files:
         src = pathlib.Path(src)
         try:
@@ -1736,6 +2005,8 @@ def mirror_files(cfg, files=None):
             continue
         except PermissionError:
             raise NeedsApp(str(root))
+        if str(src.resolve()) in held or work_reason(cfg, src):
+            continue                      # work and confidential material stays off the phone
         dest = dest_root / rel
         try:
             if dest.exists():
@@ -1765,6 +2036,9 @@ def cmd_mirror(argv):
     if not mirror_root(cfg):
         print("No phone mirror set (output.mirror in library/collections.json).")
         return 0
+    why = mirror_refusal(cfg)
+    if why:
+        raise Fail(f"nothing copied: {why}")
     try:
         n = mirror_files(cfg)
     except NeedsApp:
@@ -1808,6 +2082,11 @@ def cmd_fetch(argv):
     d = doc_row(db, ident)
     db.close()
     src = pathlib.Path(d["path"])
+    why = (text_closed_reason if SAFE else work_reason)(cfg, src, d["collection"], d["tags"] or "")
+    if why and (phone or SAFE):
+        raise Fail(f"{d['title']} can't go to the phone: {why}")
+    if phone and mirror_refusal(cfg):
+        raise Fail(f"{d['title']} can't go to the phone: {mirror_refusal(cfg)}")
     try:
         if src.is_dir():
             raise Fail(f"{d['title']} is a folder ({d['ext'].lstrip('.')}), so it can't be texted; open it on the Mac")
@@ -1857,6 +2136,9 @@ def cmd_deliver(argv):
         raise Fail("--name goes with one file")
     cfg = load_config()
     parts = [check_part(kind_folder(cfg, kind))] + [check_part(p) for p in (sub or "").split("/") if p.strip()]
+    # Work from a work or confidential collection, or a kind marked so, is delivered but never mirrored.
+    no_mirror = any(work_reason(cfg, expand(f).resolve(), tags=tags_for(cfg, expand(f).resolve())) for f in argv) \
+        or str((cfg["output"].get("classification") or {}).get(kind, "")).lower() in WORK_CLASSES
     job = OUTBOX / f"{dt.datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}"
     job.mkdir(parents=True)
     entries, today = [], dt.date.today().isoformat()
@@ -1871,14 +2153,12 @@ def cmd_deliver(argv):
                 stem = f"{today} {stem}"
             stem = check_part(re.sub(r"[/\\:]+", "-", stem).strip())
             if src.suffix.lower() in (".md", ".markdown") and not as_md:
-                tmp = job / ".page.html"
-                tmp.write_text(md_to_html(src.read_text(errors="replace"), stem), encoding="utf-8")
-                r = subprocess.run(["/usr/bin/textutil", "-convert", "docx", "-output", str(job / f"{stem}.docx"),
-                                    str(tmp)], capture_output=True, timeout=120)
-                tmp.unlink()
-                if r.returncode == 0 and (job / f"{stem}.docx").exists():
+                made, why = md_to_docx(src.read_text(errors="replace"), stem, job / f"{stem}.docx")
+                if made:
                     entries.append({"file": f"{stem}.docx", "as": f"{stem}.docx"})
                 else:
+                    print(f"kit-library: no Word file for {src.name} ({why}); delivering the Markdown instead",
+                          file=sys.stderr)
                     keep_md = True
                 if keep_md:
                     shutil.copyfile(src, job / f"{stem}.md")
@@ -1887,7 +2167,8 @@ def cmd_deliver(argv):
                 shutil.copyfile(src, job / f"{stem}{ext}")
                 entries.append({"file": f"{stem}{ext}", "as": f"{stem}{ext}"})
         (job / "manifest.json").write_text(json.dumps({"kind": kind, "dir": "/".join(parts), "replace": replace,
-                                                       "files": entries, "created": time.time()}, indent=2))
+                                                       "files": entries, "created": time.time(),
+                                                       "no_mirror": no_mirror}, indent=2))
     except BaseException:
         shutil.rmtree(job, ignore_errors=True)
         raise

@@ -170,13 +170,31 @@ def brief_text():
 
 def calendar_cmd():
     """The calendar command for the Today panel: CALENDAR_JSON_CMD from the run settings (any command
-    that prints today's events as a JSON list), else the macOS kitcal tool."""
+    that prints today's events as a JSON list), else kitcal (macOS ~/.local/bin/kitcal; on Windows the
+    installer's kitcal.cmd). Quoted words keep their spaces, and Windows paths keep their backslashes."""
+    import shlex
+    import shutil
     cfg = KIT / ".install/shared/morning/config"
     if cfg.exists():
         m = re.search(r'^CALENDAR_JSON_CMD="([^"]+)"', cfg.read_text(errors="ignore"), re.M)
         if m:
-            return [os.path.expanduser(w) for w in m.group(1).split()]
-    return [str(HOME / ".local/bin/kitcal"), "events", "--from", "today", "--to", "today"]
+            try:
+                if os.name == "nt":
+                    words = [w[1:-1] if len(w) > 1 and w[0] == w[-1] and w[0] in "\"'" else w
+                             for w in shlex.split(m.group(1), posix=False)]
+                else:
+                    words = shlex.split(m.group(1))
+            except ValueError:
+                words = m.group(1).split()
+            words = [os.path.expanduser(w) for w in words]
+            if os.name == "nt" and words and not os.path.dirname(words[0]):
+                words[0] = shutil.which(words[0]) or words[0]    # kitcal -> kitcal.cmd, through PATHEXT
+            return words
+    exe = str(HOME / ".local/bin/kitcal")
+    if os.name == "nt":
+        shim = KIT / ".install/platform/windows/bin/kitcal.cmd"
+        exe = shutil.which("kitcal") or (str(shim) if shim.exists() else "kitcal")
+    return [exe, "events", "--from", "today", "--to", "today"]
 
 
 def when_of(stamp):

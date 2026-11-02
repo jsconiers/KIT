@@ -37,7 +37,10 @@ Windows reimplementation** — the integration layer below (the hardest 30%).
 
 ## Windows counterparts under `platform/windows/`
 
-All are drafted and parse-checked on macOS; none has run on a real Windows machine yet.
+CI runs the installer for real on GitHub's Windows runners (Windows PowerShell 5.1 and PowerShell 7:
+install, reinstall, and the repair of broken permissions), with the Python suites the workflow lists
+on Windows. The Outlook COM adapters and the Task Scheduler tasks haven't run on a real Windows
+machine yet.
 
 1. `install.ps1`: installer over the shared `kit_setup.py`, with NTFS-ACL folder privacy.
 2. Mail: Outlook COM backend, equivalent to `platform/mac/mail/kitmail.swift`.
@@ -46,12 +49,16 @@ All are drafted and parse-checked on macOS; none has run on a real Windows machi
 5. `run.ps1` and Task Scheduler tasks, replacing `platform/mac/morning/run.sh` and the eight launchd
    `.plist.template` files, with toast or file delivery instead of iMessage.
 
-## Status (first-draft adapters — UNTESTED on Windows)
+## Status: what has run on Windows, and what hasn't
 
-All five adapters are drafted under `platform/windows/`. They parse cleanly (Python `ast`,
-PowerShell parser) but have **not been run on Windows** — validate on a real Windows box with
-classic desktop Outlook before relying on them. Each file carries an "UNTESTED" banner and a
-`## Manual test` section.
+- **Run in CI on Windows** (`.github/workflows/checks.yml`, under Windows PowerShell 5.1 and
+  PowerShell 7): `install.ps1` (a fresh install, a reinstall, and the repair of an install whose files
+  lost their permissions, then doctor.py), the command shims, and the Python suites the workflow lists.
+- **Tested elsewhere:** `run.ps1`'s logic under PowerShell 7 against a fake claude
+  (`tests/test_runps1.sh`), and the Outlook Tasks sync over a fake COM layer (`tests/test_sync_core.sh`).
+- **Not yet run on a real Windows machine:** the Outlook COM adapters (mail, calendar, Outlook Tasks),
+  which carry an "UNTESTED" banner and a `## Manual test` section; registering and running the Task
+  Scheduler tasks; `preflight.ps1`; and `uninstall.ps1`. Every script parses in CI.
 
 - `install.ps1` / `uninstall.ps1` — run `shared/kit_setup.py`, NTFS-ACL folder lock-down,
   `kitmail`/`kitcal` PATH shims, and a classic-Outlook presence check.
@@ -70,16 +77,18 @@ classic desktop Outlook before relying on them. Each file carries an "UNTESTED" 
   and `reminders/reminders_sync_win.py` (Windows, Outlook Tasks over COM) only supply the device
   backend. `tests/test_sync_core.sh` runs the Windows backend over a fake COM layer; it still needs a
   run against real Outlook on Windows.
-- Everything needs an end-to-end run on Windows; recurrence-delete off-by-one is the top risk.
+- The Outlook adapters and the scheduled tasks need an end-to-end run on a real Windows machine;
+  recurrence-delete off-by-one is the top risk.
 
 ## Login check and connection check
 
 - `morning/preflight.ps1` ports the Mac `preflight.sh`: at 06:45 and 15:45 ("Kit Login Check" in
   `register-tasks.ps1`) it makes one tiny `claude -p` call and checks each connector in
-  `PREFLIGHT_CONNECTORS`, and tells the owner once per lapse through `deliver.py`. Untested.
+  `PREFLIGHT_CONNECTORS`, and tells the owner once per lapse through `deliver.py`. Not yet run on Windows.
 - `run.ps1` checks that the API is reachable before the model run (`CONNECTION_CHECK`,
   `CONNECTION_WAIT`): when it isn't, it waits up to 5 minutes, then skips the model run and logs the
-  run as failed, as `run.sh` does. Untested.
+  run as failed, as `run.sh` does. It checks `CONNECTION_URL`, else `ANTHROPIC_BASE_URL`, else the API,
+  through `HTTPS_PROXY` (with `NO_PROXY`) or the system proxy; tested under PowerShell 7 (`tests/test_runps1.sh`).
 - Long-lived login: the Mac reads a `claude setup-token` token from the Keychain. On Windows, set the
   user environment variable instead (`setx CLAUDE_CODE_OAUTH_TOKEN "<token>"`); scheduled tasks
   inherit it. Treat it like a password.

@@ -5,8 +5,10 @@ connectors, and day-two tasks (updating, backups, pausing, uninstalling, trouble
 `~` means your home folder. Commands assume `~/.local/bin` is on your `PATH`; if it isn't, run a
 tool by its full path, `python3 ~/Claude/Agents/kit/.install/shared/bin/<tool>`.
 
-macOS is the supported platform. **Windows is built but untested** on a real Windows machine; treat
-every Windows step as a first trial and report what breaks.
+macOS is the supported platform. On Windows, the installer (install, reinstall, and repair) and the
+suites the checks list run in CI on GitHub's Windows runners, under Windows PowerShell 5.1 and
+PowerShell 7. The Outlook COM adapters and the Task Scheduler tasks haven't run on a real Windows machine
+yet: treat those steps as a first trial and report what breaks.
 
 ## 1. Prerequisites
 
@@ -46,7 +48,7 @@ installer then offers to delete the download afterward).
 KIT_OWNER=Alex bash install.sh
 ```
 
-**Windows (untested)**
+**Windows** (installer tested in CI; see above)
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File install.ps1
@@ -65,6 +67,8 @@ preferences.
 | `~/.claude/CLAUDE.md` | One import line, `@~/Claude/Agents/kit/KIT.md`, with a comment marking when it was added |
 | `~/.claude/settings.json` | Allow rules so Kit can read its folder and keep its notes; ask rules for editing Kit's rules and Claude Code's own settings, and for `rm`, `sudo`, `git push`, `git reset --hard`, `gh` posts, package installs, `launchctl`, `defaults write`, and `osascript`; Kit's folder as an additional directory |
 | `~/.local/bin/` (macOS) | Links to the everyday tools |
+| `~/.claude/skills/` | Kit's skills, copied only where no skill of that name exists |
+| `~/.claude/agents/` | Kit's staff. Agents you haven't edited are refreshed to the new version; ones you edited are kept and named. What Kit last wrote is recorded in `.install/agents-installed.json`; `python3 shared/kit_setup.py agents` does this step alone |
 | Windows | `.cmd` shims for the same tools, and owner-only NTFS permissions on Kit's folder |
 
 Both Claude Code files are backed up to `.install/backups/` first, and the installer records exactly
@@ -77,16 +81,15 @@ briefs should reach you and which app your to-dos sync with.
 If your Claude Code settings run with permission prompts bypassed, the installer warns you: Kit's
 ask rules only work with prompts on.
 
-### Install the agents into Claude Code
+### The agents in Claude Code
 
-The installer puts Kit's staff in `~/Claude/Agents/kit/agents/`. Copy them where Claude Code finds
-them:
+The installer puts Kit's staff in `~/Claude/Agents/kit/agents/` and copies them into
+`~/.claude/agents/`, where Claude Code finds them, keeping any you edited. To copy them again by hand
+(for example after `kit-models apply`):
 
 ```bash
 python3 ~/Claude/Agents/kit/.install/shared/doctor.py --fix-agents
 ```
-
-Rerun this after any update that changes an agent, or after `kit-models apply`.
 
 ## 4. First checks
 
@@ -142,6 +145,12 @@ missing. Fill in what applies to you, in roughly this order:
 | `sharing.md` + `sharing-policy.json` (+ `sharing-db.json` for SQL) | `kit-publish`, `kit-team` | Kit id, role, what to publish, transport, shared root, overload threshold (default 8), organization limits |
 | `connector-guard.json` | connector guard, `kit-connect` | Allowed servers and tools, denied tools, audit folder, optional probe tools and credential variable names |
 | `agents.md` | Kit | The staff roster; edit only to add an agent |
+| `letters.md` | letters desk, `kit-letter` | Return address, letter style, the saved signature (a transparent PNG in `letters/signature/`), where incoming letters arrive; the log is `letters/log.md` |
+| `ppmx-projects.json` | `kit-ppmx actions` | Which PPM Express project each library project is (written by `kit-ppmx actions map`) |
+
+Two lists live in Kit's folder rather than in `memory/context/`: `expiry.json` (`kit-expiry`: tokens,
+logins, domains, certificates, and renewals) and `library/collections.json` (`kit-library`: the folders
+cataloged as collections, their tags, rules, and the output folder).
 
 Kit also keeps `kit-setup.md` (how this install was set up) and `glossary.md` (your shorthand).
 
@@ -169,7 +178,20 @@ done
 | `eod` | Monday to Thursday 17:30, Friday 15:30 | Optional end-of-day wrap: `kit-wrap`, no model call (`EOD="off"` skips it; `EOD_MODEL="on"` uses Claude instead) |
 | `backup` | Daily 12:30 | `kit-backup` with the config's `BACKUP_*` settings (encrypted when `BACKUP_ENCRYPT` is on); runs on wake if the Mac was asleep; logs to `.install/logs/backup.log` |
 | `meetprep` | Weekdays, every 30 minutes 07:00 to 18:00 | Optional meeting prep packs (`kit-meetprep`); a plain script, no Claude run; honours `kit-pause` |
+| `preflight` | Daily 06:45 and 15:45 | Login check before the runs: Claude Code can run (one tiny call) and the connectors in `PREFLIGHT_CONNECTORS` are signed in; each problem reaches you once per lapse (`platform/mac/morning/preflight.sh`, log `preflight.log`) |
+| `textback` | Always on (KeepAlive) | Optional texting Kit from your phone (`kit-textback watch`; `TEXTBACK="on"` turns it on). Build its reader first with `platform/mac/textback/build.sh` and give KitMessages.app Full Disk Access |
 | `open` | Weekdays 09:45 | Optional, for a trading setup only |
+
+**Library helpers (macOS).** `kit-library` reads PDFs through `kit-pdftext` and reaches protected
+folders such as Documents through KitLibrary.app. Build both with `platform/mac/library/build.sh`
+(`build.sh pdftext` rebuilds only the PDF reader), then allow KitLibrary in System Settings > Privacy &
+Security > Files and Folders when macOS asks. No scheduled job for the library ships with Kit: run
+`kit-library index` yourself, or schedule it with a launchd job of your own.
+
+**Long-lived login (optional).** A token from `claude setup-token`, stored in the login Keychain as
+`kit-claude-token`, keeps scheduled runs and the preflight check working when the interactive login
+lapses. On Windows, set the user environment variable `CLAUDE_CODE_OAUTH_TOKEN` instead. Either way,
+treat it like a password, and list its expiry in `expiry.json`.
 
 To test a run without using up the day's run:
 
@@ -193,10 +215,12 @@ refusals, a budget stop, and a pause are never retried. The log shows `retrying 
 failure (<why>)`, and the retry's cost is recorded. A second failure falls back to the degraded brief
 (morning) or a failure notice.
 
-**Windows (untested):** `platform\windows\morning\register-tasks.ps1` registers the same runs in
-Task Scheduler ("Kit Morning Brief", "Kit Weekly Review", "Kit Work List", "Kit Reminders Sync",
-and optional trading tasks); `unregister-tasks.ps1` removes them. See
-`platform/windows/morning/README.md`.
+**Windows:** `platform\windows\morning\register-tasks.ps1` registers the same runs in Task Scheduler
+("Kit Morning Brief", "Kit Weekly Review", "Kit Work List", "Kit End of Day", "Kit Backup", "Kit
+Reminders Sync", "Kit Login Check", the optional "Kit Meeting Prep" (weekdays every 30 minutes, 07:00 to
+18:00; set `$RegisterMeetprep = $false` at the top of the script to skip it), and optional trading tasks);
+`unregister-tasks.ps1` removes them. Registering and running the tasks hasn't been tried on a real
+Windows machine yet. There's no text-back on Windows. See `platform/windows/morning/README.md`.
 
 ### Allowing tools in unattended runs
 
@@ -221,6 +245,8 @@ rule written with `~/` doesn't match a command spelled with the full home path.
 | `PHONE_APPROVALS`, `PUBLISH_PERSONAL`, `ONEDRIVE_PUBLISH_DIR`, `ONEDRIVE_ALLOWED_PREFIX`, `IMESSAGE_TO`, `IMESSAGE_TO_ALT` | Phone approvals and publishing routes |
 | `RUN_WINDOW_WORKLIST`, `RUN_WINDOW_EOD`, `RUN_ALERTS_TIMEOUT` | Optional run-alert windows for the work list and wrap-up; the alert check's time limit |
 | `OWNER_NAME` | Your name as Kit uses it in briefs and agents |
+| `DELIVERY`, `DELIVERY_WORK`, `DELIVERY_PERSONAL`, `DELIVERY_EMAIL_TO` | How briefs are delivered (set with `kit-settings delivery` and `kit-settings email`) |
+| `REMINDERS_BACKEND`, `TODOS_PERSONAL`, `TODOS_WORK` | Which app the to-do sync uses, overall and for personal and work items (set with `kit-settings todos`) |
 
 The morning brief opens with a connector health line (each connector PASS or FAIL, from
 `kit-connect test`, no model cost). It gives up after `CONNECTOR_CHECK_TIMEOUT` seconds (default
@@ -280,8 +306,8 @@ review's horizon watch, which follows the future tech planner's watch list.
 each month (day 1 to 7) runs `kit-digest --write --month last --brief`: last month's one-page digest goes
 to `briefs/digest-YYYY-MM.md` for your edit (one already there is kept), and the review points at it. It
 reads the decisions folder, the reference architecture index, the radar, and the exception register, so set
-the library root first; a missing source only empties its section. No model call. On Windows, run
-`kit-digest --write` yourself.
+the library root first; a missing source only empties its section. No model call; the same on macOS
+and Windows.
 
 The red team and threat modeler need no setup beyond `standards.md` and `compliance.md`; name a
 team copy of their templates under "Design review templates" in `standards.md`.
@@ -325,6 +351,25 @@ kit-settings email you@example.com            # where Outlook drafts are address
 | `RETRY_ON`, `RETRY_DELAY` | on, 120 | Retry a scheduled run once after a transient failure, after this many seconds |
 | `RELIABILITY_MIN_PCT` | 90 | `kit-reliability` alerts when a run type's 30-day success rate falls below this |
 | `SKIP_DAYS`, `BLOCK_TOOLS` | empty | Days with no morning run; tools unattended runs may never call |
+| `DELIVERY` | local | How briefs reach you: any of `local`, `outlook-drafts`, `outlook-review` (and the legacy `imessage` on macOS, `sms` stub on Windows), space-separated; Kit never sends mail |
+| `DELIVERY_WORK`, `DELIVERY_PERSONAL` | unset | When either is set it replaces `DELIVERY`: work items (tagged [work]) and personal items go their own ways, each as its own short text |
+| `DELIVERY_EMAIL_TO` | you@example.com | The address Outlook drafts are made out to (usually your own) |
+| `REMINDERS_BACKEND` | outlook | To-do sync with Outlook Tasks, or `apple` for Apple Reminders (macOS only; syncs through iCloud, so keep work out of it) |
+| `TODOS_PERSONAL`, `TODOS_WORK` | unset | macOS only: personal and work to-dos in different apps, each with its own "Kit Inbox" and "Kit: <name>" lists |
+| `PREFLIGHT_CONNECTORS` | empty | Space-separated `claude mcp` names of connectors that sign in with OAuth, for the login check at 06:45 and 15:45 |
+| `CONNECTION_CHECK`, `CONNECTION_WAIT` | on, 300 s | Before each run's model call, check the API can be reached; wait up to this long, then skip the model run (the morning still gets its degraded brief) |
+| `CONNECTION_URL` | unset | The address the connection check probes; unset uses `ANTHROPIC_BASE_URL`, else the Anthropic API, through `HTTPS_PROXY` when set |
+| `WRAP_WORKDAYS` | "1 2 3 4 5" | The end-of-day wrap's working days (1 = Monday), for "the next working day" |
+| `RUN_TIMEOUT_EOD` | 300 s | macOS: time limit for `kit-wrap` in the end-of-day run (with `EOD_MODEL="on"`, `RUN_TIMEOUT` applies instead) |
+| `PPMX_PULSE`, `PPMX_PULSE_DAY`, `PPMX_PULSE_SCOPE`, `PPMX_PULSE_TIMEOUT` | off, 1, all, 300 s | The PPM Express pulse in the morning brief on this weekday (1 = Monday), for all projects, `mine`, or named portfolios and programs, and its time limit |
+| `PPMX_TASK_DUE_FIELD` | FinishDate | The task field a meeting action's due date goes in when a project has no tasks to copy it from |
+| `PREREAD_MODEL`, `PREREAD_TIMEOUT` | opus, 900 s | `kit-preread`'s model and time limit |
+| `REHEARSE_MODEL`, `REHEARSE_TIMEOUT` | opus, 900 s | `kit-rehearse`'s model and time limit |
+| `TEAMMAP_COVERAGE` | empty | Another coverage file for `kit-teammap` (empty: `briefs/team/coverage.json`) |
+| `TEXTBACK` | off | macOS only: answer texts you send yourself that start with "Kit" |
+| `TEXTBACK_ASK` | on | Let texted questions go to Claude (read-only, Kit's folder only); "off" allows commands only |
+| `TEXTBACK_MODEL`, `TEXTBACK_PARSE_MODEL` | sonnet, haiku | The model for texted questions, and the quick one that reads a date or event out of a text |
+| `TEXTBACK_MAX_PER_HOUR` | 30 | Most texts answered in an hour (a value that isn't a number means 30) |
 
 ### Day-to-day tools
 
@@ -340,6 +385,33 @@ kit-settings email you@example.com            # where Outlook drafts are address
   open all` hands them to your calendar app to review and save.
 - **1:1 and wins:** `kit-oneonone` before a 1:1 (`--done` after it); `kit-wins collect` weekly (the
   weekly review runs it), `kit-wins report --from ... --to ...` for reviews.
+- **Letters:** write the letter as plain text (`letters/<folder>/letter.md`, blocks separated by blank
+  lines, `{{SIGNATURE}}` where the signature goes), then `kit-letter build FILE` (room for a pen
+  signature) or `kit-letter sign FILE` (your saved PNG from `letters/signature/`; Claude Code asks every
+  time). The letters desk drafts and logs letters; it never sends one.
+- **Dates and keeping in touch:** `kit-dates add NAME MM-DD --what birthday --action card` (or a full
+  date for an age; `--work` for work dates); `kit-touch add NAME --every 30`, `kit-touch talked NAME`,
+  and `kit-touch scan --add` to read "Call with NAME" and "Lunch with NAME" events. Both feed brief
+  lines; nothing is ever sent.
+- **Expiry list:** `kit-expiry add NAME --date YYYY-MM-DD --warn 30` for tokens, logins, domains,
+  certificates, and renewals; `kit-expiry` lists them soonest first. It looks certificates and domains
+  up over the network only with `--live`; the health check and the brief read the saved results.
+- **Feedback on your team:** `kit-feedback add-person NAME --role R`, `kit-feedback add NAME TEXT --kind
+  praise`, `kit-feedback prep NAME` before a 1:1, `kit-feedback review NAME --from ... --to ...` for a
+  review. Owner-only, never committed, exported, or texted.
+- **Meeting load:** `kit-meetload` (the last two weeks; `--ahead`, `--profile work|personal`, `--ics FILE`
+  for a calendar kitcal can't read, `--holds` to draft focus time). It reads the calendar and changes
+  nothing.
+- **Library:** `kit-library add NAME FOLDER --about "TEXT"`, then `kit-library index` and `kit-library
+  search WORDS`; `kit-library deliver FILE --kind reports` puts finished work in the output folder
+  (Markdown arrives as Word). Mark a collection `"classification": "work"` in `library/collections.json`
+  to keep it off the phone mirror and out of texts.
+- **Design reviews:** `kit-preread FILE --meeting "TITLE"` before reviewing someone else's design;
+  `kit-rehearse FILE --board "NAME"` before defending your own. Both are closed, paid Claude runs that
+  Claude Code asks before; `--dry-run` shows what would be sent.
+- **Vendor evaluations:** `kit-vendors new SLUG --title T --vendors "A, B"`, `kit-vendors questions SLUG
+  --csv FILE` (for you to send), `kit-vendors import SLUG VENDOR FILE`, `kit-vendors score ...`, and
+  `kit-vendors show SLUG`. Nothing is sent to a vendor.
 
 ## 8. Connectors
 
@@ -367,10 +439,18 @@ The health check (`doctor.py`) also warns about missing credential variables by 
 ### PPM Express (kit-ppmx)
 
 Kit ships its own PPM Express connector, `kit-ppmx`: an MCP server that reads portfolios, programs,
-projects, tasks, key dates, ideas, challenges, and resources, and creates and updates them (PPM Express's
-API has no delete). It runs on your computer, macOS or Windows, for Claude Code and Claude Desktop, with
-your own personal access token. `kit-ppmx setup` prints these steps with this computer's paths filled in,
-and changes nothing.
+projects, tasks, key dates, deliverables, ideas, challenges, and resources, and creates and updates them
+(PPM Express's API has no delete). It runs on your computer, macOS or Windows, for Claude Code and Claude
+Desktop, with your own personal access token. `kit-ppmx setup` prints these steps with this computer's
+paths filled in, and changes nothing.
+
+Version 0.3.0 was confirmed against the live API on 02-Nov-2026: the endpoint paths against PPM
+Express's OpenAPI description, and the reads, response shapes, and field names against a live tenant
+(read-only). The writes follow the description and are tested against the fake server. Person filters
+take part of a name or `"me"` (your token's user); `list_my_work` gathers your tasks and deliverables
+across projects, bounded by `PPMX_WORK_MAX_PROJECTS` and `PPMX_WORK_SECONDS`. PPM Express's `/me` gives
+no name, so set `PPMX_MY_NAME` in Kit's config to your name as PPM Express shows it for an exact `"me"`
+match. `shared/ppmx/README.md` has the details.
 
 1. **A token.** In PPM Express > Automation, create a personal access token: read scopes to look, and
    write scopes (such as Write Projects) if Kit should make the changes you approve. Store it where only
@@ -398,7 +478,7 @@ and changes nothing.
    path):
 
    ```bash
-   claude mcp add --scope user --env PYTHONUTF8=1 ppmx -- python3 ~/Claude/Agents/kit/.install/shared/bin/kit-ppmx serve
+   claude mcp add --scope user ppmx --env PYTHONUTF8=1 -- python3 ~/Claude/Agents/kit/.install/shared/bin/kit-ppmx serve
    ```
 
    On Windows, use the full path to `python.exe` and to `kit-ppmx` under `%USERPROFILE%`.
@@ -572,7 +652,9 @@ run `platform\windows\uninstall.ps1` and `unregister-tasks.ps1`. To reinstall la
 | "Models: N agents don't match" | Run `kit-models apply`, then `--fix-agents` |
 | "Scheduled X run: not loaded" | `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.$USER.kit.X.plist` |
 | "Recent runs: ... run didn't finish" | Read that day's log. A later successful run of the same kind clears it. |
-| A run "hit its time limit" (exit 142) | Raise `RUN_TIMEOUT_<MODE>` in the config, or trim the run |
+| A run "hit its time limit" (exit 142) | Raise `RUN_TIMEOUT` (morning and every other run), `RUN_TIMEOUT_WEEKLY`, or `RUN_TIMEOUT_WORKLIST` in the config, or trim the run. The end-of-day wrap uses `RUN_TIMEOUT` only with `EOD_MODEL="on"`; otherwise `RUN_TIMEOUT_EOD` (300 s) limits `kit-wrap` |
+| "KitMessages needs Full Disk Access" | Allow KitMessages.app in System Settings > Privacy & Security > Full Disk Access (again after a rebuild) |
+| `kit-library` says it needs folder permission | Build KitLibrary.app (`platform/mac/library/build.sh`) and allow it under Files and Folders |
 | "waiting for another run to finish" in the log | The lock is working; a run that died leaves a lock that's cleared automatically |
 | Calendar and mail marked stale, AppleEvent error -1712 | Outlook didn't answer; restart Outlook. `kit-outlook` retries before each run. |
 | A tool "needed approval" in an unattended run | Add it to `ALLOW_TOOLS` or `ALLOW_TOOLS_WEEKLY` |

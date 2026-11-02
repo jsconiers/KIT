@@ -8,7 +8,8 @@
 #                    PowerShell 5.1 and PowerShell 7: install, reinstall, and the repair of an install
 #                    whose files lost their permissions (.github/scripts/windows-install-test.ps1), the
 #                    PPM Express connector's tests on Windows (Credential Manager, the pulse, and meeting
-#                    actions included), and the wrap, rehearsal, vendor desk, team map, and digest tests.
+#                    actions included), the wrap, rehearsal, vendor desk, team map, and digest tests, and the
+#                    Windows fixes tests (tests/test_windows_fixes.py, with python-docx).
 #   ppmx:            the PPM Express MCP server (shared/ppmx): its tests against a fake PPM Express (the
 #                    tools, and kit-ppmx's pulse and meeting actions: tests/test_ppmx_work.py), the
 #                    OpenShift files rendered with kustomize, and the container image built and run the
@@ -93,6 +94,11 @@ jobs:
         run: python tests/test_digest.py
       - name: Review rehearsal tests on Windows
         run: python tests/test_rehearse.py
+      # python-docx is pinned; check it for advisories before changing the version.
+      - name: Windows fixes tests on Windows (python-docx for kit-library's Word file)
+        run: |
+          python -m pip install --quiet python-docx==1.1.2
+          python tests/test_windows_fixes.py
 
   ppmx:
     runs-on: ubuntu-latest

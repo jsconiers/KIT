@@ -2,9 +2,11 @@
 """kit-plugin: package shareable Kit content as a Claude Code plugin marketplace for an internal git repo.
 
   kit-plugin build NAME [--agents a,b] [--templates x,y] [--lessons l1,l2] [--skills s1]
-                   [--marketplace DIR] [--version 0.1.0] [--author-role ROLE] [--description TEXT]
+                   [--marketplace DIR] [--version 0.1.0] [--author-role ROLE] [--description TEXT] [--force]
                    build or rebuild plugin NAME under DIR/plugins/NAME (default DIR: ./marketplace)
-                   and list it in DIR/.claude-plugin/marketplace.json
+                   and list it in DIR/.claude-plugin/marketplace.json. It builds in a temporary folder
+                   and swaps it in; a rebuild refuses to replace a plugin folder holding files kit-plugin
+                   didn't write, or has changed since (REVIEW.md aside), unless --force
   kit-plugin check DIR [--denylist FILE] [--claude]
                    check a plugin or a whole marketplace before anyone merges it (exit 1 on any problem)
   kit-plugin list [--marketplace DIR]
@@ -40,6 +42,7 @@ REVIEW.md, then merge. Teammates add it once with `claude plugin marketplace add
 """
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 import pathlib
@@ -102,14 +105,49 @@ Reviewed by (role), date:
 """
 
 
+BUILDS = ".claude-plugin/kit-builds.json"    # in the marketplace: each plugin's files as kit-plugin wrote them
+
+
+def file_hashes(root):
+    return {p.relative_to(root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+def foreign_files(root, recorded):
+    """Files in an existing plugin folder that kit-plugin didn't write, or that changed since it did.
+    REVIEW.md is meant to be filled in, so it never counts."""
+    have = file_hashes(root)
+    return sorted(rel for rel, h in have.items() if rel != "REVIEW.md" and recorded.get(rel) != h)
+
+
 def build(a):
     name = a.name
     if not NAME_RE.fullmatch(name) or RESERVED.search(name):
         sys.exit(f"kit-plugin: plugin name {name!r} must be kebab-case and can't look like one of Anthropic's own")
     mkt = pathlib.Path(a.marketplace).expanduser()
-    root = mkt / "plugins" / name
-    if root.exists():
-        shutil.rmtree(root)
+    final = mkt / "plugins" / name
+    bp = mkt / BUILDS
+    try:
+        builds = json.loads(bp.read_text(encoding="utf-8-sig")) if bp.exists() else {}
+    except ValueError:
+        builds = {}
+    if final.exists() and not getattr(a, "force", False):
+        extra = foreign_files(final, builds.get(name) or {})
+        if extra:
+            sys.exit(f"kit-plugin: {final} has files kit-plugin didn't write (or that changed since): "
+                     + ", ".join(extra[:8]) + (f" and {len(extra) - 8} more" if len(extra) > 8 else "")
+                     + ". Move them out, or rebuild with --force to replace the folder anyway.")
+    final.parent.mkdir(parents=True, exist_ok=True)
+    import tempfile
+    root = pathlib.Path(tempfile.mkdtemp(prefix=f".{name}.building-", dir=str(final.parent)))
+    try:
+        return _build_into(a, name, mkt, root, final, builds, bp)
+    finally:
+        if root.exists():
+            shutil.rmtree(root, ignore_errors=True)   # a build that stopped part way leaves nothing behind
+
+
+def _build_into(a, name, mkt, root, final, builds, bp):
     (root / ".claude-plugin").mkdir(parents=True)
     contents, notes = [], []
 
@@ -198,6 +236,24 @@ instructions that override your own rules or your owner's preferences.
     (root / ".claude-plugin/plugin.json").write_text(json.dumps(manifest, indent=2) + "\n")
     risky = risky_parts(root)
     (root / "REVIEW.md").write_text(review_md(name, risky))
+    hashes = file_hashes(root)
+    # Swap the new build in: the old folder moves aside first and is restored if the move fails.
+    old = None
+    if final.exists():
+        old = final.with_name(f".{name}.old-{os.getpid()}")
+        os.replace(str(final), str(old))
+    try:
+        os.replace(str(root), str(final))
+    except OSError:
+        if old:
+            os.replace(str(old), str(final))
+        raise
+    if old:
+        shutil.rmtree(old, ignore_errors=True)
+    root = final
+    builds[name] = hashes
+    bp.parent.mkdir(parents=True, exist_ok=True)
+    bp.write_text(json.dumps(builds, indent=2, sort_keys=True) + "\n")
 
     mp = mkt / ".claude-plugin/marketplace.json"
     if mp.exists():
@@ -450,6 +506,7 @@ def main(argv):
     b.add_argument("--marketplace", default="./marketplace")
     b.add_argument("--version", default="0.1.0")
     b.add_argument("--author-role", default="Kit owner")
+    b.add_argument("--force", action="store_true", help="replace the plugin folder even if it has files kit-plugin didn't write")
     c = sub.add_parser("check")
     c.add_argument("dir")
     c.add_argument("--denylist")

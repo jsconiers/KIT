@@ -29,13 +29,16 @@ notify() {
   rm -f "$f"
 }
 
-# Optional: rebuild the command catalog, if this install has the kit-catalog command.
-command -v kit-catalog >/dev/null && kit-catalog 2>&1 | sed "s/^/$(stamp) /" >> "$LOG"
-
-# 1. Claude Code: one tiny headless call, the same path the scheduled runs use.
-OUT=$(cd /tmp && perl -e 'alarm shift; exec @ARGV' 120 claude -p "Reply with the single word OK." \
-      --model haiku --max-turns 1 --output-format text < /dev/null 2>&1)
+# 1. Claude Code: one tiny headless call, the same path the scheduled runs use. It's a paid call, so
+# it goes in the cost ledger (kit-cost, mode "preflight") like every scheduled run.
+OUTF=$(mktemp "${TMPDIR:-/tmp}/kit-preflight.XXXXXX")
+(cd /tmp && perl -e 'alarm shift; exec @ARGV' 120 claude -p "Reply with the single word OK." \
+      --model haiku --max-turns 1 --output-format json < /dev/null > "$OUTF" 2> "$OUTF.err")
 RC=$?
+COST="$KIT/.install/shared/bin/kit-cost"
+[ -f "$COST" ] && python3 "$COST" record --mode preflight --rc "$RC" --json-file "$OUTF" --log /dev/null 2>> "$LOG"
+OUT=$(cat "$OUTF" "$OUTF.err" 2>/dev/null)
+rm -f "$OUTF" "$OUTF.err"
 FIRST=$(print -r -- "$OUT" | head -1 | cut -c1-160)
 if [ $RC -eq 0 ] && print -r -- "$OUT" | grep -q 'OK'; then
   echo "$(stamp) login ok" >> "$LOG"

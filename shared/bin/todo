@@ -307,6 +307,8 @@ def sprint_show(sp):
 
 
 def main(argv):
+    if argv[:1] in (["-h"], ["--help"], ["help"]):
+        return print(__doc__)                     # help needs no QUEUE.md
     if not QUEUE.exists():
         sys.exit(f"Can't find {QUEUE}")
     section = owner()

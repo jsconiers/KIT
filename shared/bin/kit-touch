@@ -5,7 +5,9 @@
   kit-touch list [--json]            everyone tracked: rhythm, last contact, next due
   kit-touch add NAME [--every DAYS] [--how call|text|visit|coffee|lunch] [--group GROUP] [--work]
                 [--alias "Mike,Michael"] [--note TEXT]
-  kit-touch talked NAME [--date YYYY-MM-DD|yesterday|today] [--how call] [--note TEXT]
+  kit-touch talked NAME [--date YYYY-MM-DD|MM/DD|yesterday|today] [--how call] [--note TEXT]
+                                     (a date with no year is the latest one on or before today; 02/29
+                                     counts as 28 February in a year without a 29th)
   kit-touch snooze NAME [DAYS]       not now; ask again in DAYS (default 7)
   kit-touch set NAME --every DAYS    change someone's rhythm (also --how, --group, --note, --alias, --work)
   kit-touch remove NAME
@@ -85,6 +87,22 @@ def find(d, name, required=True):
     return None
 
 
+def last_such_day(s, fmt):
+    """The most recent MM/DD (or DD-Mmm) on or before today. 29 February counts as 28 February in a year
+    that has no 29th, so "02/29" always works, in every year."""
+    for year in (today().year, today().year - 1):
+        try:
+            d = dt.datetime.strptime(f"{s} {year}", fmt + " %Y").date()
+        except ValueError:
+            leap = dt.datetime.strptime(f"{s} 2000", fmt + " %Y").date()    # 2000 had a 29 February
+            if (leap.month, leap.day) != (2, 29):
+                raise
+            d = dt.date(year, 2, 28)
+        if d <= today():
+            return d
+    return d
+
+
 def parse_day(s):
     s = (s or "").strip().lower()
     if s in ("", "today"):
@@ -99,9 +117,7 @@ def parse_day(s):
     for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%m/%d/%Y", "%m/%d", "%d-%b"):
         try:
             if fmt in ("%m/%d", "%d-%b"):      # no year: Python 3.15 won't parse a day without one
-                d = dt.datetime.strptime(f"{s} {today().year}", fmt + " %Y").date()
-                if d > today():
-                    d = d.replace(year=d.year - 1)
+                d = last_such_day(s, fmt)
             else:
                 d = dt.datetime.strptime(s, fmt).date()
             return d
@@ -174,12 +190,30 @@ def line(p):
     return f"{tag}{p['name']}{' (' + p['group'] + ')' if p.get('group') else ''}: {last} (every {p.get('every') or DEFAULT_EVERY} days, {how}){extra}"
 
 
+def kitcal_command():
+    """kitcal as the start of a command, or None: on PATH (kitcal.cmd on Windows), else where the installer
+    puts it: ~/.local/bin/kitcal on macOS; on Windows the command shim in .install\\platform\\windows\\bin, or
+    kitcal.py itself."""
+    exe = shutil.which("kitcal")
+    if exe:
+        return [sys.executable, exe] if exe.endswith(".py") else [exe]
+    if os.name == "nt":
+        win = KIT / ".install" / "platform" / "windows"
+        if (win / "bin" / "kitcal.cmd").exists():
+            return [str(win / "bin" / "kitcal.cmd")]
+        if (win / "calendar" / "kitcal.py").exists():
+            return [sys.executable, str(win / "calendar" / "kitcal.py")]
+        return None
+    mac = pathlib.Path.home() / ".local/bin/kitcal"
+    return [str(mac)] if mac.exists() else None
+
+
 def calendar_events(start, end):
-    exe = shutil.which("kitcal") or str(pathlib.Path.home() / ".local/bin/kitcal")
-    if not os.path.exists(exe) and not shutil.which("kitcal"):
+    kitcal = kitcal_command()
+    if not kitcal:
         raise Fail("kitcal isn't installed, so the calendar can't be read")
-    r = subprocess.run([exe, "events", "--from", start.isoformat(), "--to", end.isoformat()], capture_output=True,
-                       text=True, timeout=180)
+    r = subprocess.run(kitcal + ["events", "--from", start.isoformat(), "--to", end.isoformat()], capture_output=True,
+                       text=True, encoding="utf-8", errors="replace", timeout=180)
     if r.returncode != 0:
         raise Fail(f"the calendar couldn't be read: {(r.stderr or r.stdout).strip()[:160]}")
     return json.loads(r.stdout or "[]")

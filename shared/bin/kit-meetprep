@@ -22,6 +22,7 @@ import os
 import pathlib
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 
@@ -35,6 +36,19 @@ REVIEW = re.compile(r"\b(design|architecture|architectural|solution|technical|gd
                     r"\b(arb|review board|change board|design authority)\b", re.I)
 
 
+def command_words(cmd):
+    """A configured command line as its words. On Windows, shlex's POSIX mode would drop the backslashes in
+    paths, so it splits in Windows mode (and takes the quotes off), and finds a bare command such as kitcal
+    through PATHEXT (kitcal.cmd), which starting it directly wouldn't."""
+    if os.name != "nt":
+        return [os.path.expanduser(p) for p in shlex.split(cmd)]
+    words = [w[1:-1] if len(w) > 1 and w[0] == w[-1] and w[0] in "\"'" else w for w in shlex.split(cmd, posix=False)]
+    words = [os.path.expanduser(w) for w in words]
+    if words and not os.path.dirname(words[0]):
+        words[0] = shutil.which(words[0]) or words[0]
+    return words
+
+
 def load_events(args):
     if args.json:
         raw = sys.stdin.read() if args.json == "-" else kd.read(args.json)
@@ -42,9 +56,10 @@ def load_events(args):
         m = re.search(r'^CALENDAR_JSON_CMD="([^"]*)"', kd.read(kd.CONFIG), re.M)
         if not m or not m.group(1).strip():
             sys.exit("kit-meetprep: no CALENDAR_JSON_CMD in Kit's config; pass --json FILE")
-        cmd = [os.path.expanduser(p) for p in shlex.split(m.group(1))]
+        cmd = command_words(m.group(1))
         try:
-            raw = subprocess.run(cmd, capture_output=True, text=True, timeout=180).stdout
+            raw = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                 timeout=180).stdout
         except (OSError, subprocess.TimeoutExpired) as e:
             sys.exit(f"kit-meetprep: the calendar command failed: {e}")
     try:

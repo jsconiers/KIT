@@ -7,10 +7,12 @@ what happens when something is missing. Paths use `~` for your home folder. Setu
 Support levels used below:
 
 - **Supported**: built and used on that platform.
+- **Tested in CI**: run for real on GitHub's runners for that platform (Windows: Windows PowerShell
+  5.1 and PowerShell 7), but not yet on a real machine in daily use.
 - **Untested adapter**: an adapter exists for that platform but hasn't been run on it yet.
 - **Not supported**: no adapter; the feature is skipped or unavailable.
 - **Same code**: pure Python or a Claude Code feature with no platform-specific part; expected
-  to work, but only exercised on macOS so far.
+  to work; exercised on macOS, and on Windows where the CI suites cover it.
 
 For installing and configuring, see INSTALL.md; for how the pieces fit, see DESIGN.md.
 
@@ -23,7 +25,7 @@ For installing and configuring, see INSTALL.md; for how the pieces fit, see DESI
 | Claude Code (`claude` on the PATH) | Kit and its staff run inside it; subagents, hooks, skills, and MCP connectors are Claude Code features | The installer warns but continues if `claude` isn't on the PATH yet |
 | Python 3.8 or newer | The installer (`kit_setup.py`), every shared tool, and the connector guard hook | Standard library only, except the optional extras in section 4 |
 | git | Kit's private local history (`~/Claude/Agents/kit/.git`), `protect_folder.py` (adds its file to a repo's ignore list), the health check's history age | Kit's own repo must never get a remote |
-| A Claude Code account with subagent support | The 32 agents in `kit/agents/` | Copy them into `~/.claude/agents/` with `doctor.py --fix-agents` |
+| A Claude Code account with subagent support | The 33 agents in `kit/agents/` | The installer copies them into `~/.claude/agents/` (`doctor.py --fix-agents` does it again) |
 
 ### Kit's command-line tools
 
@@ -85,8 +87,16 @@ For installing and configuring, see INSTALL.md; for how the pieces fit, see DESI
 | `kit-rehearse` | Python 3.8; Claude Code; kit-preread and kit-library (to read the document) | Same code | Rehearse by hand: list the board's hard questions and check the document for each |
 | `kit-vendors` | Python 3.8; the library root, or a full path for Vendor evaluations in decisions.md | Same code | Evaluate vendors by hand in a spreadsheet |
 | `kit-teammap` | Python 3.8; the coverage file it keeps; for loads, kit-ppmx's PPM Express address and token (read only); for expertise, the kit-team cache | Same code | Keep who knows what by hand; without PPM Express the map has no loads |
-| `kit-digest` | Python 3.8; the library's decisions folder, reference architecture index, radar, and exception register, through kit-decisions, kit-refarch, kit-lifecycle, and kit-exceptions; a calendar JSON file (optional) | Same code; the monthly run is in run.sh on macOS (on Windows, run it yourself) | Assemble the digest by hand; a missing source only empties its section |
+| `kit-digest` | Python 3.8; the library's decisions folder, reference architecture index, radar, and exception register, through kit-decisions, kit-refarch, kit-lifecycle, and kit-exceptions; a calendar JSON file (optional) | Same code; the monthly section runs in run.sh and run.ps1 | Assemble the digest by hand; a missing source only empties its section |
 | `kit-reliability` | Python 3.8 | Same code | No reliability view; read the run logs by hand |
+| `kit-letter` | Python 3.8 (standard library); for `sign`, a transparent PNG in `letters/signature/` | Same code; tested on Linux and Windows in CI | Write letters in Word by hand |
+| `kit-expiry` | Python 3.8; `expiry.json`; network (TLS to the host, RDAP) only with `--live` | Same code | No expiry list; the health check skips it |
+| `kit-dates` | Python 3.8; `dates.json` | Same code | No date reminders in the brief |
+| `kit-textback` | Python 3.8; Messages; KitMessages.app built with `platform/mac/textback/build.sh`, with Full Disk Access; Claude Code for questions | macOS only (no Windows command) | No texting Kit; use a session |
+| `kit-library` | Python 3.8 (SQLite full-text search). macOS: `kit-pdftext` (PDFKit, with Apple Vision OCR for scans) and KitLibrary.app for protected folders (Files and Folders permission), built with `platform/mac/library/build.sh`; textutil to deliver Markdown as Word. Windows: python-docx, else Word over COM, to deliver Markdown as Word | Same code; PDF text and OCR on macOS only; on Windows with neither python-docx nor Word, deliveries stay Markdown with the reason | No catalog; agents read documents directly |
+| `kit-preread` | Python 3.8; Claude Code; kit-library (to read the document) | Same code | Read the document and draft review questions by hand |
+| `kit-touch`, `kit-feedback`, `kit-meetload` | Python 3.8; a calendar command (kitcal) for calendar reads, or `--json`/`--ics` files for kit-meetload | Same code | No keep-in-touch, feedback, or meeting-load lines |
+| `preflight.sh`, `preflight.ps1` | Claude Code; `claude mcp` for the connectors in `PREFLIGHT_CONNECTORS`; `deliver.py` | macOS (launchd `preflight` job); Windows ("Kit Login Check" task, not yet run on a real machine) | Sign-in lapses show up only when a run fails |
 
 ### macOS
 
@@ -94,8 +104,8 @@ For installing and configuring, see INSTALL.md; for how the pieces fit, see DESI
 |---|---|---|
 | `python3` (Xcode Command Line Tools or a package-manager Python) | Installer, all tools | `install.sh` stops if it's missing or older than 3.8 and suggests `xcode-select --install` |
 | `osascript` (built in) | Reminders sync (JXA), Messages delivery of the morning brief | First run asks for Automation permission |
-| `launchctl` (built in) | Scheduled runs (morning, open, weekly, sync) from the plist templates | Optional; `doctor.py` checks each job only if its plist is installed |
-| `swiftc` (Xcode Command Line Tools) | Building `kitmail` (Apple Mail) and `kitcal` (EventKit) from `platform/mac/*/build.sh` | Optional; only for the Apple Mail and Calendar tools |
+| `launchctl` (built in) | Scheduled runs (morning, weekly, worklist, eod, sync, backup, meetprep, preflight, textback, open) from the plist templates | Optional; `doctor.py` checks each job only if its plist is installed |
+| `swiftc` (Xcode Command Line Tools) | Building `kitmail` (Apple Mail), `kitcal` (EventKit), `kit-pdftext` and KitLibrary.app (`platform/mac/library/build.sh`), and KitMessages.app (`platform/mac/textback/build.sh`) | Optional; only for the tools that use them. KitMessages needs Full Disk Access; KitLibrary needs Files and Folders access; a rebuild asks again |
 | `chmod` (built in) | Owner-only folder privacy | Applied by the installer |
 
 ### Windows
@@ -103,7 +113,7 @@ For installing and configuring, see INSTALL.md; for how the pieces fit, see DESI
 | Requirement | Used by | Notes |
 |---|---|---|
 | Python 3.8+ through the `py -3` launcher or `python` | Installer and all tools | `install.ps1` prefers `py -3`. Agent hook commands call `python3`, which many Windows machines lack (see the gaps in section 6) |
-| PowerShell 5.1 or 7 | `install.ps1`, `run.ps1`, task registration | Run with `-ExecutionPolicy Bypass -File` for the installer only |
+| PowerShell 5.1 or 7 | `install.ps1`, `run.ps1`, task registration | Run with `-ExecutionPolicy Bypass -File` for the installer only. The installer is tested in CI under both |
 | `icacls` (built in) | Owner-only NTFS permissions on Kit's folder | Applied by `install.ps1` |
 | Task Scheduler (built in) | Scheduled runs (`register-tasks.ps1`) | Untested adapter |
 | Classic desktop Outlook | Mail, calendar, and reminders adapters (COM) | The new Outlook and Outlook on the web have no COM interface. `install.ps1` warns when it isn't registered |
@@ -114,7 +124,7 @@ For installing and configuring, see INSTALL.md; for how the pieces fit, see DESI
 
 | Tool | What it needs | Optional? | macOS | Windows |
 |---|---|---|---|---|
-| `shared/kit_setup.py` (install, activate, deactivate) | Python 3.8+ stdlib | Required | Supported | Untested adapter (called by `install.ps1`) |
+| `shared/kit_setup.py` (install, activate, deactivate) | Python 3.8+ stdlib | Required | Supported | Tested in CI (called by `install.ps1`: install, reinstall, and repair) |
 | `shared/doctor.py` (health check) | Python stdlib; `git`; `launchctl` for job checks; `claude` for `--servers`; `kit-grammar` for the grammar line | Recommended | Supported | Partly: job checks use `launchctl` and `os.getuid`, so they report a crashed check on Windows |
 | `shared/dashboard.py` | Python stdlib; `open`, `xdg-open`, or `os.startfile` to open the page | Optional | Supported | Same code (uses `os.startfile`) |
 | `shared/bin/todo` | Python stdlib; rebuilds the dashboard | Recommended | Supported | Same code |
@@ -131,7 +141,7 @@ For installing and configuring, see INSTALL.md; for how the pieces fit, see DESI
 | `shared/research/run_ta.py`, `platform/mac/research/kit-research` | An external TradingAgents checkout run with `uv`, and an API key in that project's own environment | Optional, author-specific | Supported | Not supported |
 | Mail tool | macOS: `kitmail.swift` (Apple Mail, built with `swiftc`). Windows: `kitmail.py` (classic Outlook over COM, `pywin32`) | Optional; the scheduler and meeting scribe use whatever mail command their setup files name | Supported (Apple Mail) | Untested adapter |
 | Calendar tool | macOS: `kitcal.swift` (EventKit). Windows: `kitcal.py` (classic Outlook over COM) | Optional; the scheduler works from Kit's brief without one | Supported (EventKit) | Untested adapter |
-| Scheduled runs | macOS: `run.sh` + launchd plists, Messages for delivery. Windows: `run.ps1` + Task Scheduler, toast or file delivery | Optional | Supported | Untested adapter |
+| Scheduled runs | macOS: `run.sh` + launchd plists, Messages for delivery. Windows: `run.ps1` + Task Scheduler, toast or file delivery | Optional | Supported | Untested adapter (`run.ps1`'s logic is tested under PowerShell 7 against a fake claude; the tasks haven't run on a real machine) |
 
 A mail or calendar that lives only in a desktop client the macOS tools don't cover (for example,
 classic Outlook for Mac, which doesn't sync to Apple Calendar) needs its own local tool; name it in
@@ -477,6 +487,18 @@ session, including MCP connectors, minus the ones listed.
 | Other agents | Researcher (vendor steps), POC lead (charter and test plan), librarian, all through Kit |
 | If missing | `labs.md` missing or approver "not set": drafts runbooks marked "approver not set". No template: uses its default layout |
 
+### letters-desk
+
+| | |
+|---|---|
+| Setup | `letters.md` |
+| Tools | Read, Write, Edit, Glob, Grep, Bash (no web, connectors, or other agents) |
+| Skills | None |
+| Commands | `python3` with `shared/bin/kit-letter` (`build`; `sign` asks every time) |
+| Files | `letters/` in Kit's folder: `log.md`, one folder per letter, `signature/` |
+| Outside systems | None. Never sends anything |
+| If missing | Return address "not set": drafts with a placeholder and says so. No saved signature: builds letters for a pen signature only |
+
 ### precedent-finder
 
 | | |
@@ -509,10 +531,11 @@ manager is allowed.
 | `pywin32` | Windows mail, calendar, reminders adapters | n/a | `py -3 -m pip install pywin32==<pinned>` |
 | BurntToast | Windows toast delivery | n/a | `Install-Module BurntToast -Scope CurrentUser -RequiredVersion <pinned>` |
 
-### SQL server and driver (optional; MySQL tested, others UNTESTED)
+### SQL server and driver (optional; MySQL and PostgreSQL tested, SQL Server UNTESTED)
 
-Transport sql for sharing between Kits: DDL and grants in shared/sql/. Never run against a real
-database yet.
+Transport sql for sharing between Kits: DDL and grants in shared/sql/. MySQL 8.0 (PyMySQL) and
+PostgreSQL 17 (psycopg 3, SCRAM login) passed the live test; SQL Server and per-Kit row security
+are untested.
 
 ### OneDrive sync client (optional)
 
@@ -585,6 +608,12 @@ server, `--brief` for problems only).
   at the warning level or above).
 - Kit version: the installed version and commit, and a warning when the repo clone is at a
   different commit than the install.
+- Agent readiness: how many agents have no known limit, have limits, or are blocked, and why by cause
+  (`doctor.py --readiness [--json]` is the source for readiness figures in the docs).
+- Expiry: Kit's own items in `expiry.json` that have expired or are close (from the saved results; no
+  network).
+- Texting Kit (when `TEXTBACK` is on), the library catalog, the feedback log's privacy, kitmail's quick
+  inbox, and the off-computer backup copy, each only when it's set up.
 - Models: models.json is valid and the agents' `model:` lines match it (warn on drift).
 - Direct model calls: enabled_phase, which providers kit-delegate and kit-run may reach, and
   whether each one's credential is named (never reads a Keychain value).
@@ -592,6 +621,12 @@ server, `--brief` for problems only).
 - Connector credentials: named credential variables that aren't set.
 - Phone publishing: the OneDrive publishing folder, or why it's refused.
 - Run reliability: warn on any kit-reliability alert.
+- Windows: Kit's scheduled tasks in Task Scheduler (a disabled one warns) and the folder's access list,
+  compared by SID.
+
+Related checks outside `doctor.py`: `kit-alerts check` runs the monitors (runs, cost, connectors,
+connector-guard integrity, agent drift, library indexes, items waiting too long, policy exceptions);
+`kit-audit privileges` is the quarterly least-privilege review of the agents' tools.
 
 ### Gaps it doesn't check
 
@@ -610,8 +645,7 @@ server, `--brief` for problems only).
 - `vsdx-finish.json` and `drawio-styles.json` are valid JSON.
 - Mail and calendar tools other than the Apple ones (for example an Outlook-based tool), and
   whether the desktop client is the scriptable classic version.
-- Windows: job checks use `launchctl`, and there's no Task Scheduler, ACL, `pywin32`, or classic
-  Outlook check.
+- Windows: there's no `pywin32` or classic Outlook check.
 
 ### Fails open or closed
 
@@ -656,8 +690,9 @@ Claude Code uses for hooks, on every machine.
   stored, printed, or logged; the HTTP server refuses browser origins not listed in
   `PPMX_ALLOWED_ORIGINS`). Changes: `PPMX_WRITES=off` refuses them before anything is sent; in Claude
   Code every create and update asks (Kit's rules), so a scheduled run never makes one; the connector
-  guard denies them to Kit's agents; a change that times out is never resent; every call is audited
-  without values.
+  guard denies them to Kit's agents; a change that ends in a server error, a time-out, or a dropped
+  connection is marked unconfirmed and never resent without `--again`; every read and write is audited
+  without the token or values (`ppmx-YYYY-MM.jsonl`, read by `kit-audit`).
 - Phone approvals: closed (unknown, expired, used, or wrong-scope codes and any payload naming a
   medium- or high-tier action are refused and recorded; a code is single-use and works only on the
   day it's issued).
@@ -671,7 +706,7 @@ Claude Code uses for hooks, on every machine.
   without a chain (older Kit) is read with a warning.
 - kit-team purge: closed (no team_cache rule means keep everything; held projects never purged;
   nothing deleted).
-- SQL transport: MySQL tested, PostgreSQL and SQL Server UNTESTED; TLS required unless the database is on this computer; credentials named,
+- SQL transport: MySQL and PostgreSQL tested, SQL Server UNTESTED; TLS required unless the database is on this computer; credentials named,
   never stored.
 - kit-quality: proposals only (never writes lessons/ or templates); notes without a Findings table
   are skipped and counted.

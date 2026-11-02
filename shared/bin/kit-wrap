@@ -32,6 +32,7 @@ import os
 import pathlib
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 
@@ -48,6 +49,19 @@ ADDED_ON = re.compile(r"\badded (\d{1,2}-[A-Z][a-z]{2}-\d{4})")
 ONLINE = re.compile(r"https?://|\b(teams|zoom|webex|google meet|meet\.google|skype|facetime|online|virtual|"
                     r"dial[- ]in|conference call)\b", re.I)
 MAX_TEXT = 599
+
+
+def command_words(cmd):
+    """A configured command line as its words. On Windows, shlex's POSIX mode would drop the backslashes in
+    paths, so it splits in Windows mode (and takes the quotes off), and finds a bare command such as kitcal
+    through PATHEXT (kitcal.cmd), which starting it directly wouldn't."""
+    if os.name != "nt":
+        return [os.path.expanduser(p) for p in shlex.split(cmd)]
+    words = [w[1:-1] if len(w) > 1 and w[0] == w[-1] and w[0] in "\"'" else w for w in shlex.split(cmd, posix=False)]
+    words = [os.path.expanduser(w) for w in words]
+    if words and not os.path.dirname(words[0]):
+        words[0] = shutil.which(words[0]) or words[0]
+    return words
 
 
 def setting(key, default=""):
@@ -178,7 +192,7 @@ def events_for(day, t, args):
             if day > t + dt.timedelta(days=1):
                 return None, f"{DAYNAMES[day.weekday()]}'s calendar isn't in reach (set WRAP_CALENDAR_CMD)"
         try:
-            raw = subprocess.run([os.path.expanduser(p) for p in shlex.split(cmd)], capture_output=True,
+            raw = subprocess.run(command_words(cmd), capture_output=True,
                                  text=True, encoding="utf-8", errors="replace", timeout=120).stdout
         except (OSError, ValueError, subprocess.SubprocessError):
             return None, "the calendar command didn't answer"

@@ -73,8 +73,10 @@ function Test-Kit([string]$label) {
     if ($kitmd -cmatch "'s Mac\b") { Fail "${label}: KIT.md says Mac on Windows" }
 
     $bin = Join-Path $kitHome ".install\platform\windows\bin"
-    $missing = @("todo", "kit-letter", "kit-expiry") | Where-Object { -not (Test-Path -LiteralPath (Join-Path $bin "$_.cmd")) }
-    if ($missing) { Fail "${label}: no command shim for $($missing -join ', ')" } else { Pass "${label}: the todo, kit-letter, and kit-expiry commands are installed" }
+    $missing = @("todo", "kit-letter", "kit-expiry", "kit-library", "kit-audit") | Where-Object { -not (Test-Path -LiteralPath (Join-Path $bin "$_.cmd")) }
+    if ($missing) { Fail "${label}: no command shim for $($missing -join ', ')" } else { Pass "${label}: the todo, kit-letter, kit-expiry, kit-library, and kit-audit commands are installed" }
+    $macOnly = @("kit-outlook", "kit-textback") | Where-Object { Test-Path -LiteralPath (Join-Path $bin "$_.cmd") }
+    if ($macOnly) { Fail "${label}: macOS-only commands got a shim: $($macOnly -join ', ')" } else { Pass "${label}: no shims for the macOS-only kit-outlook and kit-textback" }
     if (Test-Path -LiteralPath (Join-Path $kitHome "agents\letters-desk.md")) { Pass "${label}: the letters desk is installed" } else { Fail "${label}: the letters desk agent is missing" }
 }
 

@@ -290,12 +290,13 @@ case "$COST_LEVEL" in
     fi ;;
 esac
 # Time limit for this run, in seconds. The weekly review does the most (auditor, horizon scan,
-# sprint review, cost, retrospective), so it gets longer. Override with RUN_TIMEOUT_<MODE> or
-# RUN_TIMEOUT in the config.
+# sprint review, cost, retrospective), so it gets longer. Override with RUN_TIMEOUT_WEEKLY,
+# RUN_TIMEOUT_WORKLIST, or RUN_TIMEOUT (every other run) in the config; TIMEOUT_KEY names the one
+# that applies, for the failure notice.
 case "$MODE" in
-  weekly)   TIMEOUT=${RUN_TIMEOUT_WEEKLY:-3000} ;;
-  worklist) TIMEOUT=${RUN_TIMEOUT_WORKLIST:-900} ;;
-  *)        TIMEOUT=${RUN_TIMEOUT:-1200} ;;
+  weekly)   TIMEOUT=${RUN_TIMEOUT_WEEKLY:-3000}; TIMEOUT_KEY=RUN_TIMEOUT_WEEKLY ;;
+  worklist) TIMEOUT=${RUN_TIMEOUT_WORKLIST:-900}; TIMEOUT_KEY=RUN_TIMEOUT_WORKLIST ;;
+  *)        TIMEOUT=${RUN_TIMEOUT:-1200}; TIMEOUT_KEY=RUN_TIMEOUT ;;
 esac
 
 # Weekly demand refresh (DEMAND_REFRESH="on" in the config; off by default): the weekly review has
@@ -441,7 +442,12 @@ transient_reason() {
 OFFLINE=""
 if [ -z "$DEGRADED_REASON" ] && [ "${CONNECTION_CHECK:-on}" != "off" ]; then
   netwait=0
-  until curl -s -o /dev/null --max-time 10 "${CONNECTION_URL:-https://api.anthropic.com}"; do
+  # Probe the API Claude Code will use (ANTHROPIC_BASE_URL when set), through the proxy when one is set.
+  PROBE_URL="${CONNECTION_URL:-${ANTHROPIC_BASE_URL:-https://api.anthropic.com}}"
+  PROXY_ARGS=()
+  PROBE_PROXY="${HTTPS_PROXY:-${https_proxy:-}}"
+  [ -n "$PROBE_PROXY" ] && PROXY_ARGS=(--proxy "$PROBE_PROXY")
+  until curl -s -o /dev/null --max-time 10 "${PROXY_ARGS[@]}" "$PROBE_URL"; do
     if [ "$netwait" -ge "${CONNECTION_WAIT:-300}" ]; then
       echo "== $(date) $MODE: no internet connection after ${netwait}s; skipping the model run" >> "$LOG"
       DEGRADED_REASON="the Mac had no internet connection"; OFFLINE=1
@@ -501,7 +507,7 @@ elif [ -s "$TEXT" ]; then
   fi
 else
   if [ -n "$TIMED_OUT" ]; then
-    echo "Kit's $MODE run hit its $((TIMEOUT / 60))-minute limit and stopped before writing anything. Raise RUN_TIMEOUT_${(U)MODE} in the config if it keeps happening. Log: ~/Claude/Agents/kit/.install/logs/$TODAY.log" > "$LOGDIR/failure-$MODE.txt"
+    echo "Kit's $MODE run hit its $((TIMEOUT / 60))-minute limit and stopped before writing anything. Raise $TIMEOUT_KEY in the config if it keeps happening. Log: ~/Claude/Agents/kit/.install/logs/$TODAY.log" > "$LOGDIR/failure-$MODE.txt"
   else
     echo "Kit's $MODE run didn't finish (rc=$rc). Log: ~/Claude/Agents/kit/.install/logs/$TODAY.log" > "$LOGDIR/failure-$MODE.txt"
   fi

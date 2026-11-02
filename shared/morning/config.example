@@ -23,14 +23,15 @@ DELIVERY="local"
 # Address the Outlook drafts are made out to (usually your own work address).
 DELIVERY_EMAIL_TO="you@example.com"
 
-# Legacy imessage channel only: where Kit texts the briefs. It tries these in order.
+# Legacy imessage channel only (macOS only): where Kit texts the briefs. It tries these in order.
 IMESSAGE_TO="+15555550123"
 IMESSAGE_TO_ALT="you@example.com"
 
-# Text Kit back (macOS): kit-textback answers texts you send yourself that start with "Kit" ("kit
-# today", "kit todo call the bank fri", or any question). Its reader, KitMessages.app (build it with
-# platform/mac/textback/build.sh), needs Full Disk Access; its job is com.<you>.kit.textback (from
-# com.USER.kit.textback.plist.template). Replies go to IMESSAGE_TO. Questions use Claude, read-only.
+# Text Kit back (macOS only; every TEXTBACK* key below is macOS only): kit-textback answers texts you send
+# yourself that start with "Kit" ("kit today", "kit todo call the bank fri", or any question). Its reader,
+# KitMessages.app (build it with platform/mac/textback/build.sh), needs Full Disk Access; its job is
+# com.<you>.kit.textback (from com.USER.kit.textback.plist.template). Replies go to IMESSAGE_TO. Questions
+# use Claude, read-only. Windows has no kit-textback command.
 TEXTBACK="off"
 TEXTBACK_ASK="on"
 TEXTBACK_MODEL="sonnet"
@@ -39,13 +40,14 @@ TEXTBACK_PARSE_MODEL="haiku"
 TEXTBACK_MAX_PER_HOUR=30
 
 # A run of your own: put its prompt in .install/prompts/prompt-NAME.md, schedule
-# "run.sh NAME", and give it extra tools with ALLOW_TOOLS_<NAME> (permission rules separated by
-# semicolons, like ALLOW_TOOLS). Executables in .install/brief.d/ add sections to the brief.
+# "run.sh NAME" (Windows: "run.ps1 NAME"), and give it extra tools with ALLOW_TOOLS_<NAME> (permission
+# rules separated by semicolons, like ALLOW_TOOLS). Executables in .install/brief.d/ add sections to the
+# brief (on Windows: .ps1, .py, .cmd, .bat, or .exe files).
 
 # To-do sync backend: outlook (Outlook Tasks, the default on macOS and Windows) or apple
 # (Apple Reminders, macOS only; syncs through iCloud, so keep work items out of it).
 REMINDERS_BACKEND="outlook"
-# Optional: keep work and personal to-dos in different apps (macOS). Work to-dos are the ones tagged
+# Optional: keep work and personal to-dos in different apps (macOS only). Work to-dos are the ones tagged
 # [work] (todo work ...); each app gets its own "Kit Inbox" and "Kit: <name>" lists.
 #   kit-settings todos personal apple     kit-settings todos work outlook
 #TODOS_PERSONAL="apple"
@@ -92,23 +94,25 @@ REG_WATCH="off"
 REG_WATCH_WHEN="first-monday"
 REG_WATCH_MIN_LEFT="15"
 # Optional: a command that prints today's events as a JSON list, for the dashboard's Today panel
-# (fields start, end, all_day, title or subject, calendar). Empty uses the macOS kitcal tool.
+# (fields start, end, all_day, title or subject, calendar). Empty uses the macOS kitcal tool. On Windows,
+# for example: CALENDAR_JSON_CMD="kitcal events --from today --to today" (backslashes in paths are kept).
 CALENDAR_JSON_CMD=""
 
 # Backups (kit-backup): where archives go and how many to keep. Choose an approved location;
 # the default folder sits next to Kit on the same disk, which doesn't survive a lost computer.
 BACKUP_DIR=""
 BACKUP_KEEP="14"
-# Encrypt backups (on/off). The passphrase comes from a macOS Keychain entry or an environment
-# variable, named here, never the passphrase itself. Create the Keychain entry yourself:
+# Encrypt backups (on/off). The passphrase comes from a macOS Keychain entry (BACKUP_KEY_KEYCHAIN, macOS
+# only) or an environment variable (BACKUP_KEY_ENV, the one Windows uses), named here, never the
+# passphrase itself. Create the Keychain entry yourself:
 #   security add-generic-password -s kit-backup -a "$USER" -w
 # Unencrypted backups are refused outside your home folder or in a synced or shared folder.
 BACKUP_ENCRYPT="off"
 BACKUP_KEY_KEYCHAIN=""
 BACKUP_KEY_ENV=""
 
-# Outlook check before the morning brief and weekly review (kit-outlook): seconds to wait between
-# retries, and "off" to skip it on setups without Outlook.
+# Outlook check before the morning brief and weekly review (kit-outlook, macOS only; Windows runs don't
+# make it): seconds to wait between retries, and "off" to skip it on setups without Outlook.
 OUTLOOK_RETRY_WAITS="30 90"
 OUTLOOK_CHECK="on"
 
@@ -154,7 +158,7 @@ RUN_TIMEOUT_WORKLIST=""
 RUN_LOCK_WAIT=""
 
 # End-of-day wrap (run.sh eod, Monday to Thursday 17:30 and Friday 15:30 when its launchd job is
-# installed): "on" or "off". kit-wrap writes it from Kit's files with no model call: what got done today,
+# installed; on Windows run.ps1 eod, the "Kit End of Day" task): "on" or "off". kit-wrap writes it from Kit's files with no model call: what got done today,
 # what moves to the next working day, and that day's first meeting and what it needs. EOD_MODEL="on"
 # runs the older Claude wrap-up (prompt-eod.md) instead. WRAP_WORKDAYS are the working days (1 = Monday);
 # WRAP_CALENDAR_CMD prints one day's events as JSON, with {day} where the date goes (without it,
@@ -185,8 +189,8 @@ REHEARSE_TIMEOUT="900"
 # month's digest into briefs/digest-YYYY-MM.md for your edit, with a line in the review pointing at it: the month's
 # decisions, reference architectures approved or changed, end of support in the next six months, exceptions
 # expiring in 60 days, and what's coming to the review board. No model call; [work]. ARCH_DIGEST_WHEN="every-run"
-# runs it on every weekly review (for a test); ARCH_DIGEST_TIMEOUT is its time limit in seconds. macOS only: on
-# Windows, run kit-digest yourself.
+# runs it on every weekly review (for a test); ARCH_DIGEST_TIMEOUT is its time limit in seconds. Works the same on
+# macOS and Windows.
 ARCH_DIGEST="off"
 ARCH_DIGEST_WHEN="first-week"
 ARCH_DIGEST_TIMEOUT="300"

@@ -457,15 +457,22 @@ def main(argv=None):
             say(f"phone approval code skipped: {ex}")
 
     split = not a.channels and ("DELIVERY_PERSONAL" in cfg or "DELIVERY_WORK" in cfg)
-    if not split:
+    if ctx["text"] == "NO TEXT":             # the run ran fine and had nothing to send, on either path
+        say("nothing to send (NO TEXT)")
+        results = {}
+    elif not split:
         wanted = (a.channels or cfg.get("DELIVERY", "") or "local").lower().split()
         results = deliver_group(wanted, ctx)
     else:
         results = {}
         for side in ("personal", "work"):
             names = (cfg.get(f"DELIVERY_{side.upper()}", "") or "local").lower().split()
-            text = slurp(split_text(a.text, side)).strip() or ctx["text"]
-            if text == "NO TEXT":            # the run had nothing for this side
+            text = slurp(split_text(a.text, side)).strip()
+            # Only the personal side falls back to the combined text; work gets only its own work-only
+            # text, since the combined one has personal items in it.
+            if not text and side == "personal":
+                text = ctx["text"]
+            if not text or text == "NO TEXT":    # the run had nothing for this side
                 say(f"{side}: nothing to send")
                 continue
             # Work channels never carry the full brief, which has personal sections.

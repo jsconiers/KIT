@@ -50,6 +50,10 @@ out=$(python3 "$KC" test alpha --read 2>&1); rc=$?
 [ $rc -eq 0 ] && grep -qx -- "--agent" "$S/probe-args.txt" && grep -A1 -x -- "--agent" "$S/probe-args.txt" | grep -qx gateway \
   && ok "--read runs as the gateway agent" || bad "--read agent ($rc)"
 grep -A1 -x -- "--allowedTools" "$S/probe-args.txt" | grep -qx "mcp__alpha__get_item" && ok "--read allows only the probe tool" || bad "probe tool"
+prompt=$(grep -A1 -x -- "-p" "$S/probe-args.txt" | tail -1)
+grep -q "for the alpha server only" <<<"$prompt" && grep -q "Call the tool mcp__alpha__get_item exactly once" <<<"$prompt" \
+  && ! grep -q "the one tool you're allowed" <<<"$prompt" \
+  && ok "--read's prompt names the server and its probe tool, so the gateway knows which one" || bad "probe prompt: $prompt"
 echo "$out" | grep -q "about \$0.004" && ok "--read shows the run's cost" || bad "probe cost"
 echo "$out" | grep -q "one short Claude Code run per server" && ok "--read warns about cost first" || bad "cost warning"
 out=$(python3 "$KC" test beta --read 2>&1)

@@ -15,4 +15,7 @@ data:
   PPMX_RATE_PER_MINUTE: "90"
   PPMX_PAGE_SIZE: "25"
   PPMX_MAX_ROWS: "200"
+  # list_my_work: the most projects one call scans, and how long it may scan (under the 60 s timeouts).
+  PPMX_WORK_MAX_PROJECTS: "25"
+  PPMX_WORK_SECONDS: "30"
   PPMX_ALLOWED_ORIGINS: ""

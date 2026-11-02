@@ -5,6 +5,101 @@ What changed in each Kit release. The installed version is in
 morning brief summarizes the new entries once. Format: [Keep a Changelog](https://keepachangelog.com),
 versions follow [semantic versioning](https://semver.org).
 
+## [Unreleased]
+
+### Added
+- docs/OVERVIEW.md and docs/DESIGN-GUIDE.md (with Word and PDF copies), a generic overview and design
+  guide, and docs/CONNECTIVITY.md with a connectivity matrix template (docs/connectivity-matrix-template.xlsx).
+- PPM Express (`kit-ppmx` 0.3.0): `list_deliverables`, `get_deliverable`, and `list_my_work` (your tasks and
+  deliverables across projects, bounded by `PPMX_WORK_MAX_PROJECTS` and `PPMX_WORK_SECONDS`, saying how many
+  projects it scanned); `"me"` in person filters (per token, on both the stdio and HTTP servers);
+  `PPMX_MY_NAME` for an exact `"me"` on the owner's own connector; `get_project` can include deliverables.
+- `kit-ppmx setup` prints the Claude Code command in the order Claude Code accepts (`claude mcp add --scope user ppmx --env PYTHONUTF8=1 -- ...`); the old order, with `--env` before the name, failed.
+
+### Changed
+- PPM Express confirmed against the live API on 02-Nov-2026: endpoint paths reconciled with its OpenAPI
+  description (lowercase; sub-tasks via `parentId` on the task list; idea stage as `{"stage": "Active"}`; no
+  paging, so next-link following is gone), and the reads, shapes, and field names checked against a tenant.
+  Person filters (`manager`, `assignee`) match a person's `fullName` inside the list of people;
+  `Portfolio` and `Program` are the field names; key dates' `IsComplete` counts as done.
+- `list_resources`, `list_ideas`, and `list_challenges` say why when PPM Express sends nothing: a missing
+  scope, or the account's own PPM Express permissions.
+- The OpenShift ConfigMap has `PPMX_WORK_MAX_PROJECTS` and `PPMX_WORK_SECONDS`; the image tag is 0.3.0.
+
+- README, INSTALL, DESIGN, DEPENDENCIES, ONBOARDING, and shared/ppmx/README.md brought up to date: the staff
+  is 33 agents (the letters desk included), what has run on Windows, the preflight and text-back jobs, the
+  library helpers (no scheduled library job ships), the end-of-day wrap on both platforms, the newer
+  settings and tools, the PPM Express write path and its audit log, and the current known limits.
+
+### Fixed
+- `kit-connect test SERVER --read` names the server and its probe tool in the gateway's prompt; the old
+  "the one tool you're allowed to call" was ambiguous with several servers allowed, and the gateway refused.
+- The installer now refreshes Kit's agents you haven't edited (keeping your edits and your models.json
+  choices), reports the ones it kept, and copies the agents into ~/.claude/agents.
+- `kit-library mirror` and `fetch` now ask first; work and confidential material (collections or output
+  kinds marked so, or tagged work or confidential) never goes to the phone mirror, and nothing does when
+  the sharing policy blocks the mirror folder.
+- Texted questions can't read work or confidential documents or Kit's closed folders, and their file
+  searches stay in Kit's folder; `kit send N` needs a confirm code; `kit-textback test` is a true dry run;
+  its config reader handles `export` and comments; a bad TEXTBACK_MAX_PER_HOUR no longer crashes it; and a
+  text is never answered twice.
+- `kit-expiry` goes over the network only with `--live`; by default, and in kit doctor, it reads the cache.
+- `kit-audit` now reads PPM Express's own audit log and reports its calls, changes, refusals, and failures.
+- PPM Express logs every read and every change, in every path (kit-ppmx, the stdio server, and the
+  OpenShift service), and a failed pulse or proposal run is logged too.
+- A PPM Express change that ends in a server error or a dropped connection is marked unconfirmed, so
+  `kit-ppmx actions apply N` won't resend it without `--again`.
+- `kit-plugin build` builds in a temporary folder and swaps it in, and won't replace a plugin folder
+  holding files it didn't write unless `--force`.
+- When there's no work-only text, the morning delivery sends nothing to the work side, and a run that
+  says NO TEXT sends nothing anywhere.
+- The scheduled runs' connection check now tries the API Claude Code uses (ANTHROPIC_BASE_URL) through
+  the proxy (HTTPS_PROXY).
+- `uninstall.sh` now unloads and removes Kit's scheduled jobs (texting Kit's too) and its command links.
+- The twice-daily preflight check is recorded in the cost ledger, and no longer calls a command that
+  doesn't exist.
+- A setting that should be a number but isn't (PPMX_PULSE_MAX, PPMX_PULSE_SECONDS, PREREAD_TIMEOUT,
+  REHEARSE_TIMEOUT) now falls back to its default with a warning instead of stopping the command, and
+  `kit-meetload` carries on when kit-library or kit-holds can't run.
+- `kit-meetload` keeps the last meeting of a series that ends on a date, and reads an event's time zone;
+  `todo` and the brief find your section even below a heading you added; `kit-touch` takes 02/29 in any
+  year (28 February in a year without a 29th).
+- Smaller fixes: the reading `kit-library` commands are allowed with nothing after them too;
+  `kit-ppmx setup` names the Keychain or Credential Manager entry in its connector-guard step; `todo
+  --help` works before there's a QUEUE.md; `--help` exits 0 for kit-dates, kit-expiry, kit-grammar, and
+  kit-textback; and `kitmail inbox` uses the quick inbox (Mail's index, through KitMessages) first, as
+  intended, logging each try for kit doctor (rebuild with platform/mac/mail/build.sh; KITMAIL_FAST=off
+  turns it off).
+- A scheduled run that hits its time limit now names the setting to raise (RUN_TIMEOUT_WEEKLY,
+  RUN_TIMEOUT_WORKLIST, or RUN_TIMEOUT for every other run) instead of a RUN_TIMEOUT_<MODE> that doesn't
+  exist (macOS and Windows).
+- Windows: run.ps1 eod runs the end-of-day wrap (kit-wrap, no model call; EOD_MODEL="on" uses Claude)
+  instead of a morning brief, and a "Kit End of Day" task runs it Monday to Thursday 17:30 and Friday 15:30.
+- Windows: runs of your own (run.ps1 NAME with prompt-NAME.md and ALLOW_TOOLS_<NAME>), the dates, renewals,
+  brief.d, PPM Express pulse, and monthly digest sections now work as on the Mac.
+- Windows: the connection check probes ANTHROPIC_BASE_URL when it's set and goes through your proxy.
+- Windows: kit-library delivers markdown as Word with python-docx or Word itself, so kit-rehearse,
+  kit-preread, and kit-meetload no longer fail; with neither, it delivers the Markdown and says why.
+- Windows: calendar commands keep the backslashes in their paths (kit-wrap, kit-meetprep, kit-holds,
+  kit-degraded, the dashboard's Today panel, including quoted paths with spaces), kitcal is found where the
+  installer puts it, and calendar output with stray bytes no longer stops kit-meetprep or kit-holds.
+- Windows: the installer adds a kit-library command; kit-outlook and kit-textback stay macOS only, and
+  kit-outlook --help now prints its help.
+- Windows: doctor.py's privacy check compares accounts by SID, so Microsoft Entra accounts no longer get a
+  false warning.
+- Windows: a "Kit Meeting Prep" task makes meeting prep packs every 30 minutes on weekdays, 07:00 to 18:00,
+  as on the Mac (optional).
+- Windows: the login check (preflight.ps1) records its small Claude call in the cost ledger.
+- Windows docs and banners now say what has run on Windows (the installer in CI) and what hasn't (the
+  Outlook adapters and Task Scheduler on a real machine); config.example marks the macOS-only settings.
+- Tests: the run.ps1 tests no longer reach the internet, and the Windows CI job runs the Windows fixes
+  tests with python-docx.
+- The version test no longer depends on an Unreleased heading.
+- Earlier releases added `kit-dates` (the installers link it) without a changelog line.
+- Windows: the installer adds a kit-audit command, as on the Mac.
+- KIT.md names the PPM Express read tools (list_my_work, list_tasks and list_projects with "me", get_project,
+  list_key_dates, list_deliverables), which need no yes.
+
 ## [1.6.0] - 2026-11-02
 
 ### Added

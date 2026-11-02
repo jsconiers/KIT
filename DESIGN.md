@@ -14,7 +14,7 @@ repository root unless they start with `~`. For installing, see INSTALL.md.
 | Local first | Kit's memory is plain files in one owner-only folder. Nothing leaves unless the owner shares it, and sharing is limited by policy. |
 | Work and personal apart | Personal notes live in `memory/personal/`, don't load on their own, and stay out of work folders, work channels, and shared records. |
 | Auditable | Connector calls, results, and failures are logged; scheduled runs log and record cost; Kit's folder is a local git repo with daily commits. |
-| Plain and testable | Python standard library only for the core; every tool has a test suite (`tests/`). |
+| Plain and testable | Python standard library only for the core; every tool has a test suite (`tests/`), and GitHub's checks run them on Linux and Windows. |
 
 ### The name
 
@@ -38,13 +38,14 @@ trademarks of their owners; Kit isn't affiliated). The parallels are a handy way
 |        KIT.md --@import--> preferences, lessons, memory index,   |
 |                            STATUS.md                             |
 |   Kit (the main thread)                                          |
-|     |-- subagents (~/.claude/agents/*.md): the 32 staff          |
+|     |-- subagents (~/.claude/agents/*.md): the 33 staff          |
 |     |      gateway --MCP--> outside systems (guarded, read-only) |
 |     |-- skills (~/.claude/skills): docx, pptx, xlsx, pdf, ...    |
 |     `-- tools: Read/Edit/Bash, kit-* commands                    |
 +------------------------------------------------------------------+
          ^ scheduled runs: run.sh / run.ps1 -> claude -p <prompt>
-         | (morning, weekly, worklist, eod, sync)
+         | (morning, weekly, worklist; plain scripts: eod, sync, backup,
+         |  meetprep, preflight; textback always on)
 +------------------------------------------------------------------+
 | ~/Claude/Agents/kit (owner-only, local git)                      |
 |   KIT.md QUEUE.md STATUS.md memory/ lessons/ preferences/        |
@@ -144,6 +145,13 @@ Code and must pass before an agent moves to another model.
 | Audit evidence | `shared/bin/kit-audit-export` | A dated pack: guard log lines in range, `kit-audit` outputs, approvals, guard and sharing policies, `models.json` policy fields, permission lists only, agents' tools and models, version, health check, SHA-256 manifest. Scanned for credential-like text before it's kept; never personal notes, briefs, mail, library documents, or environment values. |
 | Calendar stays read-only | `shared/bin/kit-holds` | Holds are RFC 5545 files (METHOD:PUBLISH, no attendees or organizer, VTIMEZONE from the zone's transitions, stable UIDs) placed inside working hours and around busy times; the owner opens and saves them. A clashing block is skipped, never moved. |
 | Mail stays untouched | `shared/bin/kit-triage`, `kit-awaiting`, `kit-commitments` | Suggestions and drafts only: never move, flag, answer, or send; addresses masked; at most 80 characters quoted. |
+| PPM Express writes | `shared/bin/kit-ppmx`, `shared/ppmx/`, ask rules in `kit_setup.py` | The only outside system Kit changes, by the owner's design: writes are confirmed, not disallowed. Claude Code asks before every `create_` and `update_` tool (and `kit-ppmx actions apply`), even when the server is allowed as a whole; agents can't make one (the connector guard denies write names) and scheduled runs can't answer the prompt. `PPMX_WRITES="off"` removes the change tools. A write that ends in a 5xx or a dropped connection or timeout is reported as unconfirmed and never resent; `kit-ppmx actions apply N --again` is needed after checking. Every read and write is logged without the token or any value: `kit-ppmx` (and its stdio server) to `ppmx-YYYY-MM.jsonl` in Kit's audit folder and standard error, the HTTP service to standard error. `kit-audit` reads the file. |
+| Closed Claude runs | `shared/kit_claude.py`, `kit-preread`, `kit-rehearse` | Small headless jobs get the document's text in the prompt, with no shell, web, or MCP servers (`--strict-mcp-config` with an empty config) and none of the owner's permission rules; a budget check before and a cost record after; Claude Code asks before the owner starts one. |
+| Text-back | `shared/bin/kit-textback` (macOS) | Answers only texts the owner sends themselves that start with "Kit". Questions run `claude -p --setting-sources project,local` (the owner's allow rules don't apply), read-only, inside Kit's folder, with the library in text-safe mode (`KIT_LIBRARY_SAFE=1`: work and confidential documents refused) and Kit's closed folders denied. Changes and `kit send N` reply with a one-time code and happen only on "kit yes CODE" (15 minutes, single use). Work content is never texted. `kit-textback test` is a dry run that sends and changes nothing. |
+| Letter signing | `shared/bin/kit-letter`, ask rule | `kit-letter build` is allowed; `kit-letter sign` (which adds the saved signature) asks every time. The letters desk signs only a letter the owner asks it to sign, and never sends one. |
+| Library mirror and fetch | `shared/bin/kit-library`, ask rules | `mirror` and `fetch` ask first. Work and confidential material (collections or output kinds marked so, or tagged so) is never mirrored to the synced phone folder, and nothing is when the sharing policy blocks the mirror folder. Long digit runs are blanked from the stored text. |
+| Network lookups | `shared/bin/kit-expiry` | Looks certificates up over TLS and domains over RDAP only with `--live`; the health check and brief read the saved results. |
+| Plugin builds | `shared/bin/kit-plugin` | Builds in a temporary folder and swaps it in; refuses to replace a plugin folder holding files it didn't write unless `--force`; never pushes or publishes. |
 
 ## 6. Scheduled runs
 
@@ -178,10 +186,14 @@ launchd/Task Scheduler -> run.sh <mode>
 | `morning` | `prompt.md` | 1200 s |
 | `weekly` | `prompt-weekly.md` | 3000 s |
 | `worklist` | `prompt-worklist.md` | 900 s |
-| `eod` | `prompt-eod.md` | 1200 s |
+| `eod` | none: `kit-wrap`, no model call (Mon to Thu 17:30, Fri 15:30); `EOD_MODEL="on"` runs `prompt-eod.md` | 300 s (`RUN_TIMEOUT_EOD`); 1200 s with the model |
 | `open`, `journal` | optional trading prompts | 1200 s |
 
-Plain scripts run outside `run.sh` with no model call: `kit-backup` (the daily `backup` job at 12:30),
+Plain scripts with no model call: `kit-wrap` (the end-of-day run, through `run.sh eod`), `kit-digest`
+and `kit-ppmx pulse` (sections `run.sh` adds to the weekly review and morning brief when turned on),
+`preflight.sh` (06:45 and 15:45: one tiny Claude call and a sign-in check per connector in
+`PREFLIGHT_CONNECTORS`, each problem told once per lapse), `kit-textback watch` (an always-on job that
+calls Claude only for texted questions), `kit-backup` (the daily `backup` job at 12:30),
 `kit-meetprep` (optional `meetprep` job,
 weekdays every 30 minutes, honours `kit-pause`), `kit-holds`, `kit-triage`, `kit-awaiting`,
 `kit-oneonone`, and `kit-wins` (the weekly review runs `kit-wins collect`). They read local files and
@@ -350,6 +362,22 @@ authentication failure. `demand_refresh.py` validates the settings against conne
 adds only guard-allowed read tools; it skips with a line in the review at the budget stop level, when
 settings are incomplete, or when time is short.
 
+### Added in 1.5 and 1.6
+
+| Feature | Design |
+|---|---|
+| PPM Express (`kit-ppmx`, `shared/ppmx/`) | One standard-library MCP server package run two ways: stdio for Claude Code and Claude Desktop with the owner's own token, and Streamable HTTP for a team on OpenShift, each caller sending their own token. Reads and writes (no delete); see the guardrail above. `pulse` keeps a weekly snapshot and diffs it; `actions` turns minuted actions into proposals made one at a time. |
+| End-of-day wrap (`kit-wrap`) | Built from Kit's files with no model call, so it costs nothing and still runs at the budget's stop level; hooks in `.install/wrap.d/` add sections. |
+| Pre-read and rehearsal (`kit-preread`, `kit-rehearse`) | Closed Claude runs through `kit_claude.py`: the document's text, the red team's playbook, and the team's standards in the prompt; output to `briefs/preread/` and `briefs/rehearse/`; never texted. |
+| Library (`kit-library`) | Collections cataloged into an owner-only SQLite full-text index (`.install/library/index.db`, rebuilt from the folders, never committed or backed up); Office, PDF (through `kit-pdftext`, with on-device OCR for scans), web, EPUB, and Scrivener text; an output folder fed by `deliver`. On macOS, KitLibrary.app holds the folder permission and runs only index, flush, mirror, fetch, and check. Markdown is delivered as Word through textutil (macOS), python-docx, or Word over COM (Windows), else kept as Markdown with the reason. |
+| Letters (`kit-letter`, letters desk) | A Word letter from plain text with the standard library; signing is its own command so it can ask every time. |
+| Text-back (`kit-textback`, macOS) | KitMessages.app (Full Disk Access, nothing else) reads the owner's own conversation; commands answer from Kit's files, questions go to a read-only Claude run, and changes wait for a one-time code. |
+| Vendor desk (`kit-vendors`) | Weighted RFP questions with must-haves, imported answers (CSV, XLSX, Markdown, DOCX), scores, dodge detection, and a drafted recommendation; no model call, nothing sent. |
+| Team coverage map (`kit-teammap`) | Load from PPM Express (read only) or open items, single-person knowledge from a coverage file, and a cross-training plan. |
+| Architecture digest (`kit-digest`) | One page from Kit's registers with no model call; a missing source only empties its section. |
+| Expiry list (`kit-expiry`) | Everything that expires, soonest first; network lookups only with `--live`; the health check warns on Kit's own items. |
+| Personal rhythm (`kit-dates`, `kit-touch`, `kit-feedback`, `kit-meetload`) | Local lists and calendar reads that feed brief lines; nothing is sent; the feedback log is owner-only and never committed, exported, or texted. |
+
 ## 8. Model routing and kit-run
 
 | Phase | What | Where |
@@ -381,6 +409,14 @@ or `kit-run`, never as Claude Code's own model. Precedence: organization ceiling
 - The installer records version, commit, and install history in `.install/VERSION.json` and writes
   release notes when they change (`shared/kit_version.py`); the next brief shows them once.
 - `kit-update` previews and applies updates from GitHub, keeping a backup branch.
+- `.github/workflows/checks.yml` runs on every push and pull request: syntax for shell, Python, and
+  PowerShell, job templates and JSON, a scan for personal details (patterns held in a repository
+  secret), and named Python suites on Linux; the Windows installer for real (install, reinstall, repair)
+  under Windows PowerShell 5.1 and PowerShell 7, with the PPM Express, wrap, rehearsal, vendor, team map,
+  digest, and letter suites; and the PPM Express server's tests, its OpenShift files rendered, and its
+  container image built and run the way OpenShift runs it.
+- Kit isn't open source: `LICENSE` reserves all rights, and using Kit takes the copyright holder's
+  written permission.
 - The public repository carries no organization details, names, internal hosts, home paths, or
   credentials. Before anything is published, the maintainer's patch step scans every added line,
   file name, and commit message against a denylist and credential patterns, and refuses to publish
@@ -433,18 +469,32 @@ or `kit-run`, never as Claude Code's own model. Precedence: organization ceiling
 3. Add a launchd template `com.USER.kit.<mode>.plist.template` and a Task Scheduler entry.
 4. Add any tools it needs to `ALLOW_TOOLS`; add a test in `tests/test_runsh.sh`.
 
+**Add a CI step**
+1. Add a step to the right job in `.github/workflows/checks.yml` (`checks` on Linux, `windows-install`
+   on Windows, `ppmx` for the PPM Express server). On Windows, one test per step: PowerShell fails a
+   step only on its last command's exit code.
+2. Say what the step runs in the comment at the top of the file.
+
 ## 12. Known limits
 
-- Windows support is built and logic-tested on macOS only; real Windows, Outlook COM, and Task
-  Scheduler behavior is untested.
+- Windows is narrower: the installer and the listed suites run in CI on Windows, but the Outlook COM
+  adapters, the Task Scheduler tasks, `preflight.ps1`, and `uninstall.ps1` haven't run on a real Windows
+  machine, and there's no text-back or Outlook check before runs.
+- PPM Express's reads were confirmed against the live API on 02-Nov-2026 (paths against its OpenAPI
+  description; shapes and field names against a tenant); its writes follow the description and are
+  tested only against the fake server (`shared/ppmx/README.md`).
+- The connector guard doesn't see PPM Express writes from Kit's own session; there the control is
+  Claude Code's ask rules, and the audit is `kit-ppmx`'s own log.
 - The SQL transport is tested on MySQL and PostgreSQL (password login over SCRAM tested; one shared
   role, so row-level security policies untested); SQL Server is untested.
 - `kit-run` lacks MCP resources, prompts, sampling, OAuth sign-in, several hook types, web tools,
   and general shell access (see `shared/KIT-RUN.md`).
 - Small and local models call tools less reliably; agents stay on Claude until evals pass.
-- The connector guard only governs agents that carry its hooks (the gateway, demand tracker,
-  intake triager, dependency mapper, and status reporter); Kit's own session and other agents with connector tools can still call connectors
-  unlogged (`kit-audit` reports this standing gap).
+- Standing enforcement gap: the connector guard covers only the five agents that carry its hooks (the
+  gateway, demand tracker, intake triager, dependency mapper, and status reporter). Kit's own session,
+  built-in agents, and the other agents whose tools aren't limited to a `tools:` list can reach MCP
+  servers unguarded and unlogged; Claude Code's permission prompts are the only control there
+  (`kit-audit` reports this gap; see docs/CONNECTIVITY.md).
 - `kit-lifecycle` can't tell whether a paid extended-support subscription is held; `extended` items
   count as covered only once the owner confirms it.
 - With the weekly demand refresh on, the connector's read tools are allowed for the whole unattended

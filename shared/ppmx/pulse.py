@@ -10,7 +10,7 @@ import datetime
 import time
 
 from .client import PPMXError
-from .tools import is_done, pick, role_day, text_of
+from .tools import is_done, is_me, pick, role_day, text_of
 
 RISK = {1: "At Risk", 2: "Critical"}
 RISK_WORDS = ("at risk", "critical")
@@ -57,10 +57,14 @@ def at_risk(p):
 
 
 def in_scope(row, scope, me):
-    """scope: "all", "mine" (the token's own projects, by manager), or a list of portfolio or program names."""
+    """scope: "all", "mine" (the token's own projects, by manager), or a list of portfolio or program names.
+    For "mine", me is the token's user from Context.me() (matched as list_projects' manager "me" is), or
+    a list of names."""
     if not scope or scope == "all":
         return True
     if scope == "mine":
+        if isinstance(me, dict):
+            return is_me(me, pick(row, "manager")[1])
         who = text_of(pick(row, "manager")[1]).lower()
         return any(m and m.lower() in who for m in me or [])
     names = [s.lower() for s in scope]

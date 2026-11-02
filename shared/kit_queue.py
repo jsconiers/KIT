@@ -57,7 +57,20 @@ def owner_section(lines, configured=None):
     names = [ln[3:].strip() for ln in lines if ln.startswith("## ")]
     if configured and configured in names:
         return configured
-    return next((n for n in names if n not in SECTIONS), None)
+    own = [n for n in names if n not in SECTIONS]
+    if not own:
+        return None
+    first = (configured or "").split()[:1]
+    for n in own:                         # "Alex" for OWNER_NAME="Alex Smith", in any case
+        if first and n.split()[:1] and n.split()[0].lower() == first[0].lower():
+            return n
+    # Headings the owner added (## Projects, say) aren't the owner's section: that's the one the
+    # installer put just before Kit's, so prefer it over the first heading that isn't one of Kit's.
+    if "Kit" in names:
+        before = names[names.index("Kit") - 1] if names.index("Kit") > 0 else None
+        if before in own:
+            return before
+    return own[0]
 
 
 def section_range(lines, name):

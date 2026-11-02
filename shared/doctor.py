@@ -341,17 +341,37 @@ def acl_entries(text, folder):
 
 def check_acl():
     """Windows: file modes don't show who can open a folder (Python reports 0o777 for every one), so read its
-    access list. The installer leaves exactly one entry, your own account, inherited by everything inside."""
-    code, out = run(["icacls", str(KIT)])
-    entries = acl_entries(out, KIT) if code == 0 else []
-    if not entries:
-        add("warn", "Kit's folder is private", f"couldn't read its access list ({out.strip()[:120]})")
-        return
-    me = os.environ.get("USERNAME", "").lower()
-    others = sorted({who for who, _ in entries if who.lower().rsplit("\\", 1)[-1] != me})
-    inherited = any("(I)" in rights for _, rights in entries)
+    access list. The installer leaves exactly one entry, your own account, inherited by everything inside.
+    Accounts are compared by SID (Get-Acl, and your SID from Windows itself), since a name can differ from
+    USERNAME, as with Microsoft Entra accounts (AzureAD\\JohnSmith for jsmith); icacls names are the fallback."""
     fix = ("re-run the installer (it locks the folder to your account), or run: icacls "
            "\"%USERPROFILE%\\Claude\\Agents\\kit\" /inheritance:r /grant:r \"%USERNAME%\":(OI)(CI)F")
+    path = str(KIT).replace("'", "''")   # no double quotes in the script, so it survives the command line
+    script = ("$ErrorActionPreference = 'Stop'; "
+              "'ME ' + [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; "
+              f"$acl = Get-Acl -LiteralPath '{path}'; "
+              "foreach ($r in $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) { "
+              "$n = try { $r.IdentityReference.Translate([System.Security.Principal.NTAccount]).Value } "
+              "catch { $r.IdentityReference.Value }; "
+              "'ACE ' + $r.IdentityReference.Value + [char]9 + $r.IsInherited + [char]9 + $r.AccessControlType + [char]9 + $n }")
+    code, out = run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script])
+    lines = out.splitlines() if code == 0 else []
+    me = next((ln[3:].strip() for ln in lines if ln.startswith("ME ")), "")
+    aces = [ln[4:].split("\t") for ln in lines if ln.startswith("ACE ")]
+    aces = [a for a in aces if len(a) >= 4]
+    if me and aces:
+        allow = [a for a in aces if a[2].strip().lower() == "allow"]
+        others = sorted({a[3].strip() or a[0].strip() for a in allow if a[0].strip().upper() != me.upper()})
+        inherited = any(a[1].strip().lower() == "true" for a in aces)
+    else:
+        code, out = run(["icacls", str(KIT)])
+        entries = acl_entries(out, KIT) if code == 0 else []
+        if not entries:
+            add("warn", "Kit's folder is private", f"couldn't read its access list ({out.strip()[:120]})")
+            return
+        me = os.environ.get("USERNAME", "").lower()
+        others = sorted({who for who, _ in entries if who.lower().rsplit("\\", 1)[-1] != me})
+        inherited = any("(I)" in rights for _, rights in entries)
     check(not others and not inherited, "Kit's folder is private", "only your account can open it",
           ("others can open it: " + ", ".join(others[:4]) if others else "it takes its access from the folder above")
           + "; " + fix, "warn")

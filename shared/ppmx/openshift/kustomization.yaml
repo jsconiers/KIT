@@ -16,4 +16,4 @@ resources:
 images:
   - name: ppmx-mcp
     newName: REPLACE-registry/REPLACE-namespace/ppmx-mcp
-    newTag: "0.2.0"
+    newTag: "0.3.0"

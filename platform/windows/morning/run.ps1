@@ -3,11 +3,25 @@
 #   run.ps1            morning brief (weekdays 7:45, delivered by ~8:00)
 #   run.ps1 weekly     weekly review (Monday 6:30, so it finishes before the morning brief)
 #   run.ps1 worklist   proposed work list for the owner to approve (Monday to Thursday 9:00)
+#   run.ps1 eod        end-of-day wrap (Monday to Thursday 17:30, Friday 15:30): kit-wrap, no model call
+#                      (EOD_MODEL="on" uses Claude and prompt-eod.md instead; EOD="off" skips it)
 #   run.ps1 open       post-open read (weekdays 9:45)        optional extra for a trading setup
 #   run.ps1 journal    trade journal after the close         optional extra for a trading setup
 #                      (no delivery unless it fails)
+#   run.ps1 NAME       a run of your own: its prompt is .install\prompts\prompt-NAME.md (kept out of the
+#                      shared package), its short text briefs\NAME-text.txt, and its extra tools
+#                      ALLOW_TOOLS_<NAME> in the config (any run's extra tools can go there, too).
 #
-# UNTESTED on Windows -- validate on a real Windows box before relying on it.
+# Before the morning brief and the weekly review, run.ps1 writes briefs\dates.txt (kit-dates),
+# briefs\renewals.txt (kit-expiry brief) and, for the review, briefs\renewals-missing.txt, with no
+# model call; the morning run also adds a to-do for each date or renewal that needs one. Each hook in
+# .install\brief.d\ (.ps1, .py, .cmd, .bat, or .exe) prints a section to briefs\extra-<hook>.txt. With
+# PPMX_PULSE="on", PPMX_PULSE_DAY's morning brief gets the PPM Express pulse (kit-ppmx pulse); with
+# ARCH_DIGEST="on", the first weekly review of each month drafts last month's architecture digest (kit-digest).
+#
+# Its logic is tested under PowerShell 7 against a fake claude (tests/test_runps1.sh), and CI checks that
+# it parses; it hasn't yet been run on a real Windows machine: Task Scheduler starting it, the py launcher,
+# and the Outlook COM calls the mail and calendar commands make during a run are untested there.
 #
 # Faithful PowerShell port of platform/mac/morning/run.sh (the authoritative behavior):
 # same modes, skip-days, once-per-day ".done" markers, the kit-pause kill switch, the kit-cost
@@ -27,7 +41,10 @@
 #   powershell -ExecutionPolicy Bypass -NoProfile -File run.ps1 morning   (or open, weekly)
 #
 # Settings live in .install\shared\morning\config (shared with the Mac, KEY="value" lines):
-#   OWNER_NAME, SKIP_DAYS, BLOCK_TOOLS, ALLOW_TOOLS, ALLOW_TOOLS_WEEKLY, the weekly demand refresh
+#   OWNER_NAME, SKIP_DAYS, BLOCK_TOOLS, ALLOW_TOOLS, ALLOW_TOOLS_WEEKLY, ALLOW_TOOLS_<MODE>, the
+#   end-of-day wrap (EOD, EOD_MODEL, RUN_TIMEOUT_EOD), the PPM Express pulse (PPMX_PULSE, PPMX_PULSE_DAY,
+#   PPMX_PULSE_TIMEOUT), the monthly digest (ARCH_DIGEST, ARCH_DIGEST_WHEN, ARCH_DIGEST_TIMEOUT), the
+#   connection check (CONNECTION_CHECK, CONNECTION_WAIT, CONNECTION_URL), the weekly demand refresh
 #   (DEMAND_REFRESH, DEMAND_SERVER, DEMAND_TOOLS, DEMAND_REGISTER_DIR), the monthly regulatory watch
 #   (REG_WATCH, REG_WATCH_WHEN, REG_WATCH_MIN_LEFT), the connector outage alert
 #   (CONNECTOR_FAIL_STREAK), the run and cost alerts (RUN_ALERTS, RUN_ALERTS_TIMEOUT, RUN_FAIL_STREAK,
@@ -121,12 +138,25 @@ function Resolve-Python {
 }
 
 # --- Mode -> prompt + text file --------------------------------------------------------------
-switch ($Mode) {
+# A run of your own (run.ps1 NAME, lowercase letters, digits, and hyphens) uses its prompt in
+# .install\prompts\prompt-NAME.md; anything else is the morning brief.
+$CustomPrompt = Join-Path $KitHome ".install\prompts\prompt-$Mode.md"
+switch -CaseSensitive ($Mode) {
     "open"    { $Prompt = Join-Path $ShareDir "prompt-open.md";    $TextRel = "briefs\open-text.txt" }
     "weekly"  { $Prompt = Join-Path $ShareDir "prompt-weekly.md";  $TextRel = "briefs\weekly-text.txt" }
     "journal" { $Prompt = Join-Path $ShareDir "prompt-journal.md"; $TextRel = "briefs\journal-text.txt" }
     "worklist" { $Prompt = Join-Path $ShareDir "prompt-worklist.md"; $TextRel = "briefs\worklist-text.txt" }
-    default   { $Mode = "morning"; $Prompt = Join-Path $ShareDir "prompt.md"; $TextRel = "briefs\latest-text.txt" }
+    "eod"     {
+        if ((Cfg "EOD" "on") -eq "off") { exit 0 }
+        $Prompt = Join-Path $ShareDir "prompt-eod.md"; $TextRel = "briefs\eod-text.txt"
+    }
+    default   {
+        if ($Mode -cmatch '^[a-z][a-z0-9-]*$' -and $Mode -ne "morning" -and (Test-Path -LiteralPath $CustomPrompt)) {
+            $Prompt = $CustomPrompt; $TextRel = "briefs\$Mode-text.txt"
+        } else {
+            $Mode = "morning"; $Prompt = Join-Path $ShareDir "prompt.md"; $TextRel = "briefs\latest-text.txt"
+        }
+    }
 }
 $Text = Join-Path $KitHome $TextRel
 
@@ -209,10 +239,11 @@ function Send-Brief([string]$textFile, [bool]$withBrief = $true) {
     }
     if ($withBrief) {
         $briefName = switch ($Mode) {
+            "morning"  { "$Today.md" }      # morning and open share the day's brief
+            "open"     { "$Today.md" }
             "weekly"   { "weekly-$Today.md" }
             "worklist" { "worklist-$Today.md" }
-            "journal"  { "" }
-            default   { "$Today.md" }      # morning and open share the day's brief
+            default    { "" }               # journal, eod, and runs of your own send the text alone
         }
         if ($briefName -ne "") {
             $briefPath = Join-Path $KitHome "briefs\$briefName"
@@ -262,6 +293,107 @@ function Invoke-RunAlerts([string[]]$extra = @()) {
     } catch {
         Write-Log "== run alerts skipped: $($_.Exception.Message)"
     }
+}
+
+# Run one program with a time limit (the Mac's `perl -e 'alarm ...'`): its output goes to $OutFile (raw
+# bytes, so a tool's UTF-8 stays UTF-8) or to the log, its errors to the log. Returns its exit code, or 124
+# when it was stopped at the limit. Never throws.
+function ConvertTo-ArgString([string[]]$list) {
+    # Start-Process joins its arguments with spaces, so quote each one the way Windows programs split them.
+    ($list | ForEach-Object {
+        $a = "$_"
+        if ($a -ne "" -and $a -notmatch '[\s"]') { $a }
+        else { '"' + (($a -replace '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"' }
+    }) -join " "
+}
+function Invoke-Timed([string]$Exe, [string[]]$ArgList, [int]$Limit, [string]$OutFile = "") {
+    $tag = [guid]::NewGuid().ToString("N").Substring(0, 8)
+    $out = if ($OutFile -ne "") { $OutFile } else { Join-Path $LogDir ".timed-$PID-$tag.out" }
+    $err = Join-Path $LogDir ".timed-$PID-$tag.err"
+    $code = 1
+    try {
+        $sp = @{ FilePath = $Exe; NoNewWindow = $true; PassThru = $true
+                 RedirectStandardOutput = $out; RedirectStandardError = $err }
+        if ($ArgList.Count -gt 0) { $sp.ArgumentList = (ConvertTo-ArgString $ArgList) }
+        $p = Start-Process @sp
+        $null = $p.Handle   # keeps the exit code readable once it ends (Windows PowerShell 5.1)
+        if ($p.WaitForExit($Limit * 1000)) {
+            $p.WaitForExit()
+            $code = $p.ExitCode
+        } else {
+            if ($IsWindows -or $env:OS -eq "Windows_NT") { & taskkill /PID $p.Id /T /F 2>&1 | Out-Null }
+            else { try { $p.Kill() } catch {} }
+            $what = @($ArgList | Where-Object { "$_" -match '[\\/]' } | Select-Object -First 1)
+            $what = if ($what.Count) { Split-Path -Leaf $what[0] } else { $Exe }
+            Write-Log "== $(Get-Date) $what stopped after $Limit s"
+            $code = 124
+        }
+    } catch {
+        Write-Log "== $(Get-Date) couldn't run ${Exe}: $($_.Exception.Message)"
+    }
+    if ($OutFile -eq "" -and (Test-Path -LiteralPath $out)) {
+        Get-Content -LiteralPath $out -Encoding UTF8 -ErrorAction SilentlyContinue | ForEach-Object { Write-Log "$_" }
+        Remove-Item -LiteralPath $out -Force -ErrorAction SilentlyContinue
+    }
+    if (Test-Path -LiteralPath $err) {
+        Get-Content -LiteralPath $err -Encoding UTF8 -ErrorAction SilentlyContinue | ForEach-Object { Write-Log "$_" }
+        Remove-Item -LiteralPath $err -Force -ErrorAction SilentlyContinue
+    }
+    if ($null -eq $code) { $code = 1 }
+    return [int]$code
+}
+# A Kit Python tool, with a time limit (see Invoke-Timed).
+function Invoke-KitPy([string]$Tool, [string[]]$ToolArgs, [int]$Limit, [string]$OutFile = "") {
+    $py = Resolve-Python
+    if ($null -eq $py) { Write-Log "== $(Get-Date) no Python found for $(Split-Path -Leaf $Tool)"; return 1 }
+    return (Invoke-Timed $py.Exe @($py.Args + @($Tool) + $ToolArgs) $Limit $OutFile)
+}
+function Test-NonEmpty([string]$path) {
+    (Test-Path -LiteralPath $path) -and ((Get-Item -LiteralPath $path).Length -gt 0)
+}
+function Save-History {
+    # Save the day's changes to Kit's private local history (never pushed), then refresh the dashboard.
+    if (Test-Path -LiteralPath (Join-Path $KitHome ".git")) {
+        try {
+            & git -C $KitHome add -A 2>&1 | Out-Null
+            & git -C $KitHome commit -qm "auto: $Mode run $Today" 2>&1 | Out-Null
+        } catch { Write-Log "== git auto-commit skipped: $($_.Exception.Message)" }
+    }
+    $dashboard = Join-Path $KitHome ".install\shared\dashboard.py"
+    if (Test-Path -LiteralPath $dashboard) {
+        $py = Resolve-Python
+        if ($null -ne $py) { & $py.Exe @($py.Args + @($dashboard)) *> $null }
+    }
+}
+
+# End-of-day wrap: kit-wrap writes it from Kit's files with no model call (what got done today, what
+# moves to the next working day, and that day's first meeting and what it needs), so the budget guard,
+# the connection check, and the run lock don't apply. EOD_MODEL="on" runs prompt-eod.md with Claude
+# instead, as before.
+$kitWrap = Join-Path $KitHome ".install\shared\bin\kit-wrap"
+if ($Mode -eq "eod" -and (Cfg "EOD_MODEL" "off") -ne "on" -and (Test-Path -LiteralPath $kitWrap)) {
+    Write-Log "== $(Get-Date) start eod (kit-wrap, no model) $Test"
+    $rc = Invoke-KitPy $kitWrap @("--write") ([int](Cfg "RUN_TIMEOUT_EOD" "300"))
+    if ($rc -eq 0 -and (Test-NonEmpty $Text)) {
+        if (Send-Brief $Text) {
+            if ($Test -eq "") { New-Item -ItemType File -Force -Path $Done | Out-Null }
+            Remove-Item -LiteralPath (Join-Path $KitHome "briefs\unsent-$Mode.txt") -Force -ErrorAction SilentlyContinue
+            Write-Log "== delivered"
+        } else {
+            Copy-Item -LiteralPath $Text -Destination (Join-Path $KitHome "briefs\unsent-$Mode.txt") -Force -ErrorAction SilentlyContinue
+            Write-Log "== delivery failed; kept unsent copy"
+        }
+    } else {
+        if ($rc -eq 0) { $rc = 1 }
+        $failFile = Join-Path $LogDir "failure-$Mode.txt"
+        Set-Content -LiteralPath $failFile -Encoding UTF8 -Value "Kit's end-of-day wrap didn't finish (rc=$rc). Log: $Log"
+        $null = Send-Brief $failFile $false
+        Write-Log "== sent failure notice"
+    }
+    Write-Log "== $(Get-Date) end eod rc=$rc"
+    Invoke-RunAlerts
+    Save-History
+    exit 0
 }
 
 # Budget guard (kit-cost): at the stop level only the essential runs go ahead; the others skip, with
@@ -349,6 +481,72 @@ if ($Mode -eq "morning" -or $Mode -eq "weekly") {
     }
 }
 
+# Dates, renewals, and your own brief hooks, for their sections of the brief and the review: no model
+# call. The morning run (not a test) also adds a to-do for each date or renewal that needs one.
+if ($Mode -eq "morning" -or $Mode -eq "weekly") {
+    $briefsDir = Join-Path $KitHome "briefs"
+    $datesTxt = Join-Path $briefsDir "dates.txt"
+    $renewTxt = Join-Path $briefsDir "renewals.txt"
+    $missingTxt = Join-Path $briefsDir "renewals-missing.txt"
+    Remove-Item -LiteralPath $datesTxt, $renewTxt, $missingTxt -Force -ErrorAction SilentlyContinue
+    Get-ChildItem -LiteralPath $briefsDir -Filter "extra-*.txt" -File -ErrorAction SilentlyContinue |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+    $queueFlag = if ($Mode -eq "morning" -and $Test -eq "") { @("--queue") } else { @() }
+    $binDir = Join-Path $KitHome ".install\shared\bin"
+    $kitDates = Join-Path $binDir "kit-dates"
+    $kitExpiry = Join-Path $binDir "kit-expiry"
+    if ((Test-Path -LiteralPath (Join-Path $KitHome "dates.json")) -and (Test-Path -LiteralPath $kitDates)) {
+        $null = Invoke-KitPy $kitDates (@("brief") + $queueFlag) 300 $datesTxt
+    }
+    if ((Test-Path -LiteralPath (Join-Path $KitHome "expiry.json")) -and (Test-Path -LiteralPath $kitExpiry)) {
+        $null = Invoke-KitPy $kitExpiry (@("brief") + $queueFlag) 300 $renewTxt
+        if ($Mode -eq "weekly") { $null = Invoke-KitPy $kitExpiry @("missing") 300 $missingTxt }
+    }
+    # Hooks: each file in .install\brief.d\ is run with the mode and up to 60 seconds; what it prints
+    # becomes briefs\extra-<file name>.txt. Windows has no executable bit, so the kind of file decides
+    # how it runs: .ps1 with PowerShell, .py with Python, .cmd, .bat, and .exe as they are.
+    $hookDir = Join-Path $KitHome ".install\brief.d"
+    if (Test-Path -LiteralPath $hookDir) {
+        $psHost = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        foreach ($hook in @(Get-ChildItem -LiteralPath $hookDir -File -ErrorAction SilentlyContinue | Sort-Object Name)) {
+            $out = Join-Path $briefsDir "extra-$($hook.Name).txt"
+            $hrc = switch ($hook.Extension.ToLower()) {
+                ".ps1"  { Invoke-Timed $psHost @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $hook.FullName, $Mode) 60 $out }
+                ".py"   { Invoke-KitPy $hook.FullName @($Mode) 60 $out }
+                { $_ -in @(".cmd", ".bat", ".exe") } { Invoke-Timed $hook.FullName @($Mode) 60 $out }
+                default { $null }
+            }
+            if ($null -eq $hrc) { continue }
+            if ($hrc -ne 0 -or -not (Test-NonEmpty $out)) { Remove-Item -LiteralPath $out -Force -ErrorAction SilentlyContinue }
+        }
+    }
+    # PPM Express pulse (PPMX_PULSE="on"; off by default): on PPMX_PULSE_DAY's morning brief (1, Monday, by
+    # default), kit-ppmx pulse adds what changed in PPM Express since last week: projects that turned At Risk
+    # or Critical, key dates that slipped, are overdue, or come due, and what else changed. Read only, no
+    # model call, every line [work]. Time-limited by PPMX_PULSE_TIMEOUT (seconds, default 300).
+    $kitPpmx = Join-Path $binDir "kit-ppmx"
+    if ($Mode -eq "morning" -and (Cfg "PPMX_PULSE" "off") -eq "on" -and "$IsoDow" -eq (Cfg "PPMX_PULSE_DAY" "1") -and
+        (Test-Path -LiteralPath $kitPpmx)) {
+        $pulseTxt = Join-Path $briefsDir "extra-ppmx-pulse.txt"
+        $prc = Invoke-KitPy $kitPpmx @("pulse", "--brief", "--save") ([int](Cfg "PPMX_PULSE_TIMEOUT" "300")) $pulseTxt
+        if ($prc -ne 0 -or -not (Test-NonEmpty $pulseTxt)) { Remove-Item -LiteralPath $pulseTxt -Force -ErrorAction SilentlyContinue }
+    }
+    # Monthly architecture digest (ARCH_DIGEST="on"; off by default): on the first weekly review of each month
+    # (day 1 to 7; ARCH_DIGEST_WHEN="every-run" runs it on every weekly review, for a test), kit-digest writes last
+    # month's digest to briefs\digest-YYYY-MM.md for your edit (one already there is kept), and the review gets a
+    # line pointing at it. No model call, [work]. Time-limited by ARCH_DIGEST_TIMEOUT (seconds, default 300).
+    $kitDigest = Join-Path $binDir "kit-digest"
+    if ($Mode -eq "weekly" -and (Cfg "ARCH_DIGEST" "off") -eq "on" -and (Test-Path -LiteralPath $kitDigest) -and
+        ((Cfg "ARCH_DIGEST_WHEN" "first-week") -eq "every-run" -or (Get-Date).Day -le 7)) {
+        $digestTxt = Join-Path $briefsDir "extra-arch-digest.txt"
+        $drc = Invoke-KitPy $kitDigest @("--write", "--month", "last", "--brief") ([int](Cfg "ARCH_DIGEST_TIMEOUT" "300")) $digestTxt
+        if ($drc -ne 0 -or -not (Test-NonEmpty $digestTxt)) { Remove-Item -LiteralPath $digestTxt -Force -ErrorAction SilentlyContinue }
+    }
+    foreach ($f in @($datesTxt, $renewTxt, $missingTxt)) {
+        if (-not (Test-NonEmpty $f)) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
+    }
+}
+
 # Build the prompt (substitute {{OWNER}}) and the claude argument list.
 $promptText = (Get-Content -LiteralPath $Prompt -Raw) -replace '\{\{OWNER\}\}', $OwnerName
 if ($Mode -eq "morning" -or $Mode -eq "weekly") {
@@ -379,6 +577,8 @@ $Timeout = switch ($Mode) {
     "worklist" { [int](Cfg "RUN_TIMEOUT_WORKLIST" "900") }
     default    { [int](Cfg "RUN_TIMEOUT" "1200") }
 }
+# The setting that applies, for the failure notice.
+$TimeoutKey = switch ($Mode) { "weekly" { "RUN_TIMEOUT_WEEKLY" } "worklist" { "RUN_TIMEOUT_WORKLIST" } default { "RUN_TIMEOUT" } }
 
 # Weekly demand refresh (DEMAND_REFRESH="on" in the config; off by default): the weekly review has
 # the demand tracker re-check the demands in its register through its connector, read-only and under
@@ -456,8 +656,23 @@ $allowed = @("Bash(date:*)", $briefGlob, $journalGlob,
              "Bash(python $queueTool hygiene:*)", "Bash(py -3 $queueTool hygiene:*)")
 # Rules are separated by semicolons, since a rule can contain spaces.
 $allowed += @($AllowTools -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
-if ($Mode -eq "weekly") { $allowed += @($AllowToolsWeekly -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }) }
-foreach ($r in @($demandRules + $regWatchRules)) { if ($allowed -notcontains $r) { $allowed += $r } }
+if ($Mode -eq "weekly") {
+    $allowed += @($AllowToolsWeekly -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
+    foreach ($r in @($demandRules + $regWatchRules)) { if ($allowed -notcontains $r) { $allowed += $r } }
+} else {
+    # Any other run's extra tools: ALLOW_TOOLS_<MODE> (hyphens become underscores), same format.
+    $modeTools = Cfg ("ALLOW_TOOLS_" + ($Mode.ToUpper() -replace '-', '_')) ""
+    $allowed += @($modeTools -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
+}
+# A rule written with ~/ doesn't match a command the run spells with the full home path, so each
+# Bash rule with ~/ also gets a twin with the home folder spelled out (forward slashes).
+$homeFwd = $env:USERPROFILE -replace '\\', '/'
+foreach ($r in @($allowed)) {
+    if ($r.StartsWith("Bash(") -and $r.Contains("~/")) {
+        $twin = $r.Replace("~/", "$homeFwd/")
+        if ($allowed -notcontains $twin) { $allowed += $twin }
+    }
+}
 # A run id tags this run's claude process, so a run that hits its time limit can be found and
 # stopped (stopping the PowerShell job alone leaves the claude process running).
 $RunId = "kit-$Mode-" + [guid]::NewGuid().ToString("N")
@@ -574,19 +789,47 @@ $TimedOut = $false
 $Degraded = $false
 # Connection check (CONNECTION_CHECK, default on; CONNECTION_WAIT seconds, default 300): when the API
 # can't be reached, check every 30 seconds, then skip the model run instead of letting it retry for an
-# hour. The morning run still writes its degraded brief, and the run is logged as failed.
+# hour. The morning run still writes its degraded brief, and the run is logged as failed. It checks the
+# address claude itself uses: CONNECTION_URL from the config, else ANTHROPIC_BASE_URL (a gateway or proxy
+# endpoint), else https://api.anthropic.com. A proxy in HTTPS_PROXY (or HTTP_PROXY) is used the way
+# claude uses it, with your Windows sign-in for a proxy that asks for one, unless NO_PROXY names the
+# host; without one, the system proxy settings apply.
+function Get-ProbeProxy([string]$url) {
+    $proxy = @($env:HTTPS_PROXY, $env:https_proxy, $env:HTTP_PROXY, $env:http_proxy) |
+        Where-Object { $_ } | Select-Object -First 1
+    if (-not $proxy) { return "" }
+    try { $probeHost = ([uri]$url).Host } catch { return $proxy }
+    $noProxy = @($env:NO_PROXY, $env:no_proxy) | Where-Object { $_ } | Select-Object -First 1
+    foreach ($n in @("$noProxy" -split '[,\s]+' | Where-Object { $_ })) {
+        if ($n -eq "*") { return "" }
+        $n = $n.TrimStart('*').TrimStart('.')
+        if ($n -ne "" -and ($probeHost -eq $n -or $probeHost.EndsWith(".$n"))) { return "" }
+    }
+    return $proxy
+}
 $Offline = $false
 if ($DegradedReason -eq "" -and (Cfg "CONNECTION_CHECK" "on") -ne "off") {
     $netWait = 0
     $netLimit = [int](Cfg "CONNECTION_WAIT" "300")
-    $netUrl = Cfg "CONNECTION_URL" "https://api.anthropic.com"
+    $netUrl = Cfg "CONNECTION_URL" ""
+    if ($netUrl -eq "") { $netUrl = if ($env:ANTHROPIC_BASE_URL) { $env:ANTHROPIC_BASE_URL } else { "https://api.anthropic.com" } }
+    # Windows PowerShell 5.1 may offer only old TLS versions by default; the API needs TLS 1.2.
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
+    $probe = @{ Uri = $netUrl; Method = "Head"; TimeoutSec = 10; UseBasicParsing = $true }
+    $netProxy = Get-ProbeProxy $netUrl
+    if ($netProxy -ne "") {
+        $probe.Proxy = $netProxy
+        $probe.ProxyUseDefaultCredentials = $true
+    } else {
+        try { [System.Net.WebRequest]::DefaultWebProxy.Credentials = [System.Net.CredentialCache]::DefaultNetworkCredentials } catch {}
+    }
     while ($true) {
         $reached = $false
-        try { Invoke-WebRequest -Uri $netUrl -Method Head -TimeoutSec 10 -UseBasicParsing | Out-Null; $reached = $true }
+        try { Invoke-WebRequest @probe | Out-Null; $reached = $true }
         catch { if ($_.Exception.Response) { $reached = $true } }   # any HTTP answer means the network is up
         if ($reached) { break }
         if ($netWait -ge $netLimit) {
-            Write-Log "== $(Get-Date) ${Mode}: no internet connection after ${netWait}s; skipping the model run"
+            Write-Log "== $(Get-Date) ${Mode}: no internet connection after ${netWait}s ($netUrl); skipping the model run"
             $DegradedReason = "the computer had no internet connection"
             $Offline = $true
             break
@@ -655,7 +898,7 @@ if ($quietTrim -eq "MARKET CLOSED" -or $quietTrim -eq "NO TEXT") {
 } else {
     $failFile = Join-Path $LogDir "failure-$Mode.txt"
     if ($TimedOut) {
-        Set-Content -LiteralPath $failFile -Encoding UTF8 -Value "Kit's $Mode run hit its $([int]($Timeout / 60))-minute limit and stopped before writing anything. Raise RUN_TIMEOUT_$($Mode.ToUpper()) in the config if it keeps happening. Log: $Log"
+        Set-Content -LiteralPath $failFile -Encoding UTF8 -Value "Kit's $Mode run hit its $([int]($Timeout / 60))-minute limit and stopped before writing anything. Raise $TimeoutKey in the config if it keeps happening. Log: $Log"
     } else {
         Set-Content -LiteralPath $failFile -Value "Kit's $Mode run didn't finish (rc=$rc). Log: $Log" -Encoding UTF8
     }
@@ -667,18 +910,7 @@ if ($quietTrim -eq "MARKET CLOSED" -or $quietTrim -eq "NO TEXT") {
 Invoke-RunAlerts
 
 # --- Save the day's changes to Kit's private local history, then refresh the dashboard --------
-if (Test-Path -LiteralPath (Join-Path $KitHome ".git")) {
-    try {
-        & git -C $KitHome add -A 2>&1 | Out-Null
-        & git -C $KitHome commit -qm "auto: $Mode run $Today" 2>&1 | Out-Null
-    } catch { Write-Log "== git auto-commit skipped: $($_.Exception.Message)" }
-}
-
-$dashboard = Join-Path $KitHome ".install\shared\dashboard.py"
-if (Test-Path -LiteralPath $dashboard) {
-    $py = Resolve-Python
-    if ($null -ne $py) { & $py.Exe @($py.Args + @($dashboard)) *> $null }
-}
+Save-History
 } finally {
     # Release the lock only if this run took it.
     if ($OwnLock) { Remove-Item -LiteralPath $LockDir -Recurse -Force -ErrorAction SilentlyContinue }

@@ -10,12 +10,17 @@ next_offset while there are more. PPM Express's API has no delete, and neither d
 import datetime
 import json
 import re
+import time
 
 from . import codes as codes_mod
-from .client import PARAMS, UUID, records
+from .client import PARAMS, UUID, PPMXError, records
 
-# Which attribute holds what, by the names PPM Express is expected to use. PROVISIONAL: check them
-# against your tenant (get_fields) and correct them here. The first name a record has wins.
+# Which attribute holds what. CONFIRMED on 02-Nov-2026 against a live tenant and PPM Express's OpenAPI
+# description for projects, portfolios, programs, tasks, key dates, and deliverables (Name, OverallStatus,
+# Status, Manager, AssignedTo, StartDate, FinishDate, DueDate, Date, Portfolio, Program, Progress, Type,
+# IsComplete); the other names are fallbacks for other tenants. People fields (Manager, AssignedTo,
+# Sponsor) are lists of {"id", "fullName", "imageId"}; Portfolio and Program lists of {"id", "name"}. The
+# first name a record has wins; get_fields lists a tenant's own keys.
 FIELDS = {
     "name": ["Name", "Title"],
     "status": ["OverallStatus", "Status", "State"],
@@ -24,8 +29,8 @@ FIELDS = {
     "finish": ["FinishDate", "Finish", "EndDate"],
     "due": ["DueDate", "FinishDate", "Finish", "Date"],
     "date": ["Date", "DueDate", "FinishDate"],
-    "portfolio": ["Portfolios", "Portfolio"],
-    "program": ["Programs", "Program"],
+    "portfolio": ["Portfolio", "Portfolios"],
+    "program": ["Program", "Programs"],
     "assignee": ["AssignedTo", "Assignee", "Resource", "Owner"],
     "progress": ["Progress", "PercentComplete"],
     "stage": ["Stage", "IdeaStage"],
@@ -42,26 +47,31 @@ SUMMARY = {
     "ideas": ["name", "stage", "status"],
     "challenges": ["name", "status"],
     "resources": ["name", "email"],
+    "deliverables": ["name", "status", "assignee", "due", "progress"],
 }
-ENTITIES = ["Project", "Program", "Portfolio", "Task", "KeyDate", "Idea", "Challenge", "Resource"]
+ENTITIES = ["Project", "Program", "Portfolio", "Task", "KeyDate", "Deliverable", "Idea", "Challenge", "Resource"]
 # The kind of record each endpoint holds, for code tables that apply to one kind ("KeyDate.Type").
 ENTITY_OF = {"portfolios": "Portfolio", "portfolio": "Portfolio", "programs": "Program", "program": "Program",
              "projects": "Project", "project": "Project", "tasks": "Task", "task": "Task", "tasks_bulk": "Task",
              "key_dates": "KeyDate", "key_date": "KeyDate", "ideas": "Idea", "idea": "Idea", "idea_stage": "Idea",
-             "challenges": "Challenge", "challenge": "Challenge", "resources": "Resource", "resource": "Resource"}
+             "challenges": "Challenge", "challenge": "Challenge", "resources": "Resource", "resource": "Resource",
+             "deliverables": "Deliverable", "deliverable": "Deliverable"}
 DATE_ROLES = ("start", "finish", "due", "date")
 DONE_WORDS = ("complete", "done", "closed", "finished", "cancel")
 # Fields that name people or other records take a list of {"search": a name or email} or {"id": an ID}
 # (PPM Express's format); plain text is turned into that. Tags take "#tag" text.
 PEOPLE = {"Manager", "Managers", "ProjectManager", "Owner", "Owners", "AssignedTo", "Sponsor", "Sponsors",
           "Resource", "Resources"}
-LINKS = {"Portfolios", "Programs", "Predecessor", "Predecessors"}
+LINKS = {"Portfolio", "Portfolios", "Program", "Programs", "Predecessor", "Predecessors"}
 FIELD_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_ .-]{0,79}$")
 # Record kinds the general create_record and update_record tools take: (list endpoint, item endpoint,
 # entity).
 RECORDS = {"portfolio": ("portfolios", "portfolio", "Portfolio"), "program": ("programs", "program", "Program"),
            "resource": ("resources", "resource", "Resource"), "challenge": ("challenges", "challenge", "Challenge")}
 READ_ONLY = "This PPM Express server is read-only (PPMX_WRITES is off), so it makes no changes."
+# The scope a read needs, by list endpoint, as PPM Express names its token scopes.
+SCOPE_OF = {"resources": "resource:read", "ideas": "idea:read", "challenges": "challenge:read"}
+WHAT_OF = {"resources": "resources", "ideas": "ideas", "challenges": "challenges"}
 
 
 class ToolError(Exception):
@@ -69,9 +79,14 @@ class ToolError(Exception):
 
 
 class Context:
-    def __init__(self, client, settings, tables, token, hint=""):
+    """One caller's view. owner=True on the single-user (stdio) servers, where PPMX_MY_NAME names the one
+    person they serve; the multi-user HTTP service leaves it False, so "me" is only ever the token's own
+    user there."""
+
+    def __init__(self, client, settings, tables, token, hint="", owner=False):
         self.client, self.settings, self.tables = client, settings, tables
-        self.token, self.hint = token, hint
+        self.token, self.hint, self.owner = token, hint, owner
+        self._me = None
 
     @property
     def today(self):
@@ -85,6 +100,24 @@ class Context:
     def rows(self, name, params=None, **parts):
         entity = ENTITY_OF.get(name)
         return [codes_mod.decode(r, self.tables, entity) for r in records(self.fetch(name, params, **parts))]
+
+    def me(self):
+        """The token's own user, for "me": its user ID, the names it can go by, and how each was found."""
+        if self._me is None:
+            if not self.token:
+                raise ToolError(self.hint or "no personal access token")
+            who = self.client.whoami(self.token)
+            names, how = [], []
+            if who.get("fullName"):
+                names.append(who["fullName"])
+                how.append("full name from PPM Express")
+            if self.owner and self.settings.my_name:
+                names.append(self.settings.my_name)
+                how.append("PPMX_MY_NAME")
+            local = (who.get("email") or who.get("logonAccount") or "").split("@")[0].split("\\")[-1]
+            self._me = {"id": who.get("id"), "names": [norm(n) for n in names if norm(n)],
+                        "handle": re.sub(r"[^a-z]", "", local.lower()), "how": how, "scopes": who.get("scopes")}
+        return self._me
 
     def write(self, method, name, body, params=None, **parts):
         """POST or PATCH to PPM Express; refused when the server is read-only."""
@@ -109,7 +142,8 @@ def text_of(value):
     if value is None:
         return ""
     if isinstance(value, dict):
-        return " ".join(text_of(value.get(k)) for k in ("name", "Name", "title", "email", "id") if value.get(k))
+        return " ".join(text_of(value.get(k)) for k in ("fullName", "name", "Name", "title", "email", "id")
+                        if value.get(k))
     if isinstance(value, (list, tuple)):
         return " ".join(text_of(v) for v in value)
     return str(value)
@@ -119,6 +153,83 @@ def matches(row, role, wanted):
     if not wanted:
         return True
     return wanted.lower() in text_of(pick(row, role)[1]).lower()
+
+
+def norm(name):
+    return " ".join(str(name or "").lower().split())
+
+
+def name_forms(name):
+    """Ways an email or logon name is often made from a full name: alexrivera, arivera, riveraa, alexr."""
+    w = [x for x in re.split(r"[^a-z]+", str(name).lower()) if x]
+    if not w:
+        return set()
+    return {"".join(w), w[0][0] + w[-1], w[0] + w[-1], w[-1] + w[0][0], w[0] + w[-1][0]}
+
+
+def people(value):
+    """A people field's entries as a list, whatever shape it came in."""
+    if value in (None, "", []):
+        return []
+    return value if isinstance(value, list) else [value]
+
+
+def is_me(me, value):
+    """True when a people field holds the token's own user: by user ID, by a name it goes by (exactly,
+    any case), or by a full name its email or logon name is made from."""
+    for p in people(value):
+        pid = p.get("id") if isinstance(p, dict) else None
+        name = norm(p.get("fullName") or p.get("name") or p.get("Name")) if isinstance(p, dict) else norm(p)
+        if (pid and me.get("id") and str(pid).lower() == str(me["id"]).lower()) or (name and name in me["names"]):
+            return True
+        if name and len(me["handle"]) >= 3 and me["handle"] in name_forms(name):
+            return True
+    return False
+
+
+def person_matches(ctx, row, role, wanted):
+    """A person filter: "me" for the token's own user, otherwise part of a name (any case), matched
+    against each person's fullName (or name or email) in the field."""
+    if not wanted:
+        return True
+    value = pick(row, role)[1]
+    if norm(wanted) == "me":
+        return is_me(ctx.me(), value)
+    w = wanted.lower()
+    return any(w in text_of(p).lower() for p in people(value))
+
+
+def me_report(ctx):
+    """What a result says about "me": how the token's user was matched, and what to do when only the ID
+    and email were there to go on."""
+    me = ctx.me()
+    out = {"user_id": me.get("id"), "matched_by": ["user ID", "email or logon name"] + me["how"]}
+    if not me["names"]:
+        out["note"] = ("PPM Express's /me gives no full name, and people fields can hold resource IDs that "
+                       "differ from the user ID, so \"me\" matched by user ID and by names your email or logon "
+                       "name could be made from. " + (
+                           "Set PPMX_MY_NAME to your name as PPM Express shows it for an exact match."
+                           if ctx.owner else "If that misses you, filter by your name instead."))
+    return out
+
+
+def empty_note(ctx, name):
+    """Why a list PPM Express answered with nothing may be empty: a missing scope, or the account's own
+    PPM Express permissions (the endpoint takes no filters, per PPM Express's API description)."""
+    scope, what = SCOPE_OF[name], WHAT_OF[name]
+    try:
+        scopes = ctx.me().get("scopes") or []
+    except (PPMXError, ToolError):
+        scopes = []
+    if scopes and scope not in scopes:
+        return (f"PPM Express returned no {what}: the token doesn't have the {scope} scope. Create a token "
+                f"with {scope} in PPM Express > Automation.")
+    has = f"The token has the {scope} scope" if scopes else "PPM Express didn't list the token's scopes"
+    return (f"PPM Express returned no {what} at all. {has}, and this endpoint takes no filters or paging "
+            f"(per PPM Express's API description), so the empty list is what your PPM Express account may "
+            f"see: PPM Express applies the account's own permissions (its role and license) as well as the "
+            f"token's scopes. If you expect {what}, ask a PPM Express administrator for permission to view "
+            f"them; otherwise this tenant has none.")
 
 
 def day(value):
@@ -154,10 +265,11 @@ def is_done(row):
             if any(w in text_of(value).lower() for w in DONE_WORDS):
                 return True
             told = True
-    if row.get("IsCompleted") is True:
-        return True
-    if isinstance(row.get("IsCompleted"), bool):
-        told = True
+    for flag in ("IsCompleted", "IsComplete"):           # key dates: IsComplete (a Flag)
+        if row.get(flag) is True:
+            return True
+        if isinstance(row.get(flag), bool):
+            told = True
     return False if told else None
 
 
@@ -194,7 +306,7 @@ def sort_value(row, role):
     return text_of(value).lower()
 
 
-def page(rows, args, ctx, default_sort, roles):
+def page(rows, args, ctx, default_sort, roles, keep=()):
     total = len(rows)
     limit = min(int(args.get("limit") or ctx.settings.page_size), ctx.settings.max_rows)
     offset = min(int(args.get("offset") or 0), total)
@@ -204,7 +316,8 @@ def page(rows, args, ctx, default_sort, roles):
     ordered = [r for _, r in sorted([k for k in keyed if k[0] is not None], key=lambda k: k[0], reverse=desc)]
     ordered += [r for v, r in keyed if v is None]     # records without the value come last either way
     out = {"total": total, "offset": offset, "limit": limit, "sort": f"{role} {'desc' if desc else 'asc'}",
-           "items": [summarize(r, roles, args.get("fields")) for r in ordered[offset:offset + limit]]}
+           "items": [summarize(r, roles, list(keep) + list(args.get("fields") or []))
+                     for r in ordered[offset:offset + limit]]}
     if offset + limit < total:
         out["next_offset"] = offset + limit
     return out
@@ -220,25 +333,35 @@ def t_current_user(ctx, args):
     return out
 
 
+def with_me(out, ctx, args, keys):
+    """Add what "me" matched to a result when a person filter asked for "me"."""
+    if any(norm(args.get(k)) == "me" for k in keys):
+        out["me"] = me_report(ctx)
+    return out
+
+
 def t_portfolios(ctx, args):
     rows = [r for r in ctx.rows("portfolios")
-            if matches(r, "name", args.get("name_contains")) and matches(r, "manager", args.get("manager"))]
-    return page(rows, args, ctx, "name", SUMMARY["portfolios"])
+            if matches(r, "name", args.get("name_contains")) and person_matches(ctx, r, "manager", args.get("manager"))]
+    return with_me(page(rows, args, ctx, "name", SUMMARY["portfolios"]), ctx, args, ["manager"])
 
 
 def t_programs(ctx, args):
     rows = [r for r in ctx.rows("programs")
             if matches(r, "name", args.get("name_contains")) and matches(r, "portfolio", args.get("portfolio"))
-            and matches(r, "manager", args.get("manager"))]
-    return page(rows, args, ctx, "name", SUMMARY["programs"])
+            and person_matches(ctx, r, "manager", args.get("manager"))]
+    return with_me(page(rows, args, ctx, "name", SUMMARY["programs"]), ctx, args, ["manager"])
+
+
+def project_rows(ctx, args):
+    return [r for r in ctx.rows("projects")
+            if all(matches(r, role, args.get(arg)) for arg, role in (
+                ("name_contains", "name"), ("portfolio", "portfolio"), ("program", "program"), ("status", "status")))
+            and person_matches(ctx, r, "manager", args.get("manager"))]
 
 
 def t_projects(ctx, args):
-    rows = [r for r in ctx.rows("projects")
-            if all(matches(r, role, args.get(arg)) for arg, role in (
-                ("name_contains", "name"), ("portfolio", "portfolio"), ("program", "program"),
-                ("manager", "manager"), ("status", "status")))]
-    return page(rows, args, ctx, "name", SUMMARY["projects"])
+    return with_me(page(project_rows(ctx, args), args, ctx, "name", SUMMARY["projects"]), ctx, args, ["manager"])
 
 
 def t_project(ctx, args):
@@ -258,23 +381,107 @@ def t_project(ctx, args):
             if unknown:
                 out["notes"] = [f"{unknown} task(s) kept as open: their status is a code with no label yet"]
         out["tasks"] = page(tasks, each, ctx, "due", SUMMARY["tasks"])
+    if "deliverables" in include:
+        out["deliverables"] = page(ctx.rows("deliverables", id=pid), each, ctx, "due", SUMMARY["deliverables"])
     return out
 
 
-def t_tasks(ctx, args):
-    rows = [r for r in ctx.rows("tasks", id=args["project_id"])
-            if matches(r, "name", args.get("name_contains")) and matches(r, "assignee", args.get("assignee"))]
-    notes = []
+def due_filters(rows, args, ctx, notes, what="item"):
+    """open_only, overdue_only, and due_within_days, on the "due" role."""
     if args.get("open_only") or args.get("overdue_only"):
         rows, unknown = open_rows(rows)
         if unknown:
-            notes.append(f"{unknown} task(s) kept as open: their status is a code with no label yet")
+            notes.append(f"{unknown} {what}(s) kept as open: their status is a code with no label yet")
     if args.get("overdue_only"):
         rows = [r for r in rows if role_day(r, "due") and role_day(r, "due") < ctx.today]
     if args.get("due_within_days") is not None:
         end = ctx.today + datetime.timedelta(days=args["due_within_days"])
         rows = [r for r in rows if role_day(r, "due") and ctx.today <= role_day(r, "due") <= end]
+    return rows
+
+
+def t_tasks(ctx, args):
+    rows = [r for r in ctx.rows("tasks", id=args["project_id"])
+            if matches(r, "name", args.get("name_contains")) and person_matches(ctx, r, "assignee", args.get("assignee"))]
+    notes = []
+    rows = due_filters(rows, args, ctx, notes, "task")
     out = page(rows, args, ctx, "due", SUMMARY["tasks"])
+    if notes:
+        out["notes"] = notes
+    return with_me(out, ctx, args, ["assignee"])
+
+
+def t_deliverables(ctx, args):
+    rows = [r for r in ctx.rows("deliverables", id=args["project_id"])
+            if matches(r, "name", args.get("name_contains")) and matches(r, "status", args.get("status"))
+            and person_matches(ctx, r, "assignee", args.get("assignee"))]
+    notes = []
+    rows = due_filters(rows, args, ctx, notes, "deliverable")
+    out = page(rows, args, ctx, "due", SUMMARY["deliverables"])
+    if notes:
+        out["notes"] = notes
+    return with_me(out, ctx, args, ["assignee"])
+
+
+def t_deliverable(ctx, args):
+    found = ctx.rows("deliverable", id=args["project_id"], deliverable_id=args["deliverable_id"])
+    if not found:
+        raise ToolError("PPM Express returned no deliverable for that ID")
+    return {"project_id": args["project_id"], "deliverable": found[0]}
+
+
+def t_my_work(ctx, args):
+    """Tasks and deliverables assigned to the token's own user, across projects, bounded: at most
+    max_projects projects (PPMX_WORK_MAX_PROJECTS) and PPMX_WORK_SECONDS of scanning, and the client's
+    per-token rate limit throughout. The result says how many projects were in scope and scanned."""
+    started = time.monotonic()                        # the time limit counts the project list and /me too
+    me = ctx.me()
+    include = args.get("include") or ["tasks", "deliverables"]
+    cap = min(int(args.get("max_projects") or ctx.settings.work_max_projects), ctx.settings.work_max_projects)
+    projects = [r for r in project_rows(ctx, args) if r.get("id")]
+    if args.get("project_ids"):
+        wanted = {str(x).lower() for x in args["project_ids"]}
+        projects = [r for r in projects if str(r["id"]).lower() in wanted]
+    if args.get("open_only", True):
+        projects = [r for r in projects if is_done(r) is not True]
+    # Projects the user manages first, then the latest finishing: the likeliest to hold their work.
+    projects.sort(key=lambda r: (not is_me(me, pick(r, "manager")[1]), -(role_day(r, "finish") or
+                                                                         datetime.date.min).toordinal()))
+    items, scanned, failed, stopped = [], 0, 0, False
+    for proj in projects[:cap]:
+        if scanned and time.monotonic() - started > ctx.settings.work_seconds:
+            stopped = True
+            break
+        scanned += 1
+        pname = text_of(pick(proj, "name")[1])
+        for kind, name in (("task", "tasks"), ("deliverable", "deliverables")):
+            if name not in include:
+                continue
+            try:
+                rows = ctx.rows(name, id=proj["id"])
+            except PPMXError as e:
+                if e.status == 429:
+                    stopped = True
+                    break
+                failed += 1
+                continue
+            for r in rows:
+                if is_me(me, pick(r, "assignee")[1]):
+                    items.append(dict(r, kind=kind, project_id=proj["id"], project=pname))
+        if stopped:
+            break
+    notes = []
+    items = due_filters(items, dict(args, open_only=args.get("open_only", True)), ctx, notes)
+    out = page(items, args, ctx, "due", ["name", "status", "assignee", "due", "progress"],
+               keep=["kind", "project_id", "project"])
+    complete = scanned == len(projects) and not failed
+    out.update(projects_in_scope=len(projects), projects_scanned=scanned, complete=complete, me=me_report(ctx))
+    if len(projects) > scanned:
+        notes.append(f"Scanned {scanned} of {len(projects)} projects in scope"
+                     + (" before the time or rate limit" if stopped else f" (the cap is {cap})")
+                     + ": narrow it with name_contains, portfolio, program, manager, or project_ids.")
+    if failed:
+        notes.append(f"{failed} list(s) couldn't be read and were skipped.")
     if notes:
         out["notes"] = notes
     return out
@@ -292,19 +499,30 @@ def t_key_dates(ctx, args):
 
 def t_ideas(ctx, args):
     params = {PARAMS["challenge"]: args["challenge_id"]} if args.get("challenge_id") else None
-    rows = [r for r in ctx.rows("ideas", params)
-            if matches(r, "name", args.get("name_contains")) and matches(r, "stage", args.get("stage"))]
-    return page(rows, args, ctx, "name", SUMMARY["ideas"])
+    every = ctx.rows("ideas", params)
+    rows = [r for r in every if matches(r, "name", args.get("name_contains")) and matches(r, "stage", args.get("stage"))]
+    out = page(rows, args, ctx, "name", SUMMARY["ideas"])
+    if not every and not params:
+        out["explanation"] = empty_note(ctx, "ideas")
+    return out
 
 
 def t_challenges(ctx, args):
-    rows = [r for r in ctx.rows("challenges") if matches(r, "name", args.get("name_contains"))]
-    return page(rows, args, ctx, "name", SUMMARY["challenges"])
+    every = ctx.rows("challenges")
+    out = page([r for r in every if matches(r, "name", args.get("name_contains"))], args, ctx, "name",
+               SUMMARY["challenges"])
+    if not every:
+        out["explanation"] = empty_note(ctx, "challenges")
+    return out
 
 
 def t_resources(ctx, args):
-    rows = [r for r in ctx.rows("resources") if matches(r, "name", args.get("name_contains"))]
-    return page(rows, args, ctx, "name", SUMMARY["resources"])
+    every = ctx.rows("resources")
+    out = page([r for r in every if matches(r, "name", args.get("name_contains"))], args, ctx, "name",
+               SUMMARY["resources"])
+    if not every:
+        out["explanation"] = empty_note(ctx, "resources")
+    return out
 
 
 def t_fields(ctx, args):
@@ -383,11 +601,10 @@ def t_update_project(ctx, args):
 
 def t_create_task(ctx, args):
     attrs = attributes(ctx, "Task", args.get("fields"), args["name"])
+    body = {"attributes": attrs}
     if args.get("parent_task_id"):
-        value = ctx.write("POST", "tasks_bulk", [{"ParentID": args["parent_task_id"], "attributes": attrs}],
-                          id=args["project_id"])
-    else:
-        value = ctx.write("POST", "tasks", {"attributes": attrs}, id=args["project_id"])
+        body = {"parentId": args["parent_task_id"], "attributes": attrs}   # a sub-task (CreateTaskRequest)
+    value = ctx.write("POST", "tasks", body, id=args["project_id"])
     return written(ctx, "created", "task", value, attrs, "Task")
 
 
@@ -425,12 +642,16 @@ def t_update_idea(ctx, args):
 
 
 def t_idea_stage(ctx, args):
-    stage = codes_mod.encode("Stage", str(args["stage"]), ctx.tables, "Idea")
-    if isinstance(stage, bool) or not isinstance(stage, int):
-        table = codes_mod.table_for(ctx.tables, "Stage", "Idea") or {}
+    """POST {"stage": name}: PPM Express takes the stage's name (Draft, Proposed, Active, Selected,
+    NotSelected, Archived), given here as a name in any case and spacing, or as its number."""
+    table = codes_mod.table_for(ctx.tables, "Stage", "Idea") or codes_mod.TABLES["Idea.Stage"]
+    given = str(args["stage"]).strip()
+    label = table.get(int(given)) if given.lstrip("-").isdigit() else next(
+        (v for v in table.values() if v.replace(" ", "").lower() == given.replace(" ", "").lower()), None)
+    if label is None:
         raise ToolError("stage must be one of: " + ", ".join(table.values()) + " (or its number)")
-    value = ctx.write("POST", "idea_stage", {"Stage": stage}, id=args["idea_id"])
-    return written(ctx, "updated", "idea", value, ["Stage"], "Idea", args["idea_id"])
+    value = ctx.write("POST", "idea_stage", {"stage": label.replace(" ", "")}, id=args["idea_id"])
+    return written(ctx, "updated", "idea", value, ["stage"], "Idea", args["idea_id"])
 
 
 def t_create_record(ctx, args):
@@ -469,11 +690,22 @@ def _id(desc):
 
 
 ID = _id("The project's PPM Express ID.")
+
+
+def PERSON(role):  # noqa: N802 - a schema, like ID
+    return _text(f"Part of the {role}'s name (any case), or \"me\" for the token's own user.")
+
+
+def DUE(what):  # noqa: N802
+    return {"open_only": {"type": "boolean", "description": f"Leave out finished {what}."},
+            "overdue_only": {"type": "boolean", "description": f"Only unfinished {what} past their due date."},
+            "due_within_days": {"type": "integer", "minimum": 0, "maximum": 3650,
+                                "description": f"Only {what} due between today and this many days from now."}}
 NAME = _text("The name (or title).", 255)
 CHANGES = ("The fields by their keys (get_fields lists a tenant's keys, custom fields included), for example "
            '{"Description": "...", "StartDate": "2026-11-02", "Status": "At Risk", "Manager": "alex@example.com"}. '
            "Coded fields (Status, Progress, Priority, Risk, and the like) take their label or number; people "
-           "(Manager, AssignedTo) take a name, an email, or an ID; Portfolios and Programs take names or IDs; "
+           "(Manager, AssignedTo) take a name, an email, or an ID; Portfolio and Program take names or IDs; "
            "Tags take text. Dates are YYYY-MM-DD.")
 CONFIRM = " Changes PPM Express: say what you'll do and get the user's go-ahead first."
 
@@ -493,14 +725,14 @@ TOOLS = [
     {"name": "list_portfolios", "title": "PPM Express: portfolios", "kind": "read",
      "description": "Portfolios the token can see, filtered by name or manager, a page at a time.",
      "inputSchema": {"type": "object", "additionalProperties": False, "properties": {
-         "name_contains": _text("Part of the portfolio's name."), "manager": _text("Part of the manager's name."),
+         "name_contains": _text("Part of the portfolio's name."), "manager": PERSON("manager"),
          **_paging(["name", "manager", "status"])}},
      "handler": t_portfolios},
     {"name": "list_programs", "title": "PPM Express: programs", "kind": "read",
      "description": "Programs the token can see, filtered by name, portfolio, or manager.",
      "inputSchema": {"type": "object", "additionalProperties": False, "properties": {
          "name_contains": _text("Part of the program's name."), "portfolio": _text("Part of a portfolio's name."),
-         "manager": _text("Part of the manager's name."), **_paging(["name", "manager", "status"])}},
+         "manager": PERSON("manager"), **_paging(["name", "manager", "status"])}},
      "handler": t_programs},
     {"name": "list_projects", "title": "PPM Express: projects", "kind": "read",
      "description": "Projects the token can see, filtered by name, portfolio, program, manager, or status, "
@@ -508,17 +740,18 @@ TOOLS = [
                     "numbers under codes.",
      "inputSchema": {"type": "object", "additionalProperties": False, "properties": {
          "name_contains": _text("Part of the project's name."), "portfolio": _text("Part of a portfolio's name."),
-         "program": _text("Part of a program's name."), "manager": _text("Part of the manager's name."),
+         "program": _text("Part of a program's name."), "manager": PERSON("manager"),
          "status": _text("A status label (or code)."),
          **_paging(["name", "status", "manager", "start", "finish"])}},
      "handler": t_projects},
     {"name": "get_project", "title": "PPM Express: one project", "kind": "read",
-     "description": "One project's details, optionally with its key dates and its tasks (open ones unless "
-                    "open_tasks_only is false).",
+     "description": "One project's details, optionally with its key dates, deliverables, and tasks (open ones "
+                    "unless open_tasks_only is false).",
      "inputSchema": {"type": "object", "additionalProperties": False, "required": ["project_id"], "properties": {
          "project_id": ID,
-         "include": {"type": "array", "maxItems": 2, "items": {"type": "string", "enum": ["key_dates", "tasks"]},
-                     "description": "Also return the project's key dates, tasks, or both."},
+         "include": {"type": "array", "maxItems": 3,
+                     "items": {"type": "string", "enum": ["key_dates", "tasks", "deliverables"]},
+                     "description": "Also return the project's key dates, tasks, deliverables, or any of them."},
          "open_tasks_only": {"type": "boolean", "description": "Only tasks not finished (default true)."},
          "limit_each": {"type": "integer", "minimum": 1, "maximum": 5000,
                         "description": "Rows of key dates and of tasks (default 25)."}}},
@@ -528,13 +761,43 @@ TOOLS = [
                     "Tasks synced from Jira or Azure DevOps are included (read-only in PPM Express).",
      "inputSchema": {"type": "object", "additionalProperties": False, "required": ["project_id"], "properties": {
          "project_id": ID, "name_contains": _text("Part of the task's name."),
-         "assignee": _text("Part of the assignee's name."),
-         "open_only": {"type": "boolean", "description": "Leave out finished tasks."},
-         "overdue_only": {"type": "boolean", "description": "Only unfinished tasks past their due date."},
-         "due_within_days": {"type": "integer", "minimum": 0, "maximum": 3650,
-                             "description": "Only tasks due between today and this many days from now."},
+         "assignee": PERSON("assignee"), **DUE("tasks"),
          **_paging(["due", "start", "name", "status", "assignee"])}},
      "handler": t_tasks},
+    {"name": "list_deliverables", "title": "PPM Express: a project's deliverables", "kind": "read",
+     "description": "A project's deliverables, filtered by name, status, assignee (\"me\" for yourself), open, "
+                    "overdue, or due within some days.",
+     "inputSchema": {"type": "object", "additionalProperties": False, "required": ["project_id"], "properties": {
+         "project_id": ID, "name_contains": _text("Part of the deliverable's name."),
+         "status": _text("A status label (or code)."), "assignee": PERSON("assignee"), **DUE("deliverables"),
+         **_paging(["due", "name", "status", "assignee"])}},
+     "handler": t_deliverables},
+    {"name": "get_deliverable", "title": "PPM Express: one deliverable", "kind": "read",
+     "description": "One deliverable of a project, with all its fields.",
+     "inputSchema": {"type": "object", "additionalProperties": False, "required": ["project_id", "deliverable_id"],
+                     "properties": {"project_id": ID, "deliverable_id": _id("The deliverable's PPM Express ID.")}},
+     "handler": t_deliverable},
+    {"name": "list_my_work", "title": "PPM Express: my tasks and deliverables", "kind": "read",
+     "description": "Tasks and deliverables assigned to the token's own user, across projects: open ones unless "
+                    "open_only is false, optionally due within some days. Bounded: it scans at most "
+                    "max_projects projects (projects you manage first) within a time limit, and says how many "
+                    "it scanned; narrow it with the project filters to cover more.",
+     "inputSchema": {"type": "object", "additionalProperties": False, "properties": {
+         "include": {"type": "array", "maxItems": 2, "items": {"type": "string", "enum": ["tasks", "deliverables"]},
+                     "description": "What to look for (default both)."},
+         "open_only": {"type": "boolean", "description": "Only unfinished work in unfinished projects (default true)."},
+         "overdue_only": {"type": "boolean", "description": "Only unfinished work past its due date."},
+         "due_within_days": {"type": "integer", "minimum": 0, "maximum": 3650,
+                             "description": "Only work due between today and this many days from now."},
+         "name_contains": _text("Only projects whose name has this."), "portfolio": _text("Only this portfolio's projects."),
+         "program": _text("Only this program's projects."), "manager": PERSON("project manager"),
+         "status": _text("Only projects with this status label (or code)."),
+         "project_ids": {"type": "array", "maxItems": 50, "items": {"type": "string", "format": "uuid", "maxLength": 36},
+                         "description": "Only these projects (their PPM Express IDs)."},
+         "max_projects": {"type": "integer", "minimum": 1, "maximum": 200,
+                          "description": "Projects to scan at most (default and ceiling: PPMX_WORK_MAX_PROJECTS, 25)."},
+         **_paging(["due", "name", "status"])}},
+     "handler": t_my_work},
     {"name": "list_key_dates", "title": "PPM Express: a project's key dates", "kind": "read",
      "description": "A project's key dates (key dates, milestones, releases), filtered to upcoming or overdue "
                     "ones.",
@@ -558,7 +821,8 @@ TOOLS = [
          "name_contains": _text("Part of the challenge's name."), **_paging(["name", "status"])}},
      "handler": t_challenges},
     {"name": "list_resources", "title": "PPM Express: resources", "kind": "read",
-     "description": "Resources (people and roles), filtered by name.",
+     "description": "Resources (people and roles), filtered by name. When PPM Express sends none, the answer "
+                    "says why (a missing scope, or the account's own PPM Express permissions).",
      "inputSchema": {"type": "object", "additionalProperties": False, "properties": {
          "name_contains": _text("Part of the resource's name."), **_paging(["name", "email"])}},
      "handler": t_resources},

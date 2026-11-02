@@ -31,6 +31,19 @@ cat > kitmail <<'WRAP'
 APP="$HOME/Claude/Agents/kit/.install/platform/mac/mail/KitMail.app"
 out=$(/usr/bin/mktemp -t kitmail) err=$(/usr/bin/mktemp -t kitmail) oerr=$(/usr/bin/mktemp -t kitmail)
 trap 'rm -f "$out" "$err" "$oerr"' EXIT
+# inbox: the quick way first (kitmail_fast.py reads Mail's index through KitMessages.app), else ask Mail.
+# Each try is logged in .install/logs/mail.log, which kit doctor reads. KITMAIL_FAST=off skips it.
+FAST="$HOME/Claude/Agents/kit/.install/platform/mac/mail/kitmail_fast.py"
+if [ "${1:-}" = "inbox" ] && [ "${KITMAIL_FAST:-on}" != "off" ] && [ -f "$FAST" ]; then
+  MLOG="$HOME/Claude/Agents/kit/.install/logs/mail.log"
+  mkdir -p "${MLOG:h}"
+  if /usr/bin/python3 "$FAST" "$@" > "$out" 2> "$err"; then
+    print "$(date '+%Y-%m-%d %H:%M:%S') quick inbox ok" >> "$MLOG"
+    cat "$out"; exit 0
+  fi
+  print "$(date '+%Y-%m-%d %H:%M:%S') quick inbox unavailable ($(head -c 120 "$err" | tr '\n' ' '))" >> "$MLOG"
+  : > "$out"; : > "$err"
+fi
 /usr/bin/open -W -n -g --stdout "$out" --stderr "$err" "$APP" --args "$@" 2>"$oerr"
 if [ ! -s "$out" ] && [ ! -s "$err" ]; then cat "$oerr" >&2; exit 1; fi
 cat "$out"

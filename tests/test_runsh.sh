@@ -61,6 +61,10 @@ grep -q "worklist run hit its time limit" "$LOG" && ok "timeout: stopped at RUN_
 grep -q "rc=142" "$LOG" && ok "timeout: exit code 142 recorded" || bad "timeout rc"
 grep -q "limit and stopped before writing anything" "$KIT/.install/logs/failure-worklist.txt" 2>/dev/null \
   && ok "timeout: failure notice says it hit the limit" || bad "timeout notice"
+grep -q "Raise RUN_TIMEOUT_WORKLIST in the config" "$KIT/.install/logs/failure-worklist.txt" 2>/dev/null \
+  && ok "timeout: failure notice names the real setting (RUN_TIMEOUT_WORKLIST)" || bad "timeout notice setting name"
+grep -q 'RUN_TIMEOUT_\${(U)MODE}' "$HERE/platform/mac/morning/run.sh" && bad "run.sh still names RUN_TIMEOUT_<MODE>" \
+  || ok "run.sh's notice never names a RUN_TIMEOUT_<MODE> setting that doesn't exist"
 grep -q 'RUN_TIMEOUT_WEEKLY:-3000' "$HERE/platform/mac/morning/run.sh" && ok "weekly default limit is 50 minutes" || bad "weekly default"
 
 # ---- lock ------------------------------------------------------------------------------------
@@ -330,6 +334,20 @@ fresh; rm -f "$KIT/briefs/extra-arch-digest.txt"; run weekly
 [ ! -f "$KIT/briefs/extra-arch-digest.txt" ] && grep -q "start weekly" "$LOG" \
   && ok "digest: a failed digest leaves no section and the review still runs" || bad "digest failure"
 rm -f "$KIT/.install/shared/bin/kit-digest"
+
+# ---- connection check: probes ANTHROPIC_BASE_URL, through HTTPS_PROXY ---------------------------
+printf '#!/bin/bash\nprintf "%%s\\n" "$@" > "%s/curl-args.txt"\nexit 0\n' "$S" > "$S/home/.local/bin/curl"
+chmod +x "$S/home/.local/bin/curl"
+printf 'OUTLOOK_CHECK="off"\n' > "$M/config"
+fresh; ANTHROPIC_BASE_URL="https://llm-gateway.example.test" HTTPS_PROXY="http://proxy.example.test:8080" run morning
+grep -qx "https://llm-gateway.example.test" "$S/curl-args.txt" && ok "connection check probes ANTHROPIC_BASE_URL" \
+  || { bad "probe URL"; cat "$S/curl-args.txt"; }
+grep -A1 -x -- "--proxy" "$S/curl-args.txt" | grep -qx "http://proxy.example.test:8080" \
+  && ok "connection check goes through HTTPS_PROXY" || bad "probe proxy"
+fresh; env -u ANTHROPIC_BASE_URL -u HTTPS_PROXY -u https_proxy HOME="$S/home" zsh "$HERE/platform/mac/morning/run.sh" morning >/dev/null 2>&1
+grep -qx "https://api.anthropic.com" "$S/curl-args.txt" && ! grep -qx -- "--proxy" "$S/curl-args.txt" \
+  && ok "with neither set: api.anthropic.com, no proxy" || { bad "default probe"; cat "$S/curl-args.txt"; }
+rm -f "$S/home/.local/bin/curl"
 
 echo "run.sh tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

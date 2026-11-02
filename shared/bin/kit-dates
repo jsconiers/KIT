@@ -339,6 +339,9 @@ def cmd_json(argv):
 
 def main(argv):
     cmds = {"all": cmd_all, "add": cmd_add, "remove": cmd_remove, "brief": cmd_brief}
+    if argv[:1] in (["-h"], ["--help"], ["help"]):
+        print(__doc__)
+        return 0
     try:
         if argv and argv[0] in cmds:
             return cmds[argv[0]](argv[1:])

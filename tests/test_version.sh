@@ -58,7 +58,9 @@ ok("`zz-test-agent`" in text and "`kit-zztest`" in text, "notes list new agents 
 # a version change with a changelog section
 notes.write_text("Shown in the brief for 2026-01-01.\n")
 (work / "VERSION").write_text("9.9.0\n")
-cl = (work / "CHANGELOG.md").read_text().replace("## [Unreleased]", "## [Unreleased]\n\n## [9.9.0] - 2026-12-31\n\n### Added\n- Testing release notes.", 1)
+import re
+cl = re.sub(r"(?m)^## \[", "## [9.9.0] - 2026-12-31\n\n### Added\n- Testing release notes.\n\n## [",
+            (work / "CHANGELOG.md").read_text(), count=1)   # before the first heading, Unreleased or not
 (work / "CHANGELOG.md").write_text(cl)
 git(work, "add", "-A"); git(work, "commit", "-qm", "Release 9.9.0")
 r = install(); text = notes.read_text()

@@ -471,15 +471,31 @@ def cmd_review(argv):
     return 0
 
 
+def kitcal_command():
+    """kitcal as the start of a command, or None: on PATH (kitcal.cmd on Windows), else where the installer
+    puts it: ~/.local/bin/kitcal on macOS; on Windows the command shim in .install\\platform\\windows\\bin, or
+    kitcal.py itself."""
+    exe = shutil.which("kitcal")
+    if exe:
+        return [sys.executable, exe] if exe.endswith(".py") else [exe]
+    if os.name == "nt":
+        win = KIT / ".install" / "platform" / "windows"
+        if (win / "bin" / "kitcal.cmd").exists():
+            return [str(win / "bin" / "kitcal.cmd")]
+        if (win / "calendar" / "kitcal.py").exists():
+            return [sys.executable, str(win / "calendar" / "kitcal.py")]
+        return None
+    mac = pathlib.Path.home() / ".local/bin/kitcal"
+    return [str(mac)] if mac.exists() else None
+
+
 def todays_events():
-    exe = shutil.which("kitcal") or str(pathlib.Path.home() / ".local/bin/kitcal")
-    if not os.path.exists(exe) and not shutil.which("kitcal"):
+    kitcal = kitcal_command()
+    if not kitcal:
         return []
-    cmd = [exe, "events", "--from", today().isoformat(), "--to", today().isoformat()]
-    if exe.endswith(".py"):
-        cmd = [sys.executable] + cmd
+    cmd = kitcal + ["events", "--from", today().isoformat(), "--to", today().isoformat()]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
         return json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip() else []
     except (OSError, subprocess.SubprocessError, ValueError):
         return []

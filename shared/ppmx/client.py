@@ -12,6 +12,7 @@ import collections
 import copy
 import email.utils
 import hashlib
+import http.client
 import json
 import re
 import threading
@@ -22,35 +23,40 @@ import urllib.request
 
 from . import __version__
 
-# Paths under the tenant's base URL (https://<host>/@<tenant>/v1.0), from PPM Express's Public API article
-# and Microsoft's PPM Express connector reference. PROVISIONAL: check each against your tenant's
-# endpoint reference (PPM Express > Automation > Swagger) before live use. This table is the one place to
-# correct them. Reads use GET; the same paths take POST (a new record, under "attributes") and PATCH (a
-# change, under "updates").
+# Paths under the tenant's base URL (https://<host>/@<tenant>/v1.0). CONFIRMED on 02-Nov-2026 against PPM
+# Express's OpenAPI 3.0 description (<host>/v1.0/swagger.json, 72 paths, all lowercase) and, for the reads,
+# against a live tenant. This table is the one place to correct them. Reads use GET; the same paths take
+# POST (a new record, under "attributes"; a sub-task adds "parentId") and PATCH (a change, under "updates").
+# Lists come back whole as {"data": [...]}: the API takes no paging parameters on any list used here (only
+# the external-system task list pages, with pageSize and pageNumber, and Kit doesn't use it).
 ENDPOINTS = {
-    "me": "Me",
-    "portfolios": "Portfolios",
-    "portfolio": "Portfolios/{id}",
-    "programs": "Programs",
-    "program": "Programs/{id}",
-    "projects": "Projects",
-    "project": "Projects/{id}",
-    "tasks": "Projects/{id}/Tasks",
-    "task": "Projects/{id}/Tasks/{task_id}",
-    "tasks_bulk": "Projects/{id}/Tasks/bulk",          # sub-tasks: a list of {ParentID, attributes}
-    "key_dates": "Projects/{id}/KeyDates",
-    "key_date": "Projects/{id}/KeyDates/{key_date_id}",
-    "ideas": "Ideas",
-    "idea": "Ideas/{id}",
-    "idea_stage": "Ideas/{id}/Stage",                  # body {"Stage": n}
-    "challenges": "Challenges",
-    "challenge": "Challenges/{id}",
-    "resources": "Resources",
-    "resource": "Resources/{id}",
-    "fields": "Fields/{entity}",
+    "me": "me",
+    "user": "users/{id}",                              # needs user-list permission in PPM Express (often 403)
+    "portfolios": "portfolios",
+    "portfolio": "portfolios/{id}",
+    "programs": "programs",
+    "program": "programs/{id}",
+    "projects": "projects",
+    "project": "projects/{id}",
+    "tasks": "projects/{id}/tasks",
+    "task": "projects/{id}/tasks/{task_id}",
+    "key_dates": "projects/{id}/keydates",
+    "key_date": "projects/{id}/keydates/{key_date_id}",
+    "deliverables": "projects/{id}/deliverables",
+    "deliverable": "projects/{id}/deliverables/{deliverable_id}",
+    "ideas": "ideas",
+    "idea": "ideas/{id}",
+    "idea_stage": "ideas/{id}/stage",                  # body {"stage": "Active"}: the stage's name, no spaces
+    "challenges": "challenges",
+    "challenge": "challenges/{id}",
+    "resources": "resources",
+    "resource": "resources/{id}",
+    "fields": "fields/{entity}",
 }
-# Query parameter names, equally provisional.
+# Query parameter names (confirmed: GET and POST ideas take challengeId).
 PARAMS = {"challenge": "challengeId"}
+# The token's /me answer is kept this long per token (for "me" in person filters), never across tokens.
+ME_SECONDS = 600
 
 UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 ENTITY = re.compile(r"^[A-Za-z]{1,40}$")
@@ -58,7 +64,6 @@ TOKEN = re.compile(r"^[\x21-\x7e]{8,4096}$")        # printable, no spaces: noth
 RETRY_STATUS = {429, 502, 503, 504}
 WRITE_RETRY_STATUS = {429, 503}                      # PPM Express said it didn't take the request
 MAX_BODY = 262144                                    # the largest create or update this client sends
-MAX_PAGES = 50
 MAX_REPLY = 16 * 1048576
 CACHE_ENTRIES = 1000
 
@@ -93,6 +98,7 @@ class Client:
         self._lock = threading.Lock()
         self._cache = collections.OrderedDict()       # (token key, url) -> (expires, value)
         self._calls = {}                              # token key -> times of recent requests
+        self._me = {}                                 # token key -> (expires, who the token is)
         self.requests = 0                             # requests sent to PPM Express (tests read it)
 
     # ---- paths
@@ -119,26 +125,41 @@ class Client:
         return url
 
     def get(self, token, name, params=None, **parts):
-        """The JSON PPM Express returns for one endpoint. A list that pages is followed through its
-        next links on the same base URL (up to MAX_PAGES) and returned as one {"data": [...]}."""
+        """The JSON PPM Express returns for one endpoint (a list comes whole, as {"data": [...]})."""
         url = self._url(token, name, params, parts)
         key = (token_key(token), url)
         hit = self._cached(key)
         if hit is not None:
             return hit
         value = self._request(token, url)
-        if isinstance(value, dict) and isinstance(value.get("data"), list):
-            items, page, pages = list(value["data"]), value, 1
-            while pages < MAX_PAGES:
-                nxt = next_link(page)
-                if not nxt or not nxt.startswith(self.settings.base_url + "/"):
-                    break
-                page = self._request(token, nxt)
-                items.extend((page.get("data") or []) if isinstance(page, dict) else [])
-                pages += 1
-            value = {"data": items}
         self._store(key, value)
         return copy.deepcopy(value)
+
+    def whoami(self, token):
+        """Who a token belongs to, for "me" in person filters: {"id", "email", "logonAccount", "fullName",
+        "scopes"}, from /me (and users/{id} for the full name, where PPM Express allows it). Kept for
+        ME_SECONDS per token, never shared between tokens."""
+        tk = token_key(token)
+        with self._lock:
+            hit = self._me.get(tk)
+            if hit and hit[0] > self._clock():
+                return copy.deepcopy(hit[1])
+        rec = (records(self.get(token, "me")) or [{}])[0]
+        who = {k: rec.get(k) for k in ("id", "email", "logonAccount") if rec.get(k)}
+        tok = rec.get("token") if isinstance(rec.get("token"), dict) else {}
+        who["scopes"] = [str(x) for x in tok.get("scopes") or []]
+        who["fullName"] = rec.get("fullName") or rec.get("displayName") or rec.get("name") or ""
+        if not who["fullName"] and who.get("id") and UUID.match(str(who["id"])):
+            try:
+                user = (records(self.get(token, "user", id=who["id"])) or [{}])[0]
+                who["fullName"] = user.get("fullName") or ""
+            except PPMXError:
+                pass                                  # 403 without user-list permission: go without
+        with self._lock:
+            self._me[tk] = (self._clock() + ME_SECONDS, copy.deepcopy(who))
+            if len(self._me) > CACHE_ENTRIES:
+                self._me.pop(next(iter(self._me)))
+        return who
 
     def send(self, token, method, name, body, params=None, **parts):
         """POST (create) or PATCH (update) one endpoint with a JSON body; the JSON PPM Express answers
@@ -180,8 +201,11 @@ class Client:
                 if e.code in (WRITE_RETRY_STATUS if write else RETRY_STATUS) and attempt < 3:
                     self._sleep(retry_after(e.headers.get("Retry-After") if e.headers else None, attempt))
                     continue
+                if write and e.code >= 500:           # a server error after it got the change: it may be made
+                    raise PPMXError(e.code, f"couldn't confirm PPM Express made the change ({http_message(e)}); "
+                                            "check there before trying again") from None
                 raise PPMXError(e.code, http_message(e)) from None
-            except (urllib.error.URLError, TimeoutError, OSError) as e:
+            except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as e:
                 if write:                             # it may have arrived: never send it twice
                     raise PPMXError(504, f"couldn't confirm PPM Express made the change ({reason(e)}); check "
                                          "there before trying again") from None
@@ -240,16 +264,6 @@ class Client:
                 self._cache.popitem(last=False)
 
 
-def next_link(page):
-    if not isinstance(page, dict):
-        return None
-    links = page.get("links") if isinstance(page.get("links"), dict) else {}
-    for value in (page.get("nextLink"), page.get("@odata.nextLink"), links.get("next")):
-        if isinstance(value, str) and value:
-            return value
-    return None
-
-
 def records(value):
     """The items of a PPM Express answer, each flattened to {"id": ..., <attributes>, <other fields>}."""
     data = value.get("data") if isinstance(value, dict) and "data" in value else value
@@ -296,7 +310,8 @@ def http_message(e):
                 "access token in PPM Express > Automation.")
     if code == 403:
         return ("PPM Express refused: the token's scopes or your PPM Express permissions don't allow this "
-                "(a change needs a token with write scopes, such as Write Projects).")
+                "(a read needs the matching read scope, such as project:read, and a change its write scope, "
+                "such as project:write; PPM Express's own permissions for your account apply too).")
     if code == 404:
         return "PPM Express has no such item, or this tenant doesn't offer that endpoint."
     if code == 429:

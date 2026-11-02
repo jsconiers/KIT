@@ -51,7 +51,7 @@ ENV.update(KIT_DIR=str(kit), PPMX_TOKEN_KEYCHAIN="off", PPMX_TOKEN=TOKEN, PPMX_C
 
 # The fake's people: Sam Lee is 130% allocated; Alex appears as "Rivera, Alex" on a task; Dana only by address;
 # Blake Chen isn't on the team.
-for r in fake.data["resources"]:
+for r in fake.data["resources"]["alex"]:
     if r["attributes"]["Name"] == "Sam Lee":
         r["attributes"]["Allocation"] = 130
 tasks = {t["id"]: t for t in fake.data["tasks"][F.A1]}
@@ -259,7 +259,7 @@ ok(people["Alex Rivera"]["load"] == "2 projects, 1 open task" and people["Alex"]
    "with Alex Rivera on the team too, Alex doesn't take Alex Chen as the one left over",
    (people.get("Alex"), people.get("Alex Rivera"), m.get("names_to_check")))
 # Shares: 1.0 and 0.6 in one tenant are 100% and 60%; next to 130, 1.0 is 1%.
-res = {r["attributes"]["Name"]: r["attributes"] for r in fake.data["resources"]}
+res = {r["attributes"]["Name"]: r["attributes"] for r in fake.data["resources"]["alex"]}
 res["Sam Lee"]["Allocation"], res["Alex Rivera"]["Allocation"] = 1.0, 0.6
 m, raw = mapjson()
 people = {p["name"]: p for p in m.get("people", [])}

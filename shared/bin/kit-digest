@@ -31,8 +31,8 @@ Sections, each "Nothing this month." when it's empty:
 Looking ahead counts from the end of the month (from today, for this month). A missing source never stops
 it: its section says nothing this month, and the digest lists what it couldn't read.
 
-On macOS, with ARCH_DIGEST="on" in Kit's config, the first weekly review of each month runs
-`kit-digest --write --month last --brief`; on Windows run it yourself. Work content, tagged [work]; never
+With ARCH_DIGEST="on" in Kit's config, the first weekly review of each month (run.sh on macOS, run.ps1 on
+Windows) runs `kit-digest --write --month last --brief`. Work content, tagged [work]; never
 in a text; nothing is sent. KIT_TODAY sets the day (for tests).
 """
 import argparse

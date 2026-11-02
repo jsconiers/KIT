@@ -3,7 +3,9 @@
 
   kit-textback watch              the loop the launchd job runs: wait for texts, answer them
   kit-textback once               one check, then exit
-  kit-textback test "kit today"   answer a text as if it came in, and print the reply (sends nothing)
+  kit-textback test "kit today"   answer a text as if it came in, and print the reply: a dry run that
+                                  sends nothing, confirms no code, and changes nothing (a question
+                                  still asks Claude, read-only)
   kit-textback status             is it set up and working; what it answered last
   kit-textback log [N]            the last N texts it answered (default 20)
   kit-textback sent TEXT          note a text Kit sent (kit-text and deliver.py do this), so Kit
@@ -14,7 +16,7 @@ ID), starting with "Kit": "Kit today", "kit todo call the bank fri", "Kit, what'
 KitMessages.app, the only thing given Full Disk Access, reads that conversation; this script
 answers. Commands: help, today, tomorrow, week, todos, todo (or add) TEXT [due], done N, status,
 brief, mail [HOURS] (unread senders and subjects), find WORDS [in COLLECTION] and find more (the
-library), send N (that document to your phone), sermons on PASSAGE, dates, date NAME MM-DD [what]
+library), send N (that document to your phone, confirmed by code), sermons on PASSAGE, dates, date NAME MM-DD [what]
 [card|call|gift|note] [work], renewals, renew NAME DATE, renewed NAME, touch (who you're due to call;
 touch add NAME every DAYS, touch snooze NAME DAYS), talked to NAME [yesterday|friday] (also called,
 texted, spoke), approve CODE ITEMS (the work list's phone approval), plus any plug-in
@@ -22,19 +24,22 @@ commands in .install/textback.d/*.py (each defines COMMANDS, a dict of word -> f
 -> reply, and may define today(ctx) -> lines and ACTIONS, below).
 
 Changes outside Kit's own notes are confirmed first: "event WHAT WHEN" (add to your calendar),
-"move EVENT to WHEN", and "draft to ADDRESS ABOUT" (a Mail draft) each reply with what they'd do
+"move EVENT to WHEN", "draft to ADDRESS ABOUT" (a Mail draft), and "send N" (a document to your
+phone; work and confidential documents never go) each reply with what they'd do
 and a code; nothing happens until you text "kit yes CODE" (codes are random, work once, and last 15
 minutes; "kit no" drops them). Only the calendars in .install/calendar/config.json (default and
 secondary) can change, never an event with invitees or a repeating one, and a draft only opens in
 Mail for you to send. A plug-in's ACTIONS (kind -> function(args, extra, ctx)) and ctx["propose"]
 work the same way. Anything else is a question for Claude, answered from Kit's files and the library
-catalog with read-only tools (TEXTBACK_ASK="off" turns that off). Texts in other conversations, texts
+catalog with read-only tools, confined to Kit's folder (TEXTBACK_ASK="off" turns that off). The
+library runs in text-safe mode for texts: work and confidential documents, and Kit's folders closed to
+texts (TEXT_CLOSED below), are refused. Texts in other conversations, texts
 that don't start with "Kit", and Kit's own texts are ignored. It never sends mail, trades, deletes,
 or installs anything, and replies only to you.
 
 Settings (shared/morning/config): TEXTBACK="on" to answer (off by default), TEXTBACK_ASK,
 TEXTBACK_MODEL (default sonnet), TEXTBACK_PARSE_MODEL (reading events out of a text, default haiku),
-TEXTBACK_MAX_PER_HOUR (default 30); IMESSAGE_TO and
+TEXTBACK_MAX_PER_HOUR (default 30; a value that isn't a number means 30); IMESSAGE_TO and
 IMESSAGE_TO_ALT say which conversation is yours. Log: .install/logs/textback.log. macOS only.
 """
 import base64
@@ -65,6 +70,12 @@ PAUSED = INSTALL / "PAUSED"
 PATH = (f"{pathlib.Path.home()}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
 TRIGGER = re.compile(r"^\s*kit\b[\s,:;.!-]*(.*)$", re.I | re.S)
 PREFIX = "Kit · "
+# Kit's folders closed to texted questions; kit-library's text-safe mode keeps the same list.
+TEXT_CLOSED = ("care", "letters", "feedback", ".install", "journal", "receipts", "church", "memory/personal")
+SAFE_ENV = {"KIT_LIBRARY_SAFE": "1"}
+DRY = False          # kit-textback test: nothing is sent, confirmed, or changed
+# Subcommands that only read; under a dry run anything else is described instead of run.
+READ_SUBS = {"events", "inbox", "search", "find", "show", "check", "list", "status", "find-generic-password"}
 MAC_IMESSAGE = '''
 on run argv
   tell application "Messages"
@@ -76,19 +87,35 @@ end run
 
 
 # ------------------------------------------------------------------ basics
+def shell_value(raw):
+    """A value as the shell reads it from a config line: "x", 'x', or x, with any # comment after it
+    (as kit-ppmx reads it). None when it can't be read (an unclosed quote)."""
+    raw = raw.strip()
+    if raw[:1] in ("'", '"'):
+        end = raw.find(raw[0], 1)
+        return raw[1:end] if end > 0 else None
+    return re.split(r"\s#", raw, maxsplit=1)[0].strip()
+
+
 def read_config():
     cfg = {}
     if CONFIG.exists():
         for line in CONFIG.read_text(errors="replace").splitlines():
-            t = line.strip()
-            if not t or t.startswith("#") or "=" not in t:
+            m = re.match(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$", line)
+            if not m:
                 continue
-            k, v = t.split("=", 1)
-            v = v.strip()
-            if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
-                v = v[1:-1]
-            cfg[k.strip()] = v
+            v = shell_value(m.group(2))
+            cfg[m.group(1)] = "" if v is None else v
     return cfg
+
+
+def max_per_hour(cfg):
+    """TEXTBACK_MAX_PER_HOUR, or 30 when it isn't a whole number above 0."""
+    raw = str(cfg.get("TEXTBACK_MAX_PER_HOUR") or "30").strip()
+    if raw.isdigit() and int(raw) > 0:
+        return int(raw)
+    log(f"TEXTBACK_MAX_PER_HOUR={raw!r} isn't a number; using 30")
+    return 30
 
 
 def log(msg):
@@ -182,7 +209,21 @@ def body_text(b64):
     return blob[k:k + n].decode("utf-8", "replace")
 
 
+def changes(cmd):
+    """Whether a command would change something (a to-do, a date, a calendar, a draft, a file)."""
+    args = list(cmd[2:] if cmd[:1] == [sys.executable] else cmd[1:])
+    first = next((a for a in args if not a.startswith("-") and not a.isdigit()), None)
+    name = os.path.basename(str(cmd[1] if cmd[:1] == [sys.executable] else cmd[0]))
+    if name == "kit-cost":
+        return False                          # a paid call is always recorded, even in a test
+    return first is not None and first not in READ_SUBS
+
+
 def run(cmd, timeout=60, cwd=None, env=None):
+    if DRY and changes(cmd):
+        shown = [os.path.basename(str(c)) for c in cmd[1:2]] + [str(c) for c in cmd[2:]] \
+            if cmd[:1] == [sys.executable] else [str(c) for c in cmd]
+        return 0, f"(test: would run: {' '.join(shown)})", ""
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd,
                            env=env or dict(os.environ, PATH=PATH))
@@ -200,7 +241,7 @@ def send(text, cfg, dry=False):
     msg = text if text.startswith(PREFIX) else PREFIX + text
     if len(msg) > 1600:
         msg = msg[:1590].rstrip() + " ..."
-    if dry:
+    if dry or DRY:
         return msg
     for to in (cfg.get("IMESSAGE_TO", ""), cfg.get("IMESSAGE_TO_ALT", "")):
         if not to:
@@ -497,7 +538,7 @@ def cmd_week(args, ctx):
 
 
 def library(args):
-    rc, out, err = run(tool("kit-library") + args, timeout=90)
+    rc, out, err = run(tool("kit-library") + args, timeout=90, env=dict(os.environ, PATH=PATH, **SAFE_ENV))
     if rc != 0:
         return None, (err or out or "the library isn't set up").replace("kit-library: ", "")
     try:
@@ -567,6 +608,8 @@ end run
 
 def send_file(path, cfg):
     """Text a file to the owner (and only the owner). True if Messages took it."""
+    if DRY:
+        return True
     for to in (cfg.get("IMESSAGE_TO", ""), cfg.get("IMESSAGE_TO_ALT", "")):
         if not to:
             continue
@@ -582,14 +625,25 @@ def send_file(path, cfg):
 
 
 def cmd_send(args, ctx):
-    """kit send 2: the document numbered 2 in your last find (or sermons) list, to your phone."""
+    """kit send 2: the document numbered 2 in your last find (or sermons) list, to your phone, once you
+    confirm with the code ("kit yes CODE"), like any other change that leaves the Mac."""
     st = ctx.setdefault("state", {})
     if not args or not args[0].isdigit():
         return "Which one? Text kit find <words> first, then: kit send 2"
     ident = (st.get("last_ids") or {}).get(args[0])
     if not ident:
         return "I don't have that number from your last search. Text kit find <words> first."
-    rc, out, err = run(tool("kit-library") + ["fetch", str(ident), "--to-phone", "--json"], timeout=240)
+    data, err = library(["show", str(ident), "--json"])
+    if err:
+        return f"I can't send that one: {err[:200]}."
+    return ctx.get("propose", propose)("library-send", {"id": ident},
+                                       f"Send {data.get('title') or '#' + str(ident)} to your phone.")
+
+
+def do_library_send(a, extra, ctx):
+    ident = a["id"]
+    rc, out, err = run(tool("kit-library") + ["fetch", str(ident), "--to-phone", "--json"], timeout=240,
+                       env=dict(os.environ, PATH=PATH, **SAFE_ENV))
     try:
         data = json.loads(out.strip().splitlines()[-1]) if rc == 0 and out.strip() else None
     except (ValueError, IndexError):
@@ -651,6 +705,8 @@ def cmd_approve(args, ctx):
         import kit_inbox
     except ImportError:
         return "Approvals aren't set up here."
+    if DRY:
+        return "(test: would approve " + " ".join(args) + "; nothing was approved)"
     ok, msg = kit_inbox.handle_approval("approve " + " ".join(args), kit=KIT)
     return ("Done: " if ok else "Not approved: ") + msg + (". I'll act on it in the next session with you." if ok else ".")
 
@@ -679,6 +735,8 @@ def pending_save(p):
 
 def propose(kind, args, summary):
     import secrets
+    if DRY:
+        return f"{summary}\n(test: a code would be saved here; nothing was.)"
     p = pending_load()
     code = "".join(secrets.choice(CODE_CHARS) for _ in range(4))
     p[code] = {"kind": kind, "args": args, "summary": summary, "expires": time.time() + PENDING_MINUTES * 60}
@@ -698,6 +756,9 @@ def cmd_yes(args, ctx):
         used += 1
     code = code[:4]
     p = pending_load()
+    if DRY:
+        item = p.get(code)
+        return f"(test: would confirm: {item['summary']})" if item else "(test: no such code; nothing was confirmed)"
     item = p.pop(code, None)
     pending_save(p)
     if not item:
@@ -710,6 +771,8 @@ def cmd_yes(args, ctx):
 
 
 def cmd_no(args, ctx):
+    if DRY:
+        return "(test: would drop the waiting codes; nothing was dropped)"
     p = pending_load()
     gone = [c for c in [a.upper().strip(".,!?") for a in args] if p.pop(c, None)] if args else list(p)
     if not args:
@@ -913,7 +976,8 @@ def do_mail_draft(a, extra, ctx):
     return "The draft is open in Mail on the Mac. Review it and send it from there."
 
 
-ACTIONS = {"calendar-add": do_calendar_add, "calendar-move": do_calendar_move, "mail-draft": do_mail_draft}
+ACTIONS = {"calendar-add": do_calendar_add, "calendar-move": do_calendar_move, "mail-draft": do_mail_draft,
+           "library-send": do_library_send}
 
 
 COMMANDS = {"help": cmd_help, "?": cmd_help, "commands": cmd_help, "today": cmd_today,
@@ -976,25 +1040,18 @@ def ask(question, ctx):
     model = cfg.get("TEXTBACK_MODEL") or "sonnet"
     fd, out_path = tempfile.mkstemp(prefix="kit-textback-", suffix=".json")
     os.close(fd)
-    env = dict(os.environ, PATH=PATH)
+    env = dict(os.environ, PATH=PATH, **SAFE_ENV)    # kit-library show and search refuse closed documents
     if not env.get("CLAUDE_CODE_OAUTH_TOKEN"):
         rc, tok, _ = run(["security", "find-generic-password", "-s", "kit-claude-token", "-w"], timeout=15)
         if rc == 0 and tok:
             env["CLAUDE_CODE_OAUTH_TOKEN"] = tok
     # Only the rules named here apply: --setting-sources leaves out ~/.claude/settings.json, whose allow
     # rules would otherwise add to this list (kit-feedback, kit-visits, kit-touch, kitmail, ...), so Bash
-    # is limited to the two library commands. Letters, receipts, the journal, board minutes (church/), and
-    # personal notes stay closed to texts (security review K-03, 29-Oct-2026).
-    cmd = ["claude", "-p", prompt, "--output-format", "json", "--model", model,
-           "--setting-sources", "project,local",
-           "--strict-mcp-config", "--mcp-config", '{"mcpServers": {}}',
-           "--allowedTools", "Read(~/Claude/Agents/kit/**)", "Glob", "Grep", "Bash(kit-library search:*)",
-           "Bash(kit-library show:*)",
-           "--disallowedTools", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Task",
-           "Agent", "Read(~/Claude/Agents/kit/care/**)", "Read(~/Claude/Agents/kit/letters/**)",
-           "Read(~/Claude/Agents/kit/feedback/**)", "Read(~/Claude/Agents/kit/.install/**)",
-           "Read(~/Claude/Agents/kit/journal/**)", "Read(~/Claude/Agents/kit/receipts/**)",
-           "Read(~/Claude/Agents/kit/church/**)", "Read(~/Claude/Agents/kit/memory/personal/**)"]
+    # is limited to the two library commands, which run in text-safe mode (KIT_LIBRARY_SAFE). Letters,
+    # receipts, the journal, board minutes (church/), and personal notes stay closed to texts (security
+    # review K-03, 29-Oct-2026). Glob and Grep aren't allowed by name, so they reach only Kit's folder (the
+    # working folder) and the Read rules below, never the rest of the disk; the Read deny rules cover them.
+    cmd = ask_command(prompt, model)
     started = time.time()
     try:
         with open(out_path, "w") as f:
@@ -1016,6 +1073,17 @@ def ask(question, ctx):
     if rc == 142:
         return "That took too long, so I stopped. Try a shorter question, or ask me in a session."
     return answer or "I couldn't answer that just now. Ask me in a session."
+
+
+def ask_command(prompt, model):
+    """The claude command a texted question runs with: read-only, Kit's folder only, closed folders denied."""
+    return ["claude", "-p", prompt, "--output-format", "json", "--model", model,
+            "--setting-sources", "project,local",
+            "--strict-mcp-config", "--mcp-config", '{"mcpServers": {}}',
+            "--allowedTools", "Read(~/Claude/Agents/kit/**)", "Bash(kit-library search:*)",
+            "Bash(kit-library show:*)",
+            "--disallowedTools", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Task", "Agent",
+            *[f"Read(~/Claude/Agents/kit/{d}/**)" for d in TEXT_CLOSED]]
 
 
 def for_kit(text):
@@ -1119,6 +1187,7 @@ def check(st, cfg, ctx, wait=50):
         if any(s[0] == h and abs(s[1] - m["date"]) < 20 for s in seen):
             continue                          # the other copy of a text to yourself
         seen.append([h, m["date"]])
+        save_state(st)                        # before answering: a crash or a slow answer never answers twice
         answer(text, m, st, cfg, ctx)
     if top is not None:
         st["last_rowid"] = max(st.get("last_rowid", 0), top)
@@ -1128,7 +1197,7 @@ def check(st, cfg, ctx, wait=50):
 
 def answer(text, m, st, cfg, ctx):
     hour = [t for t in st.get("answered", []) if time.time() - t < 3600]
-    limit = int(cfg.get("TEXTBACK_MAX_PER_HOUR", "30") or 30)
+    limit = max_per_hour(cfg)
     if PAUSED.exists():
         if time.time() - st.get("paused_note", 0) > 3600:
             send("Paused (kit-pause): text commands are off until Kit is resumed.", cfg)
@@ -1212,6 +1281,7 @@ def cmd_status():
 
 
 def main(argv):
+    global DRY
     cmd = argv[0] if argv else "status"
     if cmd == "watch":
         return cmd_watch()
@@ -1222,6 +1292,7 @@ def main(argv):
         save_state(st)
         return 0 if ok else 1
     if cmd == "test":
+        DRY = True
         cfg = read_config()
         text = " ".join(argv[1:])
         reply = handle(text, context(cfg))
@@ -1250,6 +1321,9 @@ def main(argv):
         return 0
     if cmd == "status":
         return cmd_status()
+    if cmd in ("-h", "--help", "help"):
+        print(__doc__)
+        return 0
     print(__doc__.split("\n\n")[1])
     return 2
 

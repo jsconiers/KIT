@@ -113,7 +113,7 @@ def rehearse(pr, prompt, pdf=None):
             shutil.copyfile(pdf, pathlib.Path(work) / pdf.name)
             deny = pr.DENY + pr.PRIVATE
         return ask_claude(prompt, mode="rehearse", allowed=[], deny=deny,
-                          model=pr.setting("REHEARSE_MODEL", "opus"), timeout=int(pr.setting("REHEARSE_TIMEOUT", "900")),
+                          model=pr.setting("REHEARSE_MODEL", "opus"), timeout=pr.number_setting("REHEARSE_TIMEOUT", 900),
                           cwd=work, extra_args=("--setting-sources", "project,local"), prompt_stdin=True)
 
 

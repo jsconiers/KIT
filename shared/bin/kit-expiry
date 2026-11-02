@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """kit-expiry: what expires or comes up for renewal (logins, domains, certificates, licenses, registrations, documents, policies, memberships), and when.
 
-  kit-expiry                       the whole list, soonest first, with days left
-  kit-expiry --check [--health]    only what's expired, due inside its warning window, or unreadable;
+  kit-expiry [--live]              the whole list, soonest first, with days left
+  kit-expiry --check [--health] [--live]
+                                   only what's expired, due inside its warning window, or unreadable;
                                    --health limits it to Kit's own health items (see below)
   kit-expiry brief [--queue]       the renewals due for the morning brief (not the health items), work
                                    ones tagged [work]; --queue also adds a to-do for each, once per date
@@ -11,7 +12,12 @@
   kit-expiry set NAME DATE         set or change an item's date (YYYY-MM-DD, 12-May-2031, or 05/12/2031)
   kit-expiry renewed NAME [--to DATE]   renewed: the date moves on by its period (--every), or to DATE
   kit-expiry remove NAME
-  kit-expiry --json                the list as JSON
+  kit-expiry --json [--live]       the list as JSON
+  kit-expiry --help                this help
+
+Nothing goes over the network unless you add --live: without it, a "check" item shows the date its last
+live lookup found (kit doctor and the brief read only that). --live looks certificates up over TLS on
+the host and domains over RDAP (rdap.org), and saves what it finds for the next run.
 
 The list is ~/Claude/Agents/kit/expiry.json, which stays on this computer:
 
@@ -179,7 +185,7 @@ def rows_for(cfg, today, live=True):
     for item in cfg.get("items", []):
         if not live and item.get("check"):
             d = dt.date.fromisoformat(cache[item["name"]]) if item["name"] in cache else None
-            note = "" if d else "not looked up"
+            note = "" if d else "not looked up yet: kit-expiry --live"
         else:
             d, note = resolve(item, cache)
         warn = int(item.get("warn_days", cfg.get("warn_days", 30)))
@@ -216,7 +222,7 @@ def cmd_list(argv):
     cfg = load()
     check, health = "--check" in argv, "--health" in argv
     problems = 0
-    for r in rows_for(cfg, dt.date.today()):
+    for r in rows_for(cfg, dt.date.today(), live="--live" in argv):
         item, d, left, state, note = r["item"], r["date"], r["left"], r["state"], r["note"]
         if health and not is_health(item):
             continue
@@ -373,7 +379,7 @@ def cmd_remove(argv):
 def cmd_json(argv):
     cfg = load()
     out = []
-    for r in rows_for(cfg, dt.date.today(), live="--cached" not in argv):
+    for r in rows_for(cfg, dt.date.today(), live="--live" in argv):   # --cached (older callers) is the default
         it = r["item"]
         out.append({"name": it["name"], "date": r["date"].isoformat() if r["date"] else None,
                     "days_left": r["left"], "state": r["state"], "health": is_health(it),
@@ -386,12 +392,15 @@ def cmd_json(argv):
 def main(argv):
     cmds = {"brief": cmd_brief, "missing": cmd_missing, "add": cmd_add, "set": cmd_set,
             "renewed": cmd_renewed, "remove": cmd_remove}
+    if argv[:1] in (["--help"], ["-h"], ["help"]):
+        print(__doc__)
+        return 0
     try:
         if argv and argv[0] in cmds:
             return cmds[argv[0]](argv[1:])
         if "--json" in argv:
             return cmd_json(argv)
-        if argv and argv[0] not in ("--check", "--health"):
+        if argv and argv[0] not in ("--check", "--health", "--live"):
             print(__doc__.split("\n\n")[1])
             return 2
         return cmd_list(argv)
