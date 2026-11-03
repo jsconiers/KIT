@@ -5,6 +5,16 @@ What changed in each Kit release. The installed version is in
 morning brief summarizes the new entries once. Format: [Keep a Changelog](https://keepachangelog.com),
 versions follow [semantic versioning](https://semver.org).
 
+## [Unreleased]
+
+### Fixed
+- `doctor.py`'s "Connector credentials" check, and the agent readiness figures, looked only at environment
+  variables, so a connector token kept in the Keychain, as kit-ppmx keeps PPM Express's, showed as "missing
+  by name" while `kit-connect` found it. Both now look a name up the same way (`shared/kit_secrets.py`):
+  the environment, then the Keychain on a Mac or Credential Manager on Windows, by name only, never reading
+  the value. `kit-connect` checks Credential Manager on Windows too, where it used to report a stored token
+  as missing.
+
 ## [1.6.1] - 2026-11-03
 
 ### Added

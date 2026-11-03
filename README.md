@@ -182,7 +182,7 @@ The installer links these into `~/.local/bin` (all in `shared/bin/`):
 | Tool | What it does |
 |---|---|
 | `kit-pause` | Kill switch: stops scheduled runs and connector calls until `kit-pause resume` |
-| `kit-connect` | Connector check: guard, credential variables by name, Claude Code health |
+| `kit-connect` | Connector check: guard, credentials by name, Claude Code health |
 | `kit-ppmx` | PPM Express from Claude Code or Claude Desktop, on macOS or Windows: reads portfolios, projects, tasks, key dates, deliverables, ideas, and resources (with "me" in person filters, and `list_my_work` for your own tasks and deliverables across projects), and creates or updates them, asking you before each change (confirmed against the live API on 02-Nov-2026). `serve` (the MCP server), `check`, `tools`, `call`, `desktop` (adds it to Claude Desktop), and `setup` (the steps, changing nothing). `pulse`: the portfolio pulse (projects turned At Risk or Critical, key dates slipped or coming due, what changed since last week), in Monday's brief with `PPMX_PULSE="on"`. `actions`: meeting actions from the scribe's minutes as proposed tasks to create or update, each made only on your yes, one at a time (`actions apply N`). The same package runs as a team service on OpenShift: `shared/ppmx/openshift/INSTALL.md` |
 | `kit-backup` | Checked archive of Kit's folder and history to a folder you choose (local or shared), encrypted on request; `verify`, `restore` |
 | `kit-audit-export` | A dated evidence pack of Kit's controls for a compliance or security review; `--controls` organises it by control for an audit request, with gaps listed |

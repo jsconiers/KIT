@@ -36,11 +36,11 @@ Kit has one guarded path to outside systems.
    whether it was an error, and any total the result states, never its contents, to
    `connectors-YYYY-MM.jsonl` in `audit_dir`.
 3. **kit-connect test** runs in the shell before every morning brief (`kit-connect test --json`, no model
-   cost): each server is allowed, its credential variables are set (by name), and Claude Code's own health
-   check passes. `kit-connect test --read` goes further, making one read call per server with its
-   `probe_tools` tool as the gateway, under the guard (a few cents each). Credentials are named in
-   `credential_env`, never stored. The preflight check at 06:45 and 15:45 also checks that the connectors in
-   `PREFLIGHT_CONNECTORS` are signed in.
+   cost): each server is allowed, its credentials are in the environment or the Keychain or Credential
+   Manager (by name), and Claude Code's own health check passes. `kit-connect test --read` goes further,
+   making one read call per server with its `probe_tools` tool as the gateway, under the guard (a few cents
+   each). Credentials are named in `credential_env`, never stored. The preflight check at 06:45 and 15:45
+   also checks that the connectors in `PREFLIGHT_CONNECTORS` are signed in.
 4. **kit-audit** reads the audit log daily and weekly, and the guard integrity check confirms the guarded
    agents still carry their hooks. Issues go to the top of the morning brief.
 5. **kit-pause** stops scheduled runs and makes the guard deny every connector call.

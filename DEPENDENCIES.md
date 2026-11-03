@@ -622,7 +622,8 @@ server, `--brief` for problems only).
 - Direct model calls: enabled_phase, which providers kit-delegate and kit-run may reach, and
   whether each one's credential is named (never reads a Keychain value).
 - Sharing policy: the organization profile (warn if it can't be read).
-- Connector credentials: named credential variables that aren't set.
+- Connector credentials: a credential named in `connector-guard.json` that's neither a variable that's set nor
+  an entry in the Keychain or Credential Manager (by name only, as `kit-connect` looks).
 - Phone publishing: the OneDrive publishing folder, or why it's refused.
 - Run reliability: warn on any kit-reliability alert.
 - Windows: Kit's scheduled tasks in Task Scheduler (a disabled one warns) and the folder's access list,

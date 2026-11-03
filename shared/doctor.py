@@ -46,6 +46,15 @@ def add(level, name, detail=""):
     results.append((level, name, detail))
 
 
+def _secrets():
+    """kit_secrets, beside this file: where a named credential is, by name only."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import kit_secrets
+    return kit_secrets
+
+
 def check(cond, name, good, bad, level="FAIL"):
     add("ok", name, good) if cond else add(level, name, bad)
 
@@ -584,16 +593,20 @@ def check_sharing_policy():
 
 def check_connectors_quick():
     """Connector credentials by name (no claude call, no network): which allowed servers name a
-    credential variable that isn't set. The full check is: kit-connect test."""
+    credential (credential_env) that's neither an environment variable that's set nor an entry in the
+    Keychain or Credential Manager, as kit-connect looks them up. Values are never read. The full
+    check is: kit-connect test."""
     try:
         cfg = json.loads((KIT / "memory/context/connector-guard.json").read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return
-    missing = [f"{s} ({v})" for s in cfg.get("allowed_servers") or []
-               for v in (cfg.get("credential_env") or {}).get(s, []) if not os.environ.get(v)]
+    ks = _secrets()
+    places = "the environment" + (f" or the {ks.STORE}" if ks.STORE else "")
+    named = [(s, v) for s in cfg.get("allowed_servers") or [] for v in (cfg.get("credential_env") or {}).get(s, [])]
+    missing = [f"{s} ({v})" for s, v in named if not ks.where(v)]
     add("warn" if missing else "ok", "Connector credentials",
-        ("missing by name: " + ", ".join(missing) + " (run: kit-connect test)") if missing
-        else "every named credential variable is set (full check: kit-connect test)")
+        (f"missing by name: {', '.join(missing)}: not in {places} (run: kit-connect test)") if missing
+        else f"every named credential is in {places} (full check: kit-connect test)")
 
 
 def check_phone():
@@ -738,9 +751,9 @@ def check_guard():
 #              gateway (no explicit tools list, or one with mcp__ tools or Agent), need connector-guard.json and
 #              working connectors. A server fails when the morning check has an open outage for it
 #              (briefs/connectors-alerts.json), else when its latest result in connectors-history.jsonl
-#              failed, else when a credential variable it names (credential_env) isn't set (by name
-#              only; values are never read). Some failing: a limit; all failing, none configured, or
-#              settings unreadable: blocked.
+#              failed, else when a credential it names (credential_env) is neither a variable that's set
+#              nor in the Keychain or Credential Manager (by name only; values are never read). Some
+#              failing: a limit; all failing, none configured, or settings unreadable: blocked.
 #   tool       a kit-* tool the agent names that isn't in .install/shared/bin; a limit.
 #   command    an outside command the agent names in backticks, alone or with arguments (`drawio`,
 #              `soffice --headless ...`; drawio, soffice, pdftotext, java), that isn't on the PATH; a limit.
@@ -794,7 +807,8 @@ def _connector_state(kit, env):
             if not latest[s].get("pass"):
                 failing[s] = f"failed the check on {latest[s].get('date', '?')}"
         else:
-            miss = [v for v in (cfg.get("credential_env") or {}).get(s, []) if not env.get(v)]
+            ks = _secrets()
+            miss = [v for v in (cfg.get("credential_env") or {}).get(s, []) if not ks.where(v, env)]
             if miss:
                 failing[s] = "credential not set: " + ", ".join(miss)
     return None, failing, servers

@@ -15,6 +15,11 @@ and anything with "credential_required": false) need none.
 The value is wrapped in a Credential: printing it, logging it, or putting it in an exception shows
 "<credential: hidden>". Code that sends a request calls .reveal() at the last moment. Nothing here
 writes a credential anywhere, and error messages name the entry, never the value.
+
+Checks that only need to know whether a credential is there (doctor.py, kit-connect) use where() and
+stored(), which look a name up without reading any value: the environment variable, then the
+Keychain (`security find-generic-password -s NAME`, without -w) or Credential Manager (`cmdkey /list`,
+which lists names only).
 """
 import os
 import shutil
@@ -22,6 +27,8 @@ import subprocess
 import sys
 
 LOCAL_KINDS = {"ollama", "lmstudio", "local"}
+# This computer's credential store, by the name people know it by; None where Kit has none.
+STORE = "Credential Manager" if os.name == "nt" else "Keychain" if sys.platform == "darwin" else None
 
 
 class CredentialError(Exception):
@@ -108,6 +115,40 @@ def _keychain(entry):
     if r.returncode != 0 or not r.stdout.strip():
         raise CredentialError(f"no Keychain entry '{entry}' (or access was refused)")
     return r.stdout.rstrip("\n")
+
+
+def _run(argv):
+    try:
+        return subprocess.run(argv, capture_output=True, text=True, errors="replace", timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def stored(name, path=None):
+    """Whether this computer's credential store has an entry named NAME: a Keychain generic password
+    whose service is NAME, or a Credential Manager generic credential whose target is NAME. By name
+    only: the value is never asked for, so nothing can show it and the Keychain doesn't prompt. False
+    where there's no store or it can't be asked. PATH, when given, is where to find the tool."""
+    if not name or STORE is None:
+        return False
+    if STORE == "Keychain":
+        tool = shutil.which("security", path=path)
+        r = tool and _run([tool, "find-generic-password", "-s", name])
+        return bool(r) and r.returncode == 0
+    tool = shutil.which("cmdkey", path=path)
+    r = tool and _run([tool, "/list"])
+    want = f"legacygeneric:target={name}".lower()     # how cmdkey lists a generic credential
+    return bool(r) and r.returncode == 0 and any(ln.strip().lower().endswith(want) for ln in r.stdout.splitlines())
+
+
+def where(name, env=None):
+    """Where a credential named NAME is, by name only: "environment" when the variable is set, STORE
+    ("Keychain" or "Credential Manager") when the credential store has an entry by that name, else
+    None. ENV defaults to this process's environment; its PATH finds the store's tool."""
+    env = os.environ if env is None else env
+    if env.get(name):
+        return "environment"
+    return STORE if stored(name, env.get("PATH")) else None
 
 
 def resolve(provider, name="provider"):

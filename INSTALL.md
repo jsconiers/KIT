@@ -103,7 +103,7 @@ claude                      # then run /context and confirm KIT.md is listed und
 python3 ~/Claude/Agents/kit/.install/shared/doctor.py          # full health check
 python3 ~/Claude/Agents/kit/.install/shared/doctor.py --brief  # problems only
 kit-version                 # installed version and commit
-kit-connect test            # connectors: guard, credential variables by name, Claude Code health
+kit-connect test            # connectors: guard, credentials by name, Claude Code health
 kit-evals                   # static agent checks (free)
 kit-models                  # which model each agent and run uses
 kit-reliability             # how the scheduled runs have been doing (after a few days)
@@ -425,11 +425,11 @@ Claude Code's docs). Then:
 
 1. List each server in `memory/context/connector-guard.json` under `allowed_servers`, with the read
    tools in `allow_tools` and anything that writes in `deny_tools`.
-2. Set each server's credential as an environment variable or Keychain entry; record only its
-   **name** (optionally under `credential_env` in `connector-guard.json`). Never write a value into a
-   file.
-3. Run `kit-connect test`. It checks each server is allowed, that its credential variables are set
-   (by name only), and Claude Code's own health check.
+2. Set each server's credential as an environment variable, or an entry in the Keychain (Credential
+   Manager on Windows); record only its **name** (optionally under `credential_env` in
+   `connector-guard.json`). Never write a value into a file.
+3. Run `kit-connect test`. It checks each server is allowed, that each credential it names is in the
+   environment or the Keychain or Credential Manager (by name only), and Claude Code's own health check.
 4. Optionally pick one cheap read-only tool per server under `probe_tools`, then
    `kit-connect test --read` makes one read call per server as the gateway agent, under the guard
    (a few cents each). The connector guard's audit log decides the result: a logged call with no
@@ -439,7 +439,7 @@ Claude Code's docs). Then:
    table; a reference field can also hold a different type than its name suggests. Look up one
    record's fields first, then scope by the fields it actually has.
 
-The health check (`doctor.py`) also warns about missing credential variables by name.
+The health check (`doctor.py`) looks credentials up the same way, and warns about one it finds in neither place.
 
 ### PPM Express (kit-ppmx)
 
@@ -664,7 +664,7 @@ run `platform\windows\uninstall.ps1` and `unregister-tasks.ps1`. To reinstall la
 | "waiting for another run to finish" in the log | The lock is working; a run that died leaves a lock that's cleared automatically |
 | Calendar and mail marked stale, AppleEvent error -1712 | Outlook didn't answer; restart Outlook. `kit-outlook` retries before each run. |
 | A tool "needed approval" in an unattended run | Add it to `ALLOW_TOOLS` or `ALLOW_TOOLS_WEEKLY` |
-| "Connector credentials: missing by name" | Set the named environment variable; `kit-connect test` confirms |
+| "Connector credentials: missing by name" | The name in `credential_env` is neither a variable that's set nor a Keychain (Credential Manager) entry: set the variable or store the entry under that name; `kit-connect test` confirms |
 | "Direct model calls: no credential found" | Only matters with `enabled_phase` 2: set the provider's credential variable |
 | "Kit version: the repo clone is at ..." | Rerun the installer, or `kit-update --apply` |
 | "Kit is paused" banner | `kit-pause resume` |

@@ -410,8 +410,8 @@ def cmd_setup(env):
      "credential_env": {{"ppmx": ["{entry or var}"]}},
      "probe_tools": {{"ppmx": "mcp__ppmx__get_current_user"}}
    credential_env holds only the name of what has the token ({where}), never the token; kit-connect
-   test looks the name up in the environment and, on a Mac, the Keychain. Add PPM Express (connector
-   ppmx) under Systems in connectors.md, next to it.
+   test and doctor.py look the name up in the environment and the Keychain (Credential Manager on
+   Windows). Add PPM Express (connector ppmx) under Systems in connectors.md, next to it.
 
 6. Check: kit-ppmx check, then kit-connect test ppmx (add --read for one call through the gateway).""")
     return 0

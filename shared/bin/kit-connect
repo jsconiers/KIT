@@ -16,8 +16,9 @@ name. For each, connector-guard.json may also give:
   "credential_env": {"jira": ["JIRA_MCP_TOKEN"]}        variable names a server needs
   "probe_tools":    {"jira": "mcp__jira__search_issues"} the read-only tool --read calls
 
-Credentials are checked by name only: whether the environment variable is set, or a Keychain entry
-of that name exists. Their values are never read, printed, or logged. Claude Code's own diagnostics
+Credentials are checked by name only: whether the environment variable is set, or an entry of that
+name exists in the Keychain (Mac) or Credential Manager (Windows), as doctor.py checks them too. Their
+values are never read, printed, or logged. Claude Code's own diagnostics
 also name variables a server is missing; kit-connect reports those names too.
 
 Exit codes: 0 every checked server passed, 1 at least one failed, 2 setup problem (no servers, or
@@ -32,6 +33,9 @@ import re
 import shutil
 import subprocess
 import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import kit_secrets  # noqa: E402  (shared/kit_secrets.py: where a named credential is, by name only)
 
 HOME = pathlib.Path.home()
 KIT = pathlib.Path(os.path.expanduser(os.environ.get("KIT_DIR", "~/Claude/Agents/kit")))
@@ -78,25 +82,10 @@ def mcp_list(claude):
     return health, missing, ""
 
 
-def keychain_has(name):
-    """Whether a Keychain entry with this service name exists. Never asks for the value (no -w)."""
-    if sys.platform != "darwin" or not shutil.which("security"):
-        return False
-    r = subprocess.run(["security", "find-generic-password", "-s", name], capture_output=True, text=True)
-    return r.returncode == 0
-
-
 def credential_state(names):
-    """[(name, 'set' | 'keychain' | 'missing')] by name only."""
-    out = []
-    for n in names:
-        if os.environ.get(n):
-            out.append((n, "set"))
-        elif keychain_has(n):
-            out.append((n, "keychain"))
-        else:
-            out.append((n, "missing"))
-    return out
+    """[(name, 'set' | 'keychain' | 'credential manager' | 'missing')] by name only."""
+    label = {"environment": "set", "Keychain": "keychain", "Credential Manager": "credential manager"}
+    return [(n, label.get(kit_secrets.where(n), "missing")) for n in names]
 
 
 def audit_outcome(tool, since):
@@ -189,7 +178,8 @@ def test(servers, do_read, as_json):
         checks.append(("credentials", not gone,
                        "none named" if not creds else
                        ("present: " + ", ".join(f"{n} ({st})" for n, st in creds)) if not gone else
-                       "missing: " + ", ".join(gone) + " (set the variable; values are never read here)"))
+                       "missing: " + ", ".join(gone) + " (set the variable" + (f", or store it in the {kit_secrets.STORE} "
+                       "under that name" if kit_secrets.STORE else "") + "; values are never read here)"))
         if health is None:
             checks.append(("health", False, err))
         elif s in health:

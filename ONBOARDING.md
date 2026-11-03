@@ -30,7 +30,7 @@ minutes a day. Read `GOVERNANCE.md` first if your team has one in force.
 3. **Choose delivery:** `kit-settings` sets how the morning brief reaches you, and which app your
    to-dos sync with. Work items stay inside your organization's tools.
 4. **Check connectors:** `kit-connect test` shows which connectors are allowed, configured, and
-   answering, and names any missing credential variables (it never reads their values).
+   answering, and names any missing credentials (it looks them up by name and never reads their values).
 5. **Look at the dashboard:** `~/Claude/Agents/kit/dashboard.html`.
 
 ## The daily rhythm

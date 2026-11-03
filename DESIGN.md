@@ -137,7 +137,7 @@ Code and must pass before an agent moves to another model.
 | Kill switch | `shared/bin/kit-pause` | A pause file stops every scheduled run and makes the guard deny every connector call. |
 | Sharing policy | `memory/context/sharing-policy.json`, `kit_transport.policy_check` | Allowed transports and roots, blocked folders, classification ceiling, confidential never leaves unless allowed. A policy that can't be read refuses all sharing. |
 | Model policy | `models.json` `org_profile`, `kit_models.py` | Allowed providers, `enabled_phase`, data-class ceilings per provider and for non-Claude providers. Refused profiles fall back to Claude. |
-| Credentials by name | `shared/kit_secrets.py`, tool designs | Credentials are referenced by environment-variable or Keychain entry name, resolved only at call time, never stored, logged, or printed. |
+| Credentials by name | `shared/kit_secrets.py`, tool designs | Credentials are referenced by environment-variable or Keychain entry name, resolved only at call time, never stored, logged, or printed. Checks that only need to know one is there (`doctor.py`, `kit-connect`) look the name up without reading the value. |
 | Untrusted content | Agents, `kit-team`, `kit-run` | Other sources' text is shown with an untrusted banner and never executed. |
 | Phone approval tiers | `shared/kit_inbox.py` | Low tier (work list, queue verdicts) by single-use daily code; medium and high tier (commits, installs, sending, deleting, settings, money) never from a phone. |
 | Retention and legal hold | `shared/bin/kit-retention` | Keep everything by default; disposal only moves files, with `--yes`; held projects are never eligible. |
