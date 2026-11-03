@@ -5,7 +5,7 @@ What changed in each Kit release. The installed version is in
 morning brief summarizes the new entries once. Format: [Keep a Changelog](https://keepachangelog.com),
 versions follow [semantic versioning](https://semver.org).
 
-## [Unreleased]
+## [1.6.2] - 2026-11-03
 
 ### Fixed
 - `doctor.py`'s "Connector credentials" check, and the agent readiness figures, looked only at environment
