@@ -6,8 +6,8 @@ how to start. For depth, see the [design guide](DESIGN-GUIDE.md); for installing
 
 | | |
 |---|---|
-| Describes | Kit 1.6.0 plus the unreleased fixes on main |
-| Date | 02-Nov-2026 |
+| Describes | Kit 1.6.1 |
+| Date | 03-Nov-2026 |
 | Audience | Architects, team leads, and reviewers deciding whether to adopt Kit |
 | Licence | All rights reserved; see [LICENSE](../LICENSE) |
 
