@@ -8,17 +8,17 @@ hooks:
     - matcher: "mcp__.*"
       hooks:
         - type: command
-          command: 'python3 "$HOME/Claude/Agents/kit/.install/shared/bin/connector-guard" pre demand-tracker'
+          command: '/bin/sh "$HOME/Claude/Agents/kit/.install/shared/bin/kit-hook" connector-guard pre demand-tracker || exit 2'
   PostToolUse:
     - matcher: "mcp__.*"
       hooks:
         - type: command
-          command: 'python3 "$HOME/Claude/Agents/kit/.install/shared/bin/connector-guard" post demand-tracker'
+          command: '/bin/sh "$HOME/Claude/Agents/kit/.install/shared/bin/kit-hook" connector-guard post demand-tracker || exit 1'
   PostToolUseFailure:
     - matcher: "mcp__.*"
       hooks:
         - type: command
-          command: 'python3 "$HOME/Claude/Agents/kit/.install/shared/bin/connector-guard" fail demand-tracker'
+          command: '/bin/sh "$HOME/Claude/Agents/kit/.install/shared/bin/kit-hook" connector-guard fail demand-tracker || exit 1'
 ---
 
 # Demand tracker

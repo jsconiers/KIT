@@ -105,8 +105,9 @@ PostToolUseFailure, and Stop, with the same matchers, stdin JSON fields, exit co
 JSON decisions (deny, ask, updatedInput; block and updatedToolOutput; Stop block, up to 8 times).
 kit-run's tools go by their Claude Code names in hooks (Read, Glob, Grep, Write, Bash, Agent,
 Skill), so a matcher like `Edit|Write` works. So the connector guard governs kit-run's connector
-calls and writes the same audit log. Only `command` hooks run. Hooks can only tighten: kit-run's own
-rules still apply after a hook allows a call.
+calls and writes the same audit log. Only `command` hooks run, with `/bin/sh`, or Git Bash on Windows,
+as Claude Code runs them. Hooks can only tighten: kit-run's own rules still apply after a hook allows a
+call.
 
 **Approvals.** kit-run shows the action (tool, arguments, and a diff for writes) and asks
 `[y]es / [n]o / [a]lways for this tool this run / [d]etails`. Each answer is logged. With no one at

@@ -8,7 +8,7 @@ connector guard above all) govern an agent whether it runs in Claude Code or und
       - matcher: "mcp__.*"
         hooks:
           - type: command
-            command: 'python3 "$HOME/..../connector-guard" pre gateway'
+            command: '/bin/sh "$HOME/..../kit-hook" connector-guard pre gateway || exit 2'
     PostToolUse / PostToolUseFailure:  the same shape
     Stop:
       - hooks:
@@ -33,17 +33,53 @@ Semantics, per Claude Code's hooks reference (code.claude.com/docs/en/hooks):
             reason, and optional updatedToolOutput. Stop: decision "block" with reason, or
             hookSpecificOutput.additionalContext.
   timeout   600 seconds by default, or the hook's own "timeout" (seconds).
+  shell     /bin/sh -c on macOS and Linux; on Windows, Git Bash (CLAUDE_CODE_GIT_BASH_PATH, else the
+            bash beside git.exe, else Git's usual folders), as Claude Code itself runs hooks there.
 
 Only "command" hooks run; "prompt", "agent", "http", and "mcp_tool" hooks are logged as skipped.
 """
 import json
 import os
 import re
+import shutil
 import subprocess
 
 EVENTS = ("PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop")
 DEFAULT_TIMEOUT = 600
 EXACT = re.compile(r"^[A-Za-z0-9_\- ,|]*$")
+
+
+def git_bash():
+    """Git Bash on Windows, the shell Claude Code runs hooks with there; None when it isn't found.
+    Never WSL's bash (System32), which would run the hook in Linux with a different home folder."""
+    want = os.environ.get("CLAUDE_CODE_GIT_BASH_PATH")
+    if want and os.path.isfile(want):
+        return want
+    found = []
+    git = shutil.which("git")
+    if git:
+        root = os.path.dirname(os.path.dirname(os.path.realpath(git)))      # ...\Git\cmd\git.exe
+        found += [os.path.join(root, "bin", "bash.exe"), os.path.join(root, "usr", "bin", "bash.exe")]
+    for var in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)", "LOCALAPPDATA"):
+        base = os.environ.get(var)
+        if base:
+            found += [os.path.join(base, "Git", "bin", "bash.exe"),
+                      os.path.join(base, "Programs", "Git", "bin", "bash.exe")]
+    which = shutil.which("bash")
+    if which and "system32" not in which.lower():
+        found.append(which)
+    return next((p for p in found if os.path.isfile(p)), None)
+
+
+def shell_argv(command):
+    """The argv that runs a hook command the way Claude Code does: /bin/sh -c, or Git Bash on Windows."""
+    if os.name == "nt":
+        bash = git_bash()
+        if not bash:
+            raise OSError("Git Bash wasn't found (Claude Code runs hooks with it on Windows; "
+                          "set CLAUDE_CODE_GIT_BASH_PATH to its bash.exe)")
+        return [bash, "-c", command]
+    return ["/bin/sh", "-c", command]
 
 
 def _scalar(v):
@@ -135,6 +171,7 @@ class Outcome:
         self.updated_output = None
         self.feedback = []          # text to show the model (PostToolUse exit 2 / block reason, Stop context)
         self.ran = []               # (command, exit code) for the audit log
+        self.errors = []            # (command, exit code, stderr) for hooks that failed without blocking
 
 
 class Hooks:
@@ -170,8 +207,8 @@ class Hooks:
         except ValueError:
             timeout = DEFAULT_TIMEOUT
         try:
-            r = subprocess.run(h["command"], shell=True, input=json.dumps(payload), capture_output=True,
-                               text=True, timeout=timeout, env=self.env)
+            r = subprocess.run(shell_argv(h["command"]), input=json.dumps(payload), capture_output=True,
+                               text=True, encoding="utf-8", errors="replace", timeout=timeout, env=self.env)
             code, stdout, stderr = r.returncode, r.stdout, r.stderr
         except subprocess.TimeoutExpired:
             code, stdout, stderr = -1, "", f"hook timed out after {timeout:g}s"
@@ -191,6 +228,7 @@ class Hooks:
                 out.feedback.append(reason)
             return
         if code != 0:
+            out.errors.append((h["command"][:200], code, (stderr or "").strip()[:300]))
             return                              # non-blocking error: the call goes ahead
         try:
             data = json.loads(stdout) if stdout.strip() else {}

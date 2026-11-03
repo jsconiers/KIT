@@ -32,6 +32,18 @@ versions follow [semantic versioning](https://semver.org).
   settings and tools, the PPM Express write path and its audit log, and the current known limits.
 
 ### Fixed
+- Security: the connector guard failed open when its hook couldn't start. Claude Code lets a tool call
+  through when a PreToolUse hook exits with anything but 2, so a guarded agent's connector calls went
+  through unguarded and unlogged when `python3` was missing or, on Windows, was the Microsoft Store's stub
+  (exit 9009, 49 in Git Bash). The guarded agents now run the guard through `kit-hook`, a shell launcher
+  that uses a Python that really runs (`KIT_PYTHON`, `python3`, `py -3`, `python`) and blocks the call when
+  none does or the guard fails; the pre hook's `|| exit 2` blocks it even when `kit-hook` is missing. The
+  post, fail, and stop hooks never exit 2: they end with `|| exit 1` (before, a missing guard script made
+  Python exit 2, and a Stop hook that exits 2 can keep the agent from finishing). The guard also denies a
+  call it takes more than `KIT_GUARD_TIMEOUT` seconds (20) to decide. The installers run the installed hooks
+  last (`kit_setup.py guardcheck`) and stop if a write isn't blocked, `doctor.py` runs the same check
+  ("Connector guard hooks"), and the guard monitor flags an installed agent that still runs the guard with
+  Python directly. kit-run runs hooks with Git Bash on Windows, as Claude Code does.
 - `list_my_work` with `PPMX_WORK_SECONDS=0` stops after the first project on Windows too, where the clock
   can read a fast scan as 0 seconds.
 - `kit-connect test SERVER --read` names the server and its probe tool in the gateway's prompt; the old

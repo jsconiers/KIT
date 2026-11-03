@@ -1,7 +1,8 @@
 #!/bin/bash
 # Tests the connector-guard integrity monitor (shared/morning/monitor_guard.py, alert kind "guard" in
-# run_alerts.py): installed agents keep all three guard hooks pointing at an existing script, the guard
-# settings are readable, the audit folder exists and is writable (probe file removed; permission bits only
+# run_alerts.py): installed agents keep all three guard hooks pointing at an existing script (directly or
+# through kit-hook, which must exist too, and an installed PreToolUse that runs Python directly while the
+# shipped copy goes through kit-hook is flagged), the guard settings are readable, the audit folder exists and is writable (probe file removed; permission bits only
 # on a dry run), and allowed calls have result records (kit-audit's no-result check). One alert listing
 # the problems, one queue item per outage, the brief line, the dashboard banner, kit-alerts --only guard,
 # recovery, MONITOR_GUARD=off, and that nothing breaks with no connectors at all. Synthetic Kit folders in
@@ -63,12 +64,18 @@ def banner():
     d = importlib.util.module_from_spec(spec); spec.loader.exec_module(d)
     return d.alerts_banner()
 
-def hook(event, arg, name):
+def hook(event, arg, name, launcher=False):
+    if launcher:
+        cmd = (f"/bin/sh \"$HOME/Claude/Agents/kit/.install/shared/bin/kit-hook\" connector-guard {arg} {name}"
+               + (" || exit 2" if arg == "pre" else " || exit 1"))
+    else:
+        cmd = f"python3 \"$HOME/Claude/Agents/kit/.install/shared/bin/connector-guard\" {arg} {name}"
     return (f"  {event}:\n    - matcher: \"mcp__.*\"\n      hooks:\n        - type: command\n"
-            f"          command: 'python3 \"$HOME/Claude/Agents/kit/.install/shared/bin/connector-guard\" {arg} {name}'\n")
+            f"          command: '{cmd}'\n")
 
-def agent(name, events=(("PreToolUse", "pre"), ("PostToolUse", "post"), ("PostToolUseFailure", "fail"), ("Stop", "stop"))):
-    hooks = "hooks:\n" + "".join(hook(e, a, name) for e, a in events) if events else ""
+def agent(name, events=(("PreToolUse", "pre"), ("PostToolUse", "post"), ("PostToolUseFailure", "fail"), ("Stop", "stop")),
+          launcher=False):
+    hooks = "hooks:\n" + "".join(hook(e, a, name, launcher) for e, a in events) if events else ""
     return (f"---\nname: {name}\ndescription: The {name}.\ndisallowedTools: Write, Edit\nmodel: inherit\n{hooks}---\n\n"
             f"You are the {name}.\n")
 
@@ -133,6 +140,38 @@ a = state().get("guard", {})
 ok(len(a.get("problems", [])) == 2 and all("points at a missing script" in p for p in a["problems"])
    and "PreToolUse points at a missing script" in a["problems"][0], "hooks pointing at a missing script", a)
 SCRIPT.with_name("connector-guard.moved").rename(SCRIPT)
+
+# ---------------------------------------------------------------- through kit-hook
+LAUNCH = kit / ".install/shared/bin/kit-hook"
+shutil.copy(here / "shared/bin/kit-hook", LAUNCH)
+for n in ("gateway", "status-reporter"):
+    for d in (ship, live, inst):
+        (d / f"{n}.md").write_text(agent(n, launcher=True))
+alerts()
+ok("guard" not in state(), "hooks through kit-hook, with kit-hook and connector-guard there -> no alert", state())
+LAUNCH.rename(LAUNCH.with_name("kit-hook.moved"))
+alerts()
+a = state().get("guard", {})
+ok(len(a.get("problems", [])) == 2 and all("points at a missing script" in p and p.endswith("kit-hook)")
+                                           for p in a["problems"][0].split("; ")), "kit-hook missing -> named as the missing script", a)
+LAUNCH.with_name("kit-hook.moved").rename(LAUNCH)
+SCRIPT.rename(SCRIPT.with_name("connector-guard.moved"))
+alerts()
+a = state().get("guard", {})
+ok(len(a.get("problems", [])) == 2 and "bin/connector-guard)" in a["problems"][0],
+   "connector-guard missing beside kit-hook -> named", a)
+SCRIPT.with_name("connector-guard.moved").rename(SCRIPT)
+(inst / "gateway.md").write_text(agent("gateway"))
+alerts()
+a = state().get("guard", {})
+ok(a.get("problems") == ["gateway: PreToolUse runs connector-guard with Python directly, not through kit-hook, so a "
+                         "Python that can't start would let calls through unguarded"],
+   "installed copy runs Python directly while the shipped one goes through kit-hook -> flagged", a)
+for n in ("gateway", "status-reporter"):
+    for d in (ship, live, inst):
+        (d / f"{n}.md").write_text(agent(n))
+alerts()
+ok("guard" not in state(), "shipped and installed copies both run Python directly -> not flagged", state())
 
 # ---------------------------------------------------------------- settings unreadable, audit folder problems
 GJ.write_text("{ not json")

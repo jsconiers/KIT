@@ -2,9 +2,10 @@
 # .github/workflows/checks.yml runs it on GitHub's Windows runners, under Windows PowerShell 5.1 and
 # PowerShell 7 (the installer runs under the same one). It changes the current user's Kit and
 # Claude Code settings, so run it on a throwaway machine or account, never your own.
-#   1. A fresh install, then doctor.py, with settings.json saved with a UTF-8 byte-order mark; todo
-#      through its command shim (UTF-8 mode) on a QUEUE.md with curly quotes; and todo with no
-#      OWNER_NAME set, finding the owner's section on its own.
+#   1. A fresh install (whose last step runs the connector guard's installed hooks in Git Bash), then
+#      doctor.py, with settings.json saved with a UTF-8 byte-order mark, whose "Connector guard hooks"
+#      check must pass; todo through its command shim (UTF-8 mode) on a QUEUE.md with curly quotes; and
+#      todo with no OWNER_NAME set, finding the owner's section on its own.
 #   2. A reinstall over it (so the installer reads that settings.json too).
 #   3. Kit 1.4.0's broken permissions, made with that installer's exact icacls command. Kit's files
 #      must become unreadable (otherwise this test couldn't tell), and a reinstall must repair them.
@@ -111,6 +112,9 @@ if ($dout -match "(?m)^\s+ok\s+Kit's folder is private") { Pass "doctor.py reads
 else { Fail "doctor.py's privacy check: $(($dlines | Where-Object { $_ -match 'folder is private' }) -join ' / ')" }
 if ($dout -match "can't read .*settings\.json") { Fail "doctor.py can't read settings.json with a byte-order mark" }
 else { Pass "doctor.py reads settings.json with a byte-order mark" }
+# The guarded agents' hooks, run in Git Bash as Claude Code runs them: each must block a write and allow a read.
+if ($dout -match "(?m)^\s+ok\s+Connector guard hooks: ") { Pass "doctor.py ran the installed guard hooks in Git Bash: each blocks a write and allows a read" }
+else { Fail "doctor.py's connector guard check: $(($dlines | Where-Object { $_ -match 'Connector guard hooks' }) -join ' / ')" }
 $crashed = @($dlines | Where-Object { $_ -match "check crashed" })
 if ($crashed.Count) { Write-Host "    note: other checks crashed: $($crashed -join ' / ')" }
 

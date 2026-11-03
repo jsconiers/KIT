@@ -34,6 +34,10 @@ Windows reimplementation** — the integration layer below (the hardest 30%).
   `os.startfile` on Windows, `open` on macOS, `xdg-open` otherwise.
 - `doctor.py` — launchd / `~/.local/bin` / plist checks remain macOS checks; off-Mac they simply
   report "not found", which is expected until the Windows equivalents exist.
+- Agent hooks: Claude Code runs hook commands with Git Bash on Windows, so the guarded agents' hooks
+  run `/bin/sh .../kit-hook connector-guard ...`: `kit-hook` skips the Microsoft Store's `python3` stub,
+  uses `py -3` or `python`, and blocks the call when no Python runs. `kit_hooks.py` (kit-run) and
+  `guard_check.py` (the installer's last step and doctor's "Connector guard hooks") use Git Bash too.
 
 ## Windows counterparts under `platform/windows/`
 
@@ -53,7 +57,8 @@ machine yet.
 
 - **Run in CI on Windows** (`.github/workflows/checks.yml`, under Windows PowerShell 5.1 and
   PowerShell 7): `install.ps1` (a fresh install, a reinstall, and the repair of an install whose files
-  lost their permissions, then doctor.py), the command shims, and the Python suites the workflow lists.
+  lost their permissions, then doctor.py, whose connector guard check runs the installed hooks in Git
+  Bash), the command shims, and the Python suites the workflow lists, `tests/test_kit_hook.py` among them.
 - **Tested elsewhere:** `run.ps1`'s logic under PowerShell 7 against a fake claude
   (`tests/test_runps1.sh`), and the Outlook Tasks sync over a fake COM layer (`tests/test_sync_core.sh`).
 - **Not yet run on a real Windows machine:** the Outlook COM adapters (mail, calendar, Outlook Tasks),

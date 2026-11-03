@@ -51,7 +51,8 @@ MONITOR_GUARD="off" turn one off (and clear what it had open):
            WAITING_MAX_DAYS (7); a follow-up draft in briefs/followups/ for the former; no queue item.
   guard    monitor_guard.py: connector-guard integrity. The installed copies (~/.claude/agents) of the
            agents shipped with guard hooks still run all three hooks (pre, post, fail) against an
-           existing connector-guard script; connector-guard.json is readable; its audit_dir exists and
+           existing connector-guard script, through kit-hook when the shipped copy uses it;
+           connector-guard.json is readable; its audit_dir exists and
            is writable (a probe file, removed at once; permission bits only on a dry run); and allowed
            calls have result records (kit-audit's no-result check, GUARD_NORESULT_HOURS,
            GUARD_WINDOW_DAYS). One alert listing every problem, one queue item per outage.

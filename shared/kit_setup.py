@@ -11,6 +11,8 @@
   activate     add Kit's import line to ~/.claude/CLAUDE.md and Kit's rules to ~/.claude/settings.json
                (Claude Code's auto memory is left alone)
   deactivate   remove exactly what activate added, as recorded in .install/manifest.json
+  guardcheck   run the connector guard's hooks in ~/.claude/agents the way Claude Code does, and exit 1
+               unless each guarded agent blocks a write and allows a read (the installers run it last)
 
 Both Claude Code files are backed up to ~/Claude/Agents/kit/.install/backups/ before any change.
 Standard library only; Python 3.8 or newer.
@@ -681,6 +683,32 @@ def cmd_deactivate(args):
     return 0
 
 
+def cmd_guardcheck(args):
+    """Claude Code lets a connector call through when a guard hook can't start (no Python, or only the
+    Microsoft Store's python3 stub), so the installers check the installed hooks really block."""
+    import guard_check
+    results, skipped = guard_check.check_all(AGENTS_HOME)
+    if skipped:
+        print(f"Connector guard: not checked: {skipped}.")
+        return 0
+    if not results:
+        return 0
+    bad, lines = guard_check.summary(results)
+    if not bad:
+        print(f"Connector guard: checked {len(results)} agents in {AGENTS_HOME}: each blocks a write and allows a read.")
+        for line in guard_check.grouped(results, "notes"):
+            print(f"  note: {line}")
+        return 0
+    print("kit: the connector guard doesn't work in these agents:", file=sys.stderr)
+    for line in lines:
+        print(f"  {line}", file=sys.stderr)
+    print("kit: install Python 3.8 or newer so that python3, py -3, or python runs it (the Microsoft Store's\n"
+          "     python3 stub doesn't count), or set KIT_PYTHON to one. An agent you edited needs the hooks of\n"
+          "     Kit's own copy (.install/kit/agents). Then run the installer again; INSTALL.md, Troubleshooting,\n"
+          "     has the details.", file=sys.stderr)
+    return 1
+
+
 def main(argv=None):
     if os.name != "nt":
         os.umask(0o077)
@@ -693,9 +721,10 @@ def main(argv=None):
     sub.add_parser("agents")
     sub.add_parser("activate")
     sub.add_parser("deactivate")
+    sub.add_parser("guardcheck")
     args = parser.parse_args(argv)
     handlers = {"check": cmd_check, "scaffold": cmd_scaffold, "skills": cmd_skills, "agents": cmd_agents, "activate": cmd_activate,
-                "deactivate": cmd_deactivate}
+                "deactivate": cmd_deactivate, "guardcheck": cmd_guardcheck}
     try:
         return handlers[args.cmd](args) or 0
     except Fail as exc:

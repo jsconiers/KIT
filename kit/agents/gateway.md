@@ -8,21 +8,21 @@ hooks:
     - matcher: "mcp__.*"
       hooks:
         - type: command
-          command: 'python3 "$HOME/Claude/Agents/kit/.install/shared/bin/connector-guard" pre gateway'
+          command: '/bin/sh "$HOME/Claude/Agents/kit/.install/shared/bin/kit-hook" connector-guard pre gateway || exit 2'
   PostToolUse:
     - matcher: "mcp__.*"
       hooks:
         - type: command
-          command: 'python3 "$HOME/Claude/Agents/kit/.install/shared/bin/connector-guard" post gateway'
+          command: '/bin/sh "$HOME/Claude/Agents/kit/.install/shared/bin/kit-hook" connector-guard post gateway || exit 1'
   PostToolUseFailure:
     - matcher: "mcp__.*"
       hooks:
         - type: command
-          command: 'python3 "$HOME/Claude/Agents/kit/.install/shared/bin/connector-guard" fail gateway'
+          command: '/bin/sh "$HOME/Claude/Agents/kit/.install/shared/bin/kit-hook" connector-guard fail gateway || exit 1'
   Stop:
     - hooks:
         - type: command
-          command: 'python3 "$HOME/Claude/Agents/kit/.install/shared/bin/connector-guard" stop gateway'
+          command: '/bin/sh "$HOME/Claude/Agents/kit/.install/shared/bin/kit-hook" connector-guard stop gateway || exit 1'
 ---
 
 # Gateway

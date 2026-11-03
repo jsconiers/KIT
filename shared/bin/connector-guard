@@ -2,17 +2,18 @@
 """connector-guard: read-only enforcement and an audit log for Kit's outside-system connectors.
 
 Claude Code runs it as a hook on agents that reach outside systems, passing each event as JSON on
-stdin. In an agent's frontmatter:
+stdin. It runs through kit-hook, which finds a Python that works and blocks the call when the guard
+can't run at all (no Python, or Windows' Microsoft Store stub). In an agent's frontmatter:
 
   hooks:
     PreToolUse:
       - matcher: "mcp__.*"
         hooks:
           - type: command
-            command: 'python3 "$HOME/Claude/Agents/kit/.install/shared/bin/connector-guard" pre <agent>'
-    PostToolUse:          (the same, with "post")
-    PostToolUseFailure:   (the same, with "fail")
-    Stop:                 (the same, with "stop" and no matcher)
+            command: '/bin/sh "$HOME/Claude/Agents/kit/.install/shared/bin/kit-hook" connector-guard pre <agent> || exit 2'
+    PostToolUse:          (the same, with "post" and "|| exit 1": these never block)
+    PostToolUseFailure:   (the same, with "fail" and "|| exit 1")
+    Stop:                 (the same, with "stop" and "|| exit 1", and no matcher)
 
 pre   Allows a call only when its connector (MCP server) is in allowed_servers and its tool name reads
       as read-only (get, list, search, query, read, fetch, find, describe, view, show, lookup,
@@ -28,6 +29,10 @@ fail  Logs a failed call. Claude Code runs PostToolUse only when a call succeeds
       hook, failed calls leave a "pre" record with no result. Logged as a "post" record with
       is_error true, plus a short error summary with anything credential-like removed.
 stop  Logs the end of the agent's session.
+
+Time limit: a call is denied when the guard takes longer than KIT_GUARD_TIMEOUT seconds (default 20),
+for instance when the audit folder hangs. Claude Code would treat a hook it gives up on as a
+non-blocking error and let the call through. The other events just stop, unlogged.
 
 Every record carries the call's tool_use_id when Claude Code supplies one, so kit-audit can pair a
 call with its result exactly.
@@ -45,6 +50,7 @@ import json
 import os
 import re
 import sys
+import threading
 
 CONFIG = os.environ.get("KIT_CONNECTOR_GUARD_CONFIG",
                         os.path.expanduser("~/Claude/Agents/kit/memory/context/connector-guard.json"))
@@ -148,9 +154,38 @@ def paused():
     return first or "no reason given"
 
 
+_ANSWER = threading.Lock()
+_ANSWERED = []
+
+
 def deny(reason):
-    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
-                                             "permissionDecisionReason": f"connector-guard: {reason}"}}))
+    """Print the deny decision once: the guard and its time limit can both reach here."""
+    with _ANSWER:
+        if _ANSWERED:
+            return
+        _ANSWERED.append(reason)
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                                 "permissionDecisionReason": f"connector-guard: {reason}"}}))
+        sys.stdout.flush()
+
+
+def time_limit():
+    """KIT_GUARD_TIMEOUT in seconds (default 20, at least 1)."""
+    try:
+        return max(1.0, float(os.environ.get("KIT_GUARD_TIMEOUT") or 20))
+    except ValueError:
+        return 20.0
+
+
+def too_slow(event, limit):
+    """The guard ran past its time limit: deny a call, end any other event unlogged."""
+    if event == "pre":
+        deny(f"the guard took more than {limit:g}s, so the call is blocked")
+    else:
+        with _ANSWER:
+            print(f"connector-guard: {event} took more than {limit:g}s and wasn't logged", file=sys.stderr)
+            sys.stderr.flush()
+    os._exit(0)
 
 
 TOTAL_KEYS = ("totalCount", "total_count", "total", "totalSize", "total_results", "count")
@@ -223,6 +258,10 @@ def main(event, agent, raw):
 if __name__ == "__main__":
     ev = sys.argv[1] if len(sys.argv) > 1 else "pre"
     who = sys.argv[2] if len(sys.argv) > 2 else "unknown"
+    limit = time_limit()
+    timer = threading.Timer(limit, too_slow, args=(ev, limit))
+    timer.daemon = True
+    timer.start()
     try:
         main(ev, who, sys.stdin.read())
     except Exception as e:
@@ -230,4 +269,5 @@ if __name__ == "__main__":
             deny(f"guard error, so the call is blocked: {e}")
         else:
             print(f"connector-guard: {e}", file=sys.stderr)
+    timer.cancel()
     sys.exit(0)

@@ -400,6 +400,26 @@ def check_agents():
           + " (run: python3 ~/Claude/Agents/kit/.install/shared/doctor.py --fix-agents)", "warn")
 
 
+def check_connector_hooks(agents_dir=None, env=None):
+    """Run the connector guard's hooks in ~/.claude/agents the way Claude Code does (guard_check.py):
+    each guarded agent must block a write and allow a read. Claude Code lets a call through when a
+    hook can't start, so a broken Python would leave connector calls unguarded and unlogged."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import guard_check
+    res, skipped = guard_check.check_all(agents_dir or HOME / ".claude/agents", env)
+    name = "Connector guard hooks"
+    if skipped:
+        add("warn", name, f"not checked: {skipped}")
+    elif not res:
+        return
+    elif any(r["problems"] for r in res):
+        add("FAIL", name, "; ".join(guard_check.summary(res)[1]) + " (see INSTALL.md, Troubleshooting)")
+    elif any(r["notes"] for r in res):
+        add("warn", name, "; ".join(guard_check.grouped(res, "notes")) + " (copy the shipped agents: doctor.py --fix-agents)")
+    else:
+        add("ok", name, f"{len(res)} guarded agent{'s' if len(res) != 1 else ''} block a write and allow a read")
+
+
 def check_delivery():
     """How briefs and to-dos are routed (kit-settings), and anything that would stop them."""
     import importlib.machinery, importlib.util
@@ -896,7 +916,7 @@ def main(argv):
         print(json.dumps(r, indent=1) if "--json" in argv else render_readiness(r))
         return 0
     for fn in (check_import, check_settings, check_index, check_jobs, check_runs, check_tokens, check_expiry, check_offsite, check_textback, check_library, check_feedback, check_mail_index,
-               check_secrets, check_permissions, check_agents, check_git, check_calendar, check_mail,
+               check_secrets, check_permissions, check_agents, check_connector_hooks, check_git, check_calendar, check_mail,
                check_guard, check_grammar, check_delivery, check_paused, check_outlook, check_holds,
                check_cost, check_version, check_models, check_direct_models, check_sharing_policy,
                check_connectors_quick, check_phone, check_reliability, check_readiness):

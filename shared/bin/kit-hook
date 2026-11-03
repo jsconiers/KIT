@@ -1,0 +1,71 @@
+#!/bin/sh
+# kit-hook: run one of Kit's Python hooks for Claude Code with a Python that really works, and fail
+# closed when the hook can't run. The guarded agents' frontmatter runs the connector guard through it:
+#
+#   /bin/sh "$HOME/Claude/Agents/kit/.install/shared/bin/kit-hook" connector-guard pre gateway || exit 2
+#   /bin/sh "$HOME/Claude/Agents/kit/.install/shared/bin/kit-hook" connector-guard post gateway || exit 1
+#
+# Claude Code blocks a tool call only when a PreToolUse hook exits 2 or answers "deny"; any other
+# failure is a non-blocking error, and the call goes ahead. So a hook whose Python can't start would
+# let every connector call through, unguarded and unlogged: no python3 at all, or, on Windows, the
+# Microsoft Store's python3 stub, which prints "Python was not found" and exits 9009 (49 in Git Bash).
+# The "|| exit 2" on the pre command blocks the call even when kit-hook itself can't be found; the
+# others end with "|| exit 1", since a shell that can't open a script may exit 2 itself (dash does).
+#
+#   Python   $KIT_PYTHON, then python3, py -3, and python, each used only when it really runs Python
+#            3.8 or later. The Store stubs don't, so they're passed over.
+#   pre      No working Python, a missing hook script, or a hook that exits with anything but 0: exit 2,
+#            with the reason on stderr, so the call is blocked. Otherwise the hook's own answer (its
+#            JSON deny, or nothing to allow) goes to Claude Code as it is.
+#   others   post, fail, and stop only log, so they never exit 2: a Stop hook that exits 2 keeps the
+#            agent from finishing. A failure is reported on stderr with exit 1, a non-blocking error.
+#
+# Shell built-ins only (no dirname, sed, or Python of its own), so it runs when nothing else does:
+# /bin/sh on macOS and Linux, and Git Bash on Windows, where Claude Code runs its hooks.
+
+name=${1:-}
+event=${2:-}
+
+fail() {
+  if [ "$event" = pre ]; then
+    printf 'kit-hook: %s, so the call is blocked.\n' "$1" >&2
+    exit 2
+  fi
+  printf 'kit-hook: %s.\n' "$1" >&2
+  exit 1
+}
+
+works() {   # the command in "$@" runs Python 3.8 or later
+  "$@" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)' </dev/null >/dev/null 2>&1
+}
+
+[ -n "$event" ] || { event=pre; fail "no hook named (usage: kit-hook SCRIPT EVENT [ARGS...])"; }
+case $name in
+  *[!A-Za-z0-9_-]*) fail "\"$name\" isn't a hook kit-hook runs" ;;
+esac
+case $0 in
+  */*) here=${0%/*} ;;
+  *) here=. ;;
+esac
+script="$here/$name"
+[ -f "$script" ] || fail "can't find $script"
+shift 2
+
+if [ -n "${KIT_PYTHON:-}" ] && works "$KIT_PYTHON"; then
+  set -- "$KIT_PYTHON" "$script" "$event" "$@"
+elif works python3; then
+  set -- python3 "$script" "$event" "$@"
+elif works py -3; then
+  set -- py -3 "$script" "$event" "$@"
+elif works python; then
+  set -- python "$script" "$event" "$@"
+else
+  fail "no working Python 3.8 or later (tried${KIT_PYTHON:+ \$KIT_PYTHON,} python3, py -3, and python)"
+fi
+
+PYTHONUTF8=1
+export PYTHONUTF8
+"$@"
+rc=$?
+[ "$rc" -eq 0 ] || fail "$name $event exited $rc"
+exit 0

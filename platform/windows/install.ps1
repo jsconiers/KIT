@@ -257,6 +257,14 @@ if ($check.Problems.Count -gt 0) {
 }
 Write-Host "install: checked $($check.Files) files: Kit can read them all, and only your account can open $kitHome."
 
+# --- Check that the connector guard really blocks ---------------------------------------------
+# Claude Code runs the guard's hooks with Git Bash and lets a call through when a hook can't start
+# (no Python, or only the Microsoft Store's python3 stub), so run the installed hooks the same way.
+& $pyExe @pyArgs $setup guardcheck
+if ($LASTEXITCODE -ne 0) {
+    Die "Kit is installed, but its connector guard doesn't work (see above). Fix that, then run this installer again."
+}
+
 # --- Done ------------------------------------------------------------------------------------
 $uninstall = Join-Path $kitHome ".install\platform\windows\uninstall.ps1"
 $reinstall = Join-Path $kitHome ".install\platform\windows\install.ps1"

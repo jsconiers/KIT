@@ -1,15 +1,18 @@
 # Kit's automated checks.
 #   checks:          syntax for the shell, Python, and PowerShell, job templates and JSON, a scan for
 #                    personal details (patterns in the SCAN_PATTERNS secret), the owner-name test, the
-#                    end-of-day wrap and review rehearsal tests, the vendor desk, team coverage map, and
-#                    architecture digest tests, and the letter builder test.
+#                    connector guard's fail-closed launch (kit-hook), the end-of-day wrap and review
+#                    rehearsal tests, the vendor desk, team coverage map, and architecture digest tests,
+#                    and the letter builder test.
 #                    See .github/scripts/checks.py.
 #   windows-install: the Windows installer, run for real on GitHub's Windows runners under Windows
 #                    PowerShell 5.1 and PowerShell 7: install, reinstall, and the repair of an install
-#                    whose files lost their permissions (.github/scripts/windows-install-test.ps1), the
-#                    PPM Express connector's tests on Windows (Credential Manager, the pulse, and meeting
-#                    actions included), the wrap, rehearsal, vendor desk, team map, and digest tests, and the
-#                    Windows fixes tests (tests/test_windows_fixes.py, with python-docx).
+#                    whose files lost their permissions (.github/scripts/windows-install-test.ps1, with
+#                    the connector guard's installed hooks run in Git Bash), the guard launcher's tests
+#                    in Git Bash (tests/test_kit_hook.py), the PPM Express connector's tests on Windows
+#                    (Credential Manager, the pulse, and meeting actions included), the wrap, rehearsal,
+#                    vendor desk, team map, and digest tests, and the Windows fixes tests
+#                    (tests/test_windows_fixes.py, with python-docx).
 #   ppmx:            the PPM Express MCP server (shared/ppmx): its tests against a fake PPM Express (the
 #                    tools, and kit-ppmx's pulse and meeting actions: tests/test_ppmx_work.py), the
 #                    OpenShift files rendered with kustomize, and the container image built and run the
@@ -38,6 +41,8 @@ jobs:
         run: python3 .github/scripts/checks.py
       - name: Owner name test
         run: python3 tests/test_owner_name.py
+      - name: Connector guard launcher tests (kit-hook)
+        run: python3 tests/test_kit_hook.py
       - name: End-of-day wrap and review rehearsal tests
         run: |
           python3 tests/test_wrap.py
@@ -79,6 +84,8 @@ jobs:
         env:
           KIT_OWNER: Testy
         run: .\.github\scripts\windows-install-test.ps1
+      - name: Connector guard launcher tests on Windows (kit-hook in Git Bash)
+        run: python tests/test_kit_hook.py
       # One test per step: PowerShell fails a step only on its last command's exit code.
       - name: PPM Express MCP tests on Windows
         run: python tests/test_ppmx.py

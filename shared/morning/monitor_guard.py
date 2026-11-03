@@ -11,7 +11,11 @@ log. This monitor checks all three, plus the log itself:
             package) carries connector-guard hooks in its frontmatter, the INSTALLED copy in
             ~/.claude/agents must still have all three: PreToolUse (pre), PostToolUse (post), and
             PostToolUseFailure (fail), each a command that runs connector-guard with that event,
-            pointing at a connector-guard script that exists ($HOME and ~ are expanded).
+            pointing at a connector-guard script that exists ($HOME and ~ are expanded). A command
+            that goes through kit-hook needs kit-hook and the connector-guard beside it. When the
+            shipped copy's PreToolUse goes through kit-hook, the installed one must too: run with
+            Python directly, a Python that can't start (the Microsoft Store stub on Windows) lets
+            every call through, unguarded and unlogged.
   settings  connector-guard.json (KIT_CONNECTOR_GUARD_CONFIG, else memory/context/) is readable JSON
             with an allowed_servers list. Checked when any agent is guarded or the file exists.
   audit dir When connectors are configured (allowed_servers isn't empty), the guard's audit_dir
@@ -45,6 +49,7 @@ SHARED = os.path.dirname(HERE)
 HOOKS = (("PreToolUse", "pre"), ("PostToolUse", "post"), ("PostToolUseFailure", "fail"))
 GUARD_ARG = re.compile(r"connector-guard[\"']?\s+(pre|post|fail|stop)\b")
 SCRIPT = re.compile(r"""["']?((?:\$\{HOME\}|\$HOME|~|/)[^"'\s]*connector-guard)["']?""")
+LAUNCHER = re.compile(r"""["']?((?:\$\{HOME\}|\$HOME|~|/)[^"'\s]*kit-hook)["']?\s+connector-guard\b""")
 
 
 def read(path):
@@ -88,15 +93,29 @@ def guard_hooks(text):
     return out
 
 
+def expand(p, home):
+    p = p.replace("${HOME}", str(home)).replace("$HOME", str(home))
+    return str(home) + p[1:] if p.startswith("~") else p
+
+
 def script_path(cmd, home):
+    """The connector-guard script a hook command runs: for a command through kit-hook, the one beside
+    kit-hook (or kit-hook itself when it's missing, so that's what gets reported); else the path in
+    the command; else the one on the PATH."""
+    m = LAUNCHER.search(cmd)
+    if m:
+        launcher = expand(m.group(1), home)
+        return os.path.join(os.path.dirname(launcher), "connector-guard") if os.path.isfile(launcher) else launcher
     m = SCRIPT.search(cmd)
     if not m:
-        found = shutil.which("connector-guard")
-        return found
-    p = m.group(1).replace("${HOME}", str(home)).replace("$HOME", str(home))
-    if p.startswith("~"):
-        p = str(home) + p[1:]
-    return p
+        return shutil.which("connector-guard")
+    return expand(m.group(1), home)
+
+
+def launched(text):
+    """True when an agent file's PreToolUse connector-guard commands all go through kit-hook."""
+    cmds = guard_hooks(text).get("PreToolUse") or []
+    return bool(cmds) and all(LAUNCHER.search(c) for c in cmds)
 
 
 def shipped_agents(kit):
@@ -114,6 +133,7 @@ def guarded(kit):
 def hook_problems(kit, home):
     """{agent: [what's wrong]} for the installed copies of the guarded agents."""
     out = {}
+    shipped = {f.stem: f for f in shipped_agents(kit)}
     for name in guarded(kit):
         inst = pathlib.Path(home) / ".claude" / "agents" / f"{name}.md"
         text = read(inst)
@@ -131,6 +151,9 @@ def hook_problems(kit, home):
             if not any(p and os.path.isfile(p) for p in paths):
                 where = next((p for p in paths if p), "no path")
                 bad.append(f"{event} points at a missing script ({where})")
+        if have.get("PreToolUse") and launched(read(shipped[name]) or "") and not launched(text):
+            bad.append("PreToolUse runs connector-guard with Python directly, not through kit-hook, so a Python "
+                       "that can't start would let calls through unguarded")
         if bad:
             out[name] = bad
     return out

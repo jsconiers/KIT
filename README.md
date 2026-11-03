@@ -198,7 +198,8 @@ The installer links these into `~/.local/bin` (all in `shared/bin/`):
 | `kit-version` | Installed version and commit, and whether GitHub is ahead |
 
 Also in `shared/bin/`, called by Kit or the scheduled runs rather than by hand:
-`connector-guard` (the read-only hook and audit log, with each result's size and stated total), `kit-audit` (daily and weekly audit
+`connector-guard` (the read-only hook and audit log, with each result's size and stated total), `kit-hook` (runs
+the guard's hooks with a Python that works, and blocks the call when none does), `kit-audit` (daily and weekly audit
 checks), `kit-publish` (writes this Kit's shareable records), `kit-grammar` (optional offline
 grammar pass), `kit-drawio` (editable draw.io files), and `vsdx-finish` (Visio title blocks and
 legends).

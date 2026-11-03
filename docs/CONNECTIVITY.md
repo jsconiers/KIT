@@ -28,8 +28,11 @@ Kit has one guarded path to outside systems.
    allows only the servers listed in `memory/context/connector-guard.json` (`allowed_servers`), denies any
    tool whose name reads as a write (create, update, delete, add, set, link, upload, send, run, and
    similar) or that it doesn't recognize as read-only, lets `allow_tools` and `deny_tools` (full tool
-   names) win over those name rules, and fails closed: it denies the call if it can't read its settings or
-   write the audit log. After the call (or the failure) it writes one JSON line with the result's size,
+   names) win over those name rules, and fails closed: it denies the call if it can't read its settings,
+   write the audit log, or finish within `KIT_GUARD_TIMEOUT` seconds (20). Claude Code lets a call through
+   when a hook can't start (no Python, or Windows' Microsoft Store `python3` stub), so the hooks run through
+   `kit-hook`, which finds a Python that really runs and blocks the call when none does; the installers and
+   `doctor.py` run the installed hooks to check that a write is blocked. After the call (or the failure) it writes one JSON line with the result's size,
    whether it was an error, and any total the result states, never its contents, to
    `connectors-YYYY-MM.jsonl` in `audit_dir`.
 3. **kit-connect test** runs in the shell before every morning brief (`kit-connect test --json`, no model

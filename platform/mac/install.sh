@@ -41,6 +41,10 @@ esac
 # keyboard; change it any time with: kit-settings
 "$PY" "$ROOT/shared/bin/kit-settings" setup || printf 'install: note: settings skipped; run kit-settings setup later.\n'
 chmod -R go-rwx "$HOME/Claude/Agents/kit"
+# Run the connector guard's hooks in ~/.claude/agents as Claude Code would. Claude Code lets a call
+# through when a hook can't start, so a guard that can't run would leave connector calls unguarded.
+"$PY" "$ROOT/shared/kit_setup.py" guardcheck \
+  || die "Kit is installed, but its connector guard doesn't work (see above). Fix that, then run this installer again."
 
 cat <<MSG
 

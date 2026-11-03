@@ -78,6 +78,11 @@ the version and commit in `.install/VERSION.json`.
 The installer then runs `kit-settings setup`, which asks (only when someone is at the keyboard) how
 briefs should reach you and which app your to-dos sync with.
 
+Last, it runs the connector guard's hooks in `~/.claude/agents/` the way Claude Code does
+(`kit_setup.py guardcheck`): each guarded agent must block a write and allow a read. Claude Code lets a
+call through when a hook can't start, so if the check fails the installer stops with the reason
+(see Troubleshooting).
+
 If your Claude Code settings run with permission prompts bypassed, the installer warns you: Kit's
 ask rules only work with prompts on.
 
@@ -649,6 +654,7 @@ run `platform\windows\uninstall.ps1` and `unregister-tasks.ps1`. To reinstall la
 |---|---|
 | `/context` doesn't list KIT.md | The import line is missing; rerun the installer |
 | "Kit's staff installed: out of date" | Run `doctor.py --fix-agents` |
+| "Connector guard hooks" fails, or the installer stops at the guard check | "a write would go through": the agent runs the guard with Python directly and that Python can't start (on Windows, often the Microsoft Store's `python3` stub). Copy Kit's current agents (`doctor.py --fix-agents`); for an agent you edited, copy its `hooks:` block from `.install/kit/agents/`. "the guard can't run": `kit-hook` found no Python 3.8 or newer; install one so `python3`, `py -3`, or `python` runs it, or set `KIT_PYTHON` to its full path (in your environment, or in the `env` block of `~/.claude/settings.json`). Then rerun the installer or `doctor.py` |
 | "Models: N agents don't match" | Run `kit-models apply`, then `--fix-agents` |
 | "Scheduled X run: not loaded" | `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.$USER.kit.X.plist` |
 | "Recent runs: ... run didn't finish" | Read that day's log. A later successful run of the same kind clears it. |

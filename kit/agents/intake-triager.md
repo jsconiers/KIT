@@ -8,17 +8,17 @@ hooks:
     - matcher: "mcp__.*"
       hooks:
         - type: command
-          command: 'python3 "$HOME/Claude/Agents/kit/.install/shared/bin/connector-guard" pre intake-triager'
+          command: '/bin/sh "$HOME/Claude/Agents/kit/.install/shared/bin/kit-hook" connector-guard pre intake-triager || exit 2'
   PostToolUse:
     - matcher: "mcp__.*"
       hooks:
         - type: command
-          command: 'python3 "$HOME/Claude/Agents/kit/.install/shared/bin/connector-guard" post intake-triager'
+          command: '/bin/sh "$HOME/Claude/Agents/kit/.install/shared/bin/kit-hook" connector-guard post intake-triager || exit 1'
   PostToolUseFailure:
     - matcher: "mcp__.*"
       hooks:
         - type: command
-          command: 'python3 "$HOME/Claude/Agents/kit/.install/shared/bin/connector-guard" fail intake-triager'
+          command: '/bin/sh "$HOME/Claude/Agents/kit/.install/shared/bin/kit-hook" connector-guard fail intake-triager || exit 1'
 ---
 
 # Intake triager

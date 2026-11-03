@@ -1,0 +1,3 @@
+# kit-hook is a shell script that Git Bash runs on Windows, so it keeps LF line endings even where
+# core.autocrlf would check it out with CRLF (Git for Windows' default).
+shared/bin/kit-hook text eol=lf

@@ -45,7 +45,7 @@ For installing and configuring, see INSTALL.md; for how the pieces fit, see DESI
 | `kit-metrics` | Python 3.8 | Same code (opens the page with the platform's opener) | No metrics page; the data files are still kept |
 | `kit-project` | Python 3.8 | Same code | Create project folders by hand from `memory/context/project-types.md` |
 | `kit-delegate` | Python 3.8; a provider's API reachable, and its credential by env-var or credential-store name | Same code; the Keychain on macOS, Credential Manager on Windows | No delegate tool; Claude Code agents keep their own model |
-| `kit-run` | Python 3.8; as kit-delegate; for connectors, each MCP server's own runtime (for example node), named in kit-run.json | Same code; experimental; hooks run through the platform shell | Agents run only inside Claude Code |
+| `kit-run` | Python 3.8; as kit-delegate; for connectors, each MCP server's own runtime (for example node), named in kit-run.json | Same code; experimental; hooks run with `/bin/sh`, or Git Bash on Windows, as in Claude Code | Agents run only inside Claude Code |
 | `kit-lifecycle` | Python 3.8; an inventory export and eol.json in the radar folder | Same code | The planner joins inventory and dates by hand |
 | `kit-roadmap` | Python 3.8 | Same code | The planner drafts the roadmap by hand from the template |
 | `kit-connect` | Python 3.8; Claude Code (`claude mcp list`; `claude -p --agent gateway` for --read) | Same code; Keychain name check on macOS only | No connector report; check with `claude mcp list` by hand |
@@ -112,7 +112,7 @@ For installing and configuring, see INSTALL.md; for how the pieces fit, see DESI
 
 | Requirement | Used by | Notes |
 |---|---|---|
-| Python 3.8+ through the `py -3` launcher or `python` | Installer and all tools | `install.ps1` prefers `py -3`. Agent hook commands call `python3`, which many Windows machines lack (see the gaps in section 6) |
+| Python 3.8+ through the `py -3` launcher or `python` | Installer and all tools | `install.ps1` prefers `py -3`. The connector guard's hooks run through `kit-hook` in Git Bash, which uses `python3`, `py -3`, or `python`, whichever really runs (never the Microsoft Store's `python3` stub), and blocks connector calls when none does; the installer checks that |
 | PowerShell 5.1 or 7 | `install.ps1`, `run.ps1`, task registration | Run with `-ExecutionPolicy Bypass -File` for the installer only. The installer is tested in CI under both |
 | `icacls` (built in) | Owner-only NTFS permissions on Kit's folder | Applied by `install.ps1` |
 | Task Scheduler (built in) | Scheduled runs (`register-tasks.ps1`) | Untested adapter |
@@ -130,7 +130,7 @@ For installing and configuring, see INSTALL.md; for how the pieces fit, see DESI
 | `shared/bin/todo` | Python stdlib; rebuilds the dashboard | Recommended | Supported | Same code |
 | `shared/reminders_sync.py` | `osascript` and Apple Reminders | Optional | Supported | Not supported; Windows uses `platform/windows/reminders/reminders_sync_win.py` (Outlook Tasks over COM, untested adapter) |
 | `shared/protect_folder.py` | Python stdlib; `git` when the folder is a repo | Recommended for work folders | Supported | Same code |
-| `shared/bin/connector-guard` | Python stdlib; runs as a Claude Code hook | Required for agents that reach outside systems | Supported | Untested: hook commands call `python3` and `$HOME` |
+| `shared/bin/connector-guard` | Python stdlib; runs as a Claude Code hook | Required for agents that reach outside systems | Supported | Tested in CI: the installer and `doctor.py` run the installed hooks through `kit-hook` in Git Bash |
 | `shared/ppmx/` (the PPM Express MCP server) | Python stdlib for Kit's connector (stdio). The standalone service adds gunicorn, pinned in `shared/ppmx/requirements.txt` and installed only in its container image (a UBI Python 3.12 base), built with podman or docker (from macOS, Linux, or Windows) and run on OpenShift: `shared/ppmx/openshift/INSTALL.md` | Optional | Supported (stdio) | Same code (stdio), tested on Windows |
 | `shared/bin/vsdx-finish` | Python stdlib; a `.vsdx` made from a stencil with title-block and legend masters; settings in `vsdx-finish.json` | Optional (diagrammer) | Supported | Same code; pass `--author`, since the default uses the POSIX `id` command |
 | `shared/bin/kit-drawio` | Python stdlib for JSON specs; `python-pptx` only for PowerPoint input | Optional (diagrammer) | Supported | Same code |
@@ -162,10 +162,10 @@ session, including MCP connectors, minus the ones listed.
 |---|---|
 | Setup | `connectors.md`, `connector-guard.json` |
 | Tools | All except Write, Edit, NotebookEdit, Bash, WebSearch, WebFetch, Agent, SendMessage, Skill (so: read tools and MCP connectors) |
-| Hooks | `connector-guard` pre, post, and stop on every `mcp__*` call |
+| Hooks | `connector-guard` pre, post, fail, and stop on every `mcp__*` call, through `kit-hook` |
 | Skills | None |
 | Outside systems | The connectors `connectors.md` lists (service management, issue tracker, wiki), read-only, each with its own credential |
-| Commands | `python3` (for the hook) |
+| Commands | `/bin/sh` (Git Bash on Windows) and Python 3.8+, for the hook |
 | Other agents | None; answers Kit and the direct callers `connectors.md` names |
 | If missing | Either setup file missing: stops. Connector not listed or not read-only: the guard denies the call. Sign-in fails: stops after the first failure and reports it |
 
@@ -596,6 +596,10 @@ server, `--brief` for problems only).
 - No credential-shaped strings in Kit's notes, queue, or status.
 - Kit's folder is private (POSIX mode).
 - Agents in `~/.claude/agents/` match Kit's copies (`--fix-agents` copies them).
+- Connector guard hooks: each guarded agent's hooks in `~/.claude/agents/`, run the way Claude Code
+  runs them (`/bin/sh`, or Git Bash on Windows) with a throwaway guard setting, must block a write and
+  allow a read (FAIL otherwise; a warning for an agent that runs the guard with Python directly instead
+  of through `kit-hook`). The installers run the same check last and stop if it fails.
 - Kit's git history saved in the last three days.
 - Calendar (`~/.local/bin/kitcal`) and Apple Mail (`~/.local/bin/kitmail`, only when Mail is running).
 - LanguageTool and Java for `kit-grammar` (informational; absence is never a problem).
@@ -630,8 +634,7 @@ connector-guard integrity, agent drift, library indexes, items waiting too long,
 
 ### Gaps it doesn't check
 
-- Python version, and whether `python3` resolves (the hook commands depend on it; on Windows it
-  often doesn't).
+- Python version (the connector guard's hooks are checked by running them, as above).
 - Each agent's setup file exists, and how many fields are still "not set".
 - The library root in `library.md` exists and is writable; published library folders are reachable.
 - `connector-guard.json` is valid, its `audit_dir` is writable, and every agent that can reach
@@ -649,10 +652,15 @@ connector-guard integrity, agent drift, library indexes, items waiting too long,
 
 ### Fails open or closed
 
-The connector guard blocks the call if it hits an internal error. If the hook command itself can't
-start (for example `python3` isn't on the PATH), Claude Code treats that as a non-blocking hook
-error, so the call likely proceeds unguarded and unlogged. Check `python3` resolves in the shell
-Claude Code uses for hooks, on every machine.
+The connector guard blocks the call if it hits an internal error or takes longer than
+`KIT_GUARD_TIMEOUT` seconds (20 by default). Claude Code treats a hook that can't start as a
+non-blocking error and lets the call through, so the hooks run through `kit-hook`: it uses a Python
+that really runs (`KIT_PYTHON`, then `python3`, `py -3`, and `python`, passing over the Microsoft
+Store's `python3` stub) and exits 2, blocking the call, when none does or the guard fails. The pre
+hook's `|| exit 2` blocks the call even when `kit-hook` itself is missing. The post, fail, and stop
+hooks never exit 2 (a Stop hook that did would keep the agent from finishing); their `|| exit 1` holds
+even when the shell can't open `kit-hook`, which some shells report with exit 2. What's left open: a
+hook Claude Code itself gives up on (after its own timeout, 600 seconds by default) goes ahead.
 
 - connector-guard while paused: closed (every connector call denied).
 - kit-retention: closed (no rules, an unreadable file, or a held project means nothing is eligible;
@@ -678,7 +686,7 @@ Claude Code uses for hooks, on every machine.
   offered is refused before any hook runs; a hook can block a call but never loosen kit-run's rules).
 - kit-run hooks: as Claude Code: exit 2 or a deny decision blocks; any other non-zero exit is a
   non-blocking error and the call goes ahead (so a hook that crashes fails open, except the
-  connector guard, which denies on its own errors).
+  connector guard, which denies on its own errors and, through `kit-hook`, when it can't run).
 - run.ps1 time limit: closed for delivery (a stopped run's text is never delivered; a failure
   notice goes out instead); the claude process is ended by its run id.
 - kit-lifecycle: closed for unsourced dates (an EOL entry with no source counts as unknown) and never

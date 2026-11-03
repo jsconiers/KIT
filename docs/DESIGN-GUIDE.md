@@ -104,7 +104,7 @@ description: When to use the agent (Claude Code routes on this text)
 disallowedTools: Write, Edit, NotebookEdit, Bash, WebSearch, WebFetch, Agent, SendMessage, Skill
 model: inherit            # written by kit-models apply from models.json
 hooks:                    # only on agents that reach outside systems
-  PreToolUse: [...]       # connector-guard pre <agent>
+  PreToolUse: [...]       # kit-hook connector-guard pre <agent>
 ---
 ```
 
@@ -332,8 +332,11 @@ hooks on `mcp__.*`, plus `Stop`, in the frontmatter of five agents.
   count, retrieve, browse). Names with a write word (create, update, delete, add, set, link, send, run, and
   others) or that it doesn't recognize are denied. `allow_tools` and `deny_tools` (full names) win over the
   name rules. While Kit is paused, every call is denied.
-- *It fails closed:* if it can't read its settings or write the audit log, the call is denied. It never
-  auto-approves; allowed calls still go through normal permissions.
+- *It fails closed:* if it can't read its settings, write the audit log, or finish within its time limit,
+  the call is denied. Its hooks run through `kit-hook`, which blocks the call when no working Python can
+  run the guard (Claude Code lets a call through when a hook can't start), and the installers and
+  `doctor.py` run the installed hooks to check that. It never auto-approves; allowed calls still go
+  through normal permissions.
 - *After a call* it logs the result's size, whether it was an error, and a total the result states at its
   top level, never the contents. Failed calls are logged through `PostToolUseFailure`. Inputs are logged
   with credential-like fields redacted; every record carries the tool use id so calls and results pair

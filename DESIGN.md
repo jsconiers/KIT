@@ -68,7 +68,7 @@ trademarks of their owners; Kit isn't affiliated). The parallels are a handy way
 |---|---|
 | CLAUDE.md imports | One line in `~/.claude/CLAUDE.md` imports `KIT.md`, which imports the preferences, lessons, memory index, and status, so Kit loads in every session. |
 | Subagents | The staff are subagent definitions; `doctor.py --fix-agents` copies them to `~/.claude/agents/`. |
-| Hooks | The connector guard runs as PreToolUse, PostToolUse, PostToolUseFailure, and Stop hooks in the frontmatter of every agent that reaches outside systems. |
+| Hooks | The connector guard runs as PreToolUse, PostToolUse, PostToolUseFailure, and Stop hooks in the frontmatter of every agent that reaches outside systems, through `kit-hook`, which blocks the call when the guard can't run. |
 | MCP | Outside systems (issue trackers, wikis, service management) are MCP servers. |
 | Skills | Document skills build Word, PowerPoint, Excel, and PDF output. |
 | Settings | The installer adds allow and ask permission rules and Kit's folder as an additional directory (`shared/kit_setup.py`, `ALLOW` and `ASK`). |
@@ -132,7 +132,7 @@ Code and must pass before an agent moves to another model.
 |---|---|---|
 | Permission rules | `~/.claude/settings.json` (added by `kit_setup.py`) | Allow Kit's own notes; ask for editing Kit's rules and Claude Code settings, deleting, pushing, posting, installing, `launchctl`, `osascript`. |
 | Kit's ask-first rules | `kit/KIT.md` | Sending, deleting, installing, money, commitments, and anything outward-facing need the owner's yes, for Kit and every agent. |
-| Connector guard | `shared/bin/connector-guard` | Hook on guarded agents: allows only servers and tools in `connector-guard.json`, denies writes, records each call, result, and failure (with the tool use id) in the audit log. Denies on its own errors. |
+| Connector guard | `shared/bin/connector-guard` | Hook on guarded agents: allows only servers and tools in `connector-guard.json`, denies writes, records each call, result, and failure (with the tool use id) in the audit log. Denies on its own errors and when it runs past its time limit. It runs through `shared/bin/kit-hook`, a shell launcher that finds a Python that really runs and blocks the call when none does, since Claude Code lets a call through when a hook can't start. The installers and `doctor.py` run the installed hooks (`shared/guard_check.py`) to check a write is blocked. |
 | Audit review | `shared/bin/kit-audit`, auditor agent | Daily and weekly checks: denied calls, calls with no result, unguarded agents, volume, off-hours use, and searches that may have ignored their filter (a stated total far above the limit, or the same total for different queries; tool, time, total, and limit only, never the query). Issues go to the top of the brief and a dashboard banner. |
 | Kill switch | `shared/bin/kit-pause` | A pause file stops every scheduled run and makes the guard deny every connector call. |
 | Sharing policy | `memory/context/sharing-policy.json`, `kit_transport.policy_check` | Allowed transports and roots, blocked folders, classification ceiling, confidential never leaves unless allowed. A policy that can't be read refuses all sharing. |
@@ -324,8 +324,9 @@ compares folder listings with the indexes' file columns without opening document
 and never fail a run.
 
 **Guard integrity and least privilege.** `monitor_guard.py` checks every agent shipped with
-connector-guard hooks still has all three installed, the guard's settings are readable, its audit
-folder is writable, and calls have result records (reusing kit-audit's no-result check).
+connector-guard hooks still has all three installed (through `kit-hook` when the shipped copy uses it),
+the guard's settings are readable, its audit folder is writable, and calls have result records (reusing
+kit-audit's no-result check).
 `kit-audit privileges` compares each agent's reachable tools with the connector calls the audit log
 shows and suggests removals; it never edits an agent, and built-in tools show as "no usage data".
 Readiness figures come from `doctor.py --readiness --json`, never hand counts.
