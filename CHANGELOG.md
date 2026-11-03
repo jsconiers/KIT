@@ -7,8 +7,40 @@ versions follow [semantic versioning](https://semver.org).
 
 ## [Unreleased]
 
-### Fixed
+### Added
+- `kit-mcp-env`: starts an MCP server with its tokens from the Keychain (Credential Manager on Windows), in
+  that server's environment only, the way `kit-ppmx` gets `PPMX_TOKEN`. The MCP configuration holds only the
+  variables' names (`kit-mcp-env JIRA_PERSONAL_TOKEN -- <the server's command>`); no file, profile, or
+  command line holds a value. A missing token stops the server with a note naming the entry to store, and
+  `--check` says where each one is, by name. INSTALL.md (section 8) walks Jira and Confluence through it,
+  after turning TLS checking back on. Tested with stand-in stores, and on Windows against the real
+  Credential Manager (tests/test_mcp_env.py).
+- `kit-update --reinstall` reruns the installer even when the install already matches the clone.
 
+### Changed
+- PPM Express results show coded fields as labels only (On Track, At Risk, In Progress): the numbers that
+  came beside them under `codes`, which a task scan could show, are left out (Kit keeps them for the pulse).
+  A number sent as text ("1") or a label written another way ("AtRisk", "NotStarted", "Cancelled") gets PPM
+  Express's label, and field names match in any case. A code PPM Express's published tables don't have (a
+  status a tenant added) still shows as a number, and the answer now names it and shows how to label it in
+  `PPMX_CODES_FILE`, as `{"Task.Status": {"7": "Blocked"}}`. A task's Effort, which is hours, is no longer
+  shown as a rating. The task scan that showed numbers wasn't reproduced here, so each way a number could
+  reach an answer is closed.
+
+### Fixed
+- `kit-update --apply` skipped the installer when the clone was already up to date with GitHub but the
+  install wasn't from the clone's commit (the clone had moved without the installer, as after
+  `kit-patch --sync` or a `git pull`), though `kit-version` said GitHub was ahead of the install. It now
+  reruns the installer then, without moving the clone; plain `kit-update` says the install lags and what
+  installing would bring in. An install newer than the clone is left alone.
+- `kit-update` refused a patch GitHub had applied when GitHub's commit differed from the clone's only in the
+  Word and PDF documents rebuilt on publishing, as with 1.6.1. It now takes a commit whose only differences
+  are binary files both have, names them, and keeps the clone's versions on the backup branch; a text
+  difference, or a file only one side has, still stops it. `kit-patch --sync`, which isn't in the repo,
+  needs the same rule.
+- `kit-ppmx`: a code tables file (`PPMX_CODES_FILE`) that couldn't be read turned every label off, so
+  statuses showed as numbers. The published labels now stay, and `kit-ppmx check` says what's wrong with
+  the file.
 - `kit-wins collect` remembers what it took (`memory/.accomplishments-seen.json`), so a line you edit or delete in the accomplishments log stays that way; `kit-wins mark` records what the sources hold now, for a log rewritten by hand.
 
 ## [1.6.2] - 2026-11-03

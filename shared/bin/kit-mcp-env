@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""kit-mcp-env: start an MCP server with its tokens from the Keychain (Credential Manager on Windows),
+in that server's own environment only, the way kit-ppmx gets PPMX_TOKEN.
+
+  kit-mcp-env NAME [NAME=ENTRY ...] -- COMMAND [ARGS...]
+  kit-mcp-env --check NAME [NAME=ENTRY ...] [-- COMMAND ...]
+
+For each NAME, the server starts with an environment variable NAME holding the secret stored under the
+entry NAME (or ENTRY, when given). A variable already set in the environment is used as it is. The
+values go only into the server's environment: never printed, logged, written to a file, or put on a
+command line, and the MCP configuration holds only their names. If one can't be found, the server isn't
+started: kit-mcp-env says which entry to store and how, on standard error, and exits 2, so Claude Code
+shows the server as failed rather than half working. Its own messages never go to standard output,
+which belongs to the server.
+
+Store each token once; the command asks for the value, so it never lands in your shell history:
+
+  security add-generic-password -s JIRA_PERSONAL_TOKEN -a "$USER" -w     macOS: the Keychain
+  cmdkey /generic:JIRA_PERSONAL_TOKEN /user:kit /pass                     Windows: Credential Manager
+
+Then add the server through kit-mcp-env (INSTALL.md, section 8, has the whole example):
+
+  claude mcp add --scope user jira -- python3 ~/Claude/Agents/kit/.install/shared/bin/kit-mcp-env \\
+      JIRA_PERSONAL_TOKEN -- <the server's own command>
+
+Name each entry after its variable, as PPMX_TOKEN is, so doctor.py and `kit-connect test` find it by name
+(list the variable under credential_env in connector-guard.json). --check says where each one is, by
+name only, without reading any value, and starts nothing.
+"""
+import os
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import kit_secrets  # noqa: E402
+
+PROG = "kit-mcp-env"
+NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
+ENTRY = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.@:/ -]{0,199}")
+
+
+class UsageError(Exception):
+    pass
+
+
+def parse(argv):
+    """(check, [(name, entry)], command) from the command line."""
+    check = bool(argv) and argv[0] == "--check"
+    if check:
+        argv = argv[1:]
+    if "--" in argv:
+        at = argv.index("--")
+        specs, command = argv[:at], argv[at + 1:]
+    else:
+        specs, command = argv, []
+    if not specs:
+        raise UsageError("name at least one credential, like JIRA_PERSONAL_TOKEN")
+    pairs = []
+    for spec in specs:
+        name, _, entry = spec.partition("=")
+        entry = entry or name
+        if not NAME.fullmatch(name):
+            raise UsageError(f"{name[:60]!r} isn't an environment variable name")
+        if not ENTRY.fullmatch(entry):
+            raise UsageError(f"{entry[:60]!r} isn't an entry name kit-mcp-env reads (letters, digits, and _ . @ : / - "
+                             "or spaces, starting with a letter, digit, or _)")
+        pairs.append((name, entry))
+    if not check and not command:
+        raise UsageError("nothing to start: put the server's command after --")
+    return check, pairs, command
+
+
+def how_to_store(entry):
+    if kit_secrets.STORE == "Credential Manager":
+        return f"cmdkey /generic:{entry} /user:kit /pass"
+    return f'security add-generic-password -s {entry} -a "$USER" -w'
+
+
+def missing(name, entry):
+    """What to say about a credential that can't be found (names only)."""
+    store = kit_secrets.STORE
+    if not store:
+        return f"{name} isn't set, and this computer has no credential store Kit reads: set {name} for the server"
+    return (f"{name} isn't set, and the {store} has no entry {entry} (or wouldn't give it): store it with "
+            f"{how_to_store(entry)} (it asks for the value)")
+
+
+def server_env(pairs, environ=None):
+    """(the server's environment, problems): ENVIRON plus each credential, and what's missing."""
+    env = dict(os.environ if environ is None else environ)
+    problems = []
+    for name, entry in pairs:
+        if (env.get(name) or "").strip():
+            continue
+        try:
+            cred = kit_secrets.resolve({"keychain_entry": entry}, name)
+            value = cred.reveal().strip() if cred else ""
+        except kit_secrets.CredentialError:
+            value = ""
+        if value:
+            env[name] = value
+        else:
+            problems.append(missing(name, entry))
+    return env, problems
+
+
+def check(pairs):
+    """Where each credential is, by name only; 0 when every one is somewhere."""
+    found = 0
+    for name, entry in pairs:
+        if (os.environ.get(name) or "").strip():
+            print(f"{name}: in the environment")
+            found += 1
+        elif kit_secrets.stored(entry):
+            print(f"{name}: in the {kit_secrets.STORE}" + (f" (entry {entry})" if entry != name else ""))
+            found += 1
+        else:
+            print(f"{name}: missing; {missing(name, entry).split(': ', 1)[-1]}")
+    return 0 if found == len(pairs) else 1
+
+
+def launch(command, env):
+    """Run the server with ENV: in place of this process where that's possible (macOS, Linux), else as a
+    child whose exit code becomes this one's (Windows). Standard input and output go straight through."""
+    exe = shutil.which(command[0], path=env.get("PATH")) or command[0]
+    if os.name != "nt":
+        try:
+            os.execve(exe, [command[0], *command[1:]], env)
+        except OSError as e:
+            print(f"{PROG}: can't start {command[0]}: {e.strerror or e.__class__.__name__}", file=sys.stderr)
+            return 127
+    try:
+        return subprocess.run([exe, *command[1:]], env=env).returncode
+    except OSError as e:
+        print(f"{PROG}: can't start {command[0]}: {e.strerror or e.__class__.__name__}", file=sys.stderr)
+        return 127
+    except KeyboardInterrupt:
+        return 130
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0 if argv else 2
+    try:
+        checking, pairs, command = parse(argv)
+    except UsageError as e:
+        print(f"{PROG}: {e} (kit-mcp-env --help shows how)", file=sys.stderr)
+        return 2
+    if checking:
+        return check(pairs)
+    env, problems = server_env(pairs)
+    if problems:
+        for p in problems:
+            print(f"{PROG}: {p}", file=sys.stderr)
+        print(f"{PROG}: {command[0]} wasn't started", file=sys.stderr)
+        return 2
+    return launch(command, env)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

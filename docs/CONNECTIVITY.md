@@ -105,7 +105,9 @@ and `kit-ppmx`'s own log is the audit.
 
 Name a credential, never write its value: an environment variable (`TRACKER_MCP_TOKEN`), or a Keychain or
 Credential Manager entry (`PPMX_TOKEN`). Don't put a token literally in an MCP server's `args` or `env`;
-use `${VAR}` expansion or a headers helper. Don't add allow rules that print the MCP configuration.
+use `${VAR}` expansion, a headers helper, or `kit-mcp-env`, which starts a server with its tokens read from
+the Keychain or Credential Manager into that server's environment only (INSTALL.md, section 8). Don't add
+allow rules that print the MCP configuration.
 
 ## Hardening checklist
 

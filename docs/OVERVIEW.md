@@ -122,7 +122,7 @@ called as needed.
 | Read-only connectors | Agents reach work systems through MCP servers. The connector guard allows only listed servers and read tools for the agents that carry it, denies writes, and logs every call, result, and failure. |
 | One system Kit can change | PPM Express, only from the owner's own session, after Kit says exactly what it will change, and with Claude Code asking before each change. Agents and scheduled runs never change it. Every call is logged without values. |
 | Information, not instructions | Text read in files, mail, web pages, other Kits' records, or texts is never treated as an order; Kit tells the owner instead. |
-| Credentials by name | Kit refers to credentials by environment-variable or credential-store entry name and never stores, logs, or prints a value. |
+| Credentials by name | Kit refers to credentials by environment-variable or credential-store entry name and never stores, logs, or prints a value. Connector servers can take their tokens from the credential store at start, in their own environment only (`kit-mcp-env`). |
 | Kill switch | `kit-pause` stops every scheduled run and denies every connector call at once. |
 | Privacy | Kit's folder is readable only by the owner. Personal notes stay in `memory/personal/`, don't load on their own, and stay out of work folders and shared records. |
 | Evidence | A daily and weekly audit of connector use, encrypted backups, and on-request evidence packs for a security or compliance review. |

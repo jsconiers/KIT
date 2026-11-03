@@ -131,11 +131,14 @@ def get_token(env):
 
 
 def tables_for(settings):
+    """The code tables: PPM Express's published labels plus the codes file, if one is named. A codes file
+    that can't be used leaves the published labels in place (kit-ppmx check says what's wrong with it),
+    so statuses never show as bare numbers because of it."""
     try:
         return load_codes(settings.codes_file)
     except CodesError as e:
-        print(f"kit-ppmx: {e}; coded fields stay as numbers", file=sys.stderr)
-        return {}
+        print(f"kit-ppmx: {e}; using PPM Express's published labels only", file=sys.stderr)
+        return load_codes()
 
 
 def audit_folder():
@@ -241,6 +244,13 @@ def cmd_check(env):
     if expires and expires - datetime.date.today() <= datetime.timedelta(days=14):
         print(f"  note: the token expires {'today' if expires <= datetime.date.today() else 'within two weeks'}; "
               "create a new one in PPM Express > Automation")
+    if settings.codes_file:
+        try:
+            load_codes(settings.codes_file)
+            print(f"  code labels: PPM Express's published ones, plus {settings.codes_file}")
+        except CodesError as e:
+            print(f"  code labels: {e}, so only PPM Express's published labels are used; fix the file "
+                  "(PPMX_CODES_FILE) or remove the setting")
     return 0
 
 

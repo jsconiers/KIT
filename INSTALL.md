@@ -443,6 +443,51 @@ Claude Code's docs). Then:
 
 The health check (`doctor.py`) looks credentials up the same way, and warns about one it finds in neither place.
 
+### Tokens in the Keychain for any server (kit-mcp-env)
+
+Most MCP servers read their token from an environment variable. `kit-mcp-env` lets that variable come from
+the Keychain (Credential Manager on Windows), the way `kit-ppmx` gets `PPMX_TOKEN`: it reads the entry as
+the server starts and puts the value in that server's environment only, so neither the MCP configuration,
+your shell profile, nor Kit's config holds it, and scheduled runs find it too. For Jira and Confluence
+through mcp-atlassian on Server or Data Center, for example:
+
+1. **TLS checking on first.** A token should never travel over a connection that isn't checked. Remove
+   any setting that turns checking off (`JIRA_SSL_VERIFY=false`, `CONFLUENCE_SSL_VERIFY=false`,
+   `NODE_TLS_REJECT_UNAUTHORIZED=0`), and if your company's certificates need its own CA bundle, name it:
+   `REQUESTS_CA_BUNDLE` for Python servers such as mcp-atlassian, `NODE_EXTRA_CA_CERTS` for Node servers
+   (the hardening checklist in `docs/CONNECTIVITY.md`).
+2. **The tokens.** Store each under the name of the variable the server reads; each command asks for the
+   value, so it never lands in your shell history:
+
+   ```bash
+   security add-generic-password -s JIRA_PERSONAL_TOKEN -a "$USER" -w          # macOS: the Keychain
+   security add-generic-password -s CONFLUENCE_PERSONAL_TOKEN -a "$USER" -w
+   ```
+
+   ```powershell
+   cmdkey /generic:JIRA_PERSONAL_TOKEN /user:kit /pass                          # Windows: Credential Manager
+   cmdkey /generic:CONFLUENCE_PERSONAL_TOKEN /user:kit /pass
+   ```
+3. **The server.** Remove the old entry (`claude mcp remove atlassian`, and with it any token it held),
+   then add it back through `kit-mcp-env`: the variable names before the second `--`, the server's own
+   command after it, pinned to a version you've reviewed:
+
+   ```bash
+   claude mcp add --scope user atlassian --env JIRA_URL=https://jira.example.com \
+     --env CONFLUENCE_URL=https://wiki.example.com --env REQUESTS_CA_BUNDLE=/path/to/ca-bundle.pem -- \
+     python3 ~/Claude/Agents/kit/.install/shared/bin/kit-mcp-env JIRA_PERSONAL_TOKEN CONFLUENCE_PERSONAL_TOKEN \
+     -- uvx mcp-atlassian@<version>
+   ```
+
+   On Windows, use the full paths to `python.exe` and to `kit-mcp-env` under `%USERPROFILE%`.
+4. **Check.** `kit-mcp-env --check JIRA_PERSONAL_TOKEN CONFLUENCE_PERSONAL_TOKEN` says where each one is,
+   by name only. Add `"credential_env": {"atlassian": ["JIRA_PERSONAL_TOKEN", "CONFLUENCE_PERSONAL_TOKEN"]}`
+   to `connector-guard.json`, then run `kit-connect test`.
+
+When a token can't be found, the server doesn't start and `claude mcp list` shows it failed; Claude Code's
+MCP log has `kit-mcp-env`'s note naming the entry to store. `NAME=ENTRY` reads an entry with another name,
+but then `doctor.py` and `kit-connect` can't find it by the variable's name.
+
 ### PPM Express (kit-ppmx)
 
 Kit ships its own PPM Express connector, `kit-ppmx`: an MCP server that reads portfolios, programs,
@@ -584,14 +629,19 @@ check. `kit-plugin` never pushes or publishes.
 ## 11. Updating
 
 ```bash
-kit-update            # fetch GitHub and show new commits and files; changes nothing
-kit-update --apply    # back up, move the clone onto GitHub's main, rerun the installer
-kit-version --check   # installed version vs GitHub
+kit-update              # fetch GitHub and show new commits and files; changes nothing
+kit-update --apply      # back up, move the clone onto GitHub's main, rerun the installer
+kit-update --reinstall  # rerun the installer even when the install matches the clone
+kit-version --check     # installed version vs GitHub
 ```
 
-`kit-update` stops if your clone has uncommitted work or commits GitHub doesn't have, except when
-GitHub already applied a patch with the same files. After an update, the next brief adds "What
-changed in Kit" once. Rerun `doctor.py --fix-agents` if agents changed.
+When the clone is already up to date with GitHub but the install isn't from its commit (the clone
+moved without the installer, after `kit-patch --sync` or a `git pull`), `kit-update` says so and
+`--apply` reruns the installer without moving the clone. `kit-update` stops if your clone has
+uncommitted work or commits GitHub doesn't have, except when GitHub already applied your patch: one of
+its commits has the same files, or differs only in binary files both have (the Word and PDF documents
+rebuilt on publishing), which it names; your versions stay on the backup branch. After an update, the
+next brief adds "What changed in Kit" once. Rerun `doctor.py --fix-agents` if agents changed.
 
 ## 12. Backup and restore
 

@@ -43,7 +43,11 @@ lessons learned, and more, but the API description has no endpoint for them, so 
 The code tables in `codes.py` are the ones PPM Express publishes: status (0 On Track, 1 At Risk,
 2 Critical, 10 Done, -1 N/A), progress (0 Not Started, 1 Completed, 2 In Progress, 3 On Hold,
 4 Canceled), the 0-5 rating scale, idea stage (0 Draft to 5 Archived), and key date type (0 Key Date,
-1 Milestone, 2 Release). Reads show the labels with the numbers under `codes`; writes take either.
+1 Milestone, 2 Release). A task's Effort is hours, so it's left as a number. Reads show the labels
+only, whether PPM Express sends a number (1), a number as text ("1"), or a name ("AtRisk"); a code
+the tables don't have (a status your tenant added) stays a number, and the answer names it and says how
+to label it in `PPMX_CODES_FILE`. Writes take a label, written any way, or a number. In Kit, a codes
+file that can't be used leaves the published labels in place, and `kit-ppmx check` says what's wrong.
 
 ## Tools
 
@@ -134,7 +138,7 @@ ConfigMap):
 | `PPMX_PAGE_SIZE`, `PPMX_MAX_ROWS` | 25, 200 | Rows a list returns by default, and at most |
 | `PPMX_WORK_MAX_PROJECTS`, `PPMX_WORK_SECONDS` | 25, 30 | `list_my_work`: the most projects one call scans, and how long it may scan |
 | `PPMX_MY_NAME` | none | stdio only: your name as PPM Express shows it, so `"me"` matches exactly (`/me` gives no name). The HTTP service ignores it |
-| `PPMX_CODES_FILE` | none | A JSON file of labels that add to or override the published codes: `{"OverallStatus": {"1": "Watch"}}`; `"KeyDate.Type"` limits a table to one kind of record |
+| `PPMX_CODES_FILE` | none | A JSON file of labels that add to or override the published codes: `{"OverallStatus": {"1": "Watch"}}`; `"Task.Status"` limits a table to one kind of record |
 | `PPMX_ALLOWED_ORIGINS` | none | Browser origins the HTTP server accepts; a request from any other is refused |
 | `PPMX_MAX_BODY` | 1048576 | The largest request the HTTP server reads, in bytes |
 | `PPMX_AUDIT` | on | Audit lines on standard error |

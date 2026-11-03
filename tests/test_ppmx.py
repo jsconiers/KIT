@@ -174,6 +174,37 @@ ok(codes.encode("Status", "Unheard of", T) == "Unheard of" and codes.encode("Nam
 ok(codes.load(str(CODES))["OverallStatus"][1] == "Watch" and codes.load(str(CODES))["Progress"][1] == "Completed",
    "a codes file adds to and overrides the published tables")
 ok(raises(lambda: codes.load(str(tmp / "missing.json")), codes.CodesError), "a missing code file is a clear error")
+ok(codes.decode({"Status": "1", "Progress": " 2 "}, T, "Task") == {"Status": "At Risk", "Progress": "In Progress",
+                                                                  "codes": {"Status": 1, "Progress": 2}},
+   "numbers written as text get their labels too")
+ok(codes.decode({"Status": "AtRisk", "Progress": "notstarted", "Type": "KEY DATE"}, T, "KeyDate")
+   == {"Status": "At Risk", "Progress": "Not Started", "Type": "Key Date", "codes": {"Status": 1, "Progress": 0, "Type": 0}}
+   and codes.decode({"Progress": "Cancelled", "OverallStatus": "NA"}, T)["Progress"] == "Canceled"
+   and codes.decode({"OverallStatus": "NA"}, T)["OverallStatus"] == "N/A",
+   "labels written any way (AtRisk, notstarted, NA, Cancelled) come back as PPM Express's labels")
+ok(codes.decode({"status": 2, "overallStatus": 10, "PRIORITY": 1}, T, "Task")
+   == {"status": "Critical", "overallStatus": "Done", "PRIORITY": "Low", "codes": {"status": 2, "overallStatus": 10, "PRIORITY": 1}},
+   "field names in any case")
+ok(codes.decode({"Effort": 3}, T, "Task") == {"Effort": 3} and codes.decode({"Effort": 3}, T, "Project")["Effort"] == "Moderate",
+   "a task's Effort is hours, not a rating; a project's is a rating")
+ok(codes.decode({"Progress": 0.5, "Status": "In review", "Priority": True, "Name": "Done"}, T, "Deliverable")
+   == {"Progress": 0.5, "Status": "In review", "Priority": True, "Name": "Done"},
+   "fractions, other text, true/false, and fields with no table are left alone")
+odd = codes.decode({"Status": 7, "Progress": "9", "Priority": 2}, T, "Task")
+ok(odd["Status"] == 7 and odd["Progress"] == "9" and odd["unlabeled"] == {"Status": 7, "Progress": 9}
+   and odd["codes"] == {"Priority": 2}, "a number with no label stays a number and is listed as unlabeled", str(odd))
+note = codes.unlabeled_note([odd], "Task")
+ok(note and "Progress 9; Status 7" in note and "PPMX_CODES_FILE" in note and '"Task.Progress": {"9": "<its label>"}' in note,
+   "the note names the codes with no label and says how to label them", note)
+ok(codes.public(odd) == {"Status": 7, "Progress": "9", "Priority": "Normal"} and codes.unlabeled_note([{"Status": "At Risk"}]) is None,
+   "public() leaves out the numbers kept for Kit's own use")
+LABELS = tmp / "labels.json"
+LABELS.write_text(json.dumps({"Task.Status": {"7": "Blocked"}}))
+ok(codes.decode({"Status": 7}, codes.load(str(LABELS)), "Task") == {"Status": "Blocked", "codes": {"Status": 7}}
+   and codes.decode({"Status": 7}, codes.load(str(LABELS)), "KeyDate").get("unlabeled") == {"Status": 7},
+   "a codes file labels a tenant's own code, for the kind of record it names")
+ok(codes.encode("Status", "AtRisk", T) == 1 and codes.encode("progress", "cancelled", T) == 4,
+   "writes take labels written any way, too")
 
 # ---- read tools
 bare = Context(client, settings, {}, ALEX)
@@ -192,8 +223,11 @@ ok([i["Name"] for i in r["items"]] == ["Network refresh", "Data center exit", "M
 r = run_tool("list_projects", {"limit": 1, "offset": 1}, plain)
 ok(r["total"] == 3 and len(r["items"]) == 1 and r["next_offset"] == 2 and r["sort"] == "name asc", "paging: limit, offset, next_offset")
 r = run_tool("list_projects", {"status": "on track"}, plain)
-ok(r["total"] == 2 and r["items"][0]["OverallStatus"] == "On Track" and r["items"][0]["codes"]["OverallStatus"] == 0,
-   "status as a label, the number kept in codes, and filtering by label", str(r["items"][:1]))
+ok(r["total"] == 2 and {i["OverallStatus"] for i in r["items"]} == {"On Track"}
+   and {i["Progress"] for i in r["items"]} == {"Not Started", "In Progress"},
+   "status and progress as labels, and filtering by label", str(r["items"][:1]))
+ok('"codes"' not in json.dumps(r) and '"codes"' not in json.dumps(run_tool("list_projects", {"fields": ["codes"]}, plain))
+   and "notes" not in r, "a list shows labels only: no numbers beside them, even when asked for", str(r)[:300])
 r = run_tool("list_portfolios", {"name_contains": "infra"}, coded)
 ok(r["items"][0]["OverallStatus"] == "Watch", "a codes file's label wins")
 r = run_tool("list_projects", {"fields": ["Description"], "name_contains": "network"}, plain)
@@ -203,6 +237,8 @@ ok(r["project"]["Name"] == "Network refresh" and r["key_dates"]["total"] == 3 an
    and "notes" in r, "without code tables, tasks are kept open, and the answer says so")
 r = run_tool("get_project", {"project_id": F.A1, "include": ["tasks"]}, plain)
 ok(r["tasks"]["total"] == 3 and "notes" not in r, "with the code tables, done tasks drop out")
+ok(r["project"]["OverallStatus"] == "On Track" and r["project"]["Progress"] == "In Progress" and '"codes"' not in json.dumps(r),
+   "get_project: the record and its tasks show labels only", str(r["project"])[:300])
 r = run_tool("list_tasks", {"project_id": F.A1, "overdue_only": True}, plain)
 ok(r["total"] == 1 and r["items"][0]["Name"] == "Order switches", "overdue tasks (today 30-Oct-2026)", str(r)[:300])
 r = run_tool("list_tasks", {"project_id": F.A1, "due_within_days": 14}, plain)
@@ -297,7 +333,8 @@ ok(r["total"] == 1 and r["items"][0]["id"] == F.D2, "list_deliverables: by assig
 r = run_tool("list_deliverables", {"project_id": F.A1, "overdue_only": True}, plain)
 ok(r["total"] == 0, "list_deliverables: overdue leaves out finished ones")
 r = run_tool("get_deliverable", {"project_id": F.A1, "deliverable_id": F.D1}, plain)
-ok(r["deliverable"]["Name"] == "Switch design pack" and r["deliverable"]["sourceType"] == "Ppmx", "get_deliverable")
+ok(r["deliverable"]["Name"] == "Switch design pack" and r["deliverable"]["sourceType"] == "Ppmx"
+   and r["deliverable"]["Status"] == "On Track" and "codes" not in r["deliverable"], "get_deliverable, with labels only")
 ok(raises(lambda: run_tool("get_deliverable", {"project_id": F.A1, "deliverable_id": "x"}, plain), ToolError, "UUID"),
    "get_deliverable: a bad ID is refused")
 ok(run_tool("get_project", {"project_id": F.A1, "include": ["deliverables"]}, plain)["deliverables"]["total"] == 2,
@@ -312,7 +349,26 @@ ok(r["total"] == 2 and {(i["kind"], i["id"]) for i in r["items"]} == {("task", F
    and all(i["project_id"] == F.A1 and i["project"] == "Network refresh" for i in r["items"])
    and r["projects_in_scope"] == 3 and r["projects_scanned"] == 3 and r["complete"] and "notes" not in r,
    "list_my_work: open tasks and deliverables assigned to me, with their project", str(r)[:400])
+kinds = {i["kind"]: i for i in r["items"]}
+ok([i["Status"] for i in r["items"]] == ["On Track", "On Track"] and kinds["task"]["Progress"] == "Not Started"
+   and kinds["deliverable"]["Progress"] == 0.5 and '"codes"' not in json.dumps(r),
+   "list_my_work (the task scan): statuses and progress as labels, no numbers (a deliverable's progress is a fraction)",
+   str(r["items"])[:300])
 ok(run_tool("list_my_work", {"open_only": False}, mine)["total"] == 3, "list_my_work: open_only false adds finished work")
+t3 = fake.data["tasks"][F.A1][2]["attributes"]
+t3["Status"] = 7
+try:
+    r = run_tool("list_my_work", {}, Context(Client(settings), settings, codes.load(), ALEX))
+    item = [i for i in r["items"] if i["id"] == F.T3][0]
+    ok(item["Status"] == 7 and any("No label for Status 7" in n and "PPMX_CODES_FILE" in n for n in r.get("notes", [])),
+       "a status PPM Express's published codes don't have: a number, and the answer says how to label it", str(r)[:500])
+    r = run_tool("list_my_work", {}, Context(Client(settings), settings, codes.load(str(LABELS)), ALEX))
+    ok([i for i in r["items"] if i["id"] == F.T3][0]["Status"] == "Blocked" and "notes" not in r,
+       "with the label in the codes file, it shows as a label", str(r)[:400])
+    r = run_tool("list_tasks", {"project_id": F.A1}, Context(Client(settings), settings, codes.load(), ALEX))
+    ok(any("No label for Status 7" in n for n in r.get("notes", [])), "list_tasks says the same", str(r)[:400])
+finally:
+    t3["Status"] = 0
 r = run_tool("list_my_work", {"due_within_days": 7}, mine)
 ok(r["total"] == 1 and r["items"][0]["id"] == F.D1, "list_my_work: due within 7 days")
 ok(run_tool("list_my_work", {"include": ["tasks"]}, mine)["total"] == 1, "list_my_work: tasks only")
@@ -686,6 +742,15 @@ rc, o, e = kp("check", PPMX_TOKEN="token-nobody-999")
 ok(rc == 1 and "Automation" in e, "kit-ppmx check with a rejected token: exit 1", e)
 rc, o, e = kp("call", "list_projects", '{"limit": 1}', PPMX_TOKEN=ALEX)
 ok(rc == 0 and json.loads(o)["total"] == 3, "kit-ppmx call prints a tool's JSON", o + e)
+rc, o, e = kp("call", "list_projects", '{"limit": 1}', PPMX_TOKEN=ALEX, PPMX_CODES_FILE=str(tmp / "no-such-codes.json"))
+ok(rc == 0 and json.loads(o)["items"][0]["Name"] == "Data center exit" and json.loads(o)["items"][0]["OverallStatus"] == "Critical",
+   "a codes file that can't be read: kit-ppmx still shows PPM Express's published labels (it showed numbers)", o + e)
+ok("published labels" in e, "... and says on standard error that it's using them", e)
+rc, o, e = kp("check", PPMX_TOKEN=ALEX, PPMX_CODES_FILE=str(tmp / "no-such-codes.json"))
+ok(rc == 0 and "code labels:" in o and "only PPM Express's published labels are used" in o,
+   "kit-ppmx check names a codes file that can't be used", o + e)
+rc, o, e = kp("check", PPMX_TOKEN=ALEX, PPMX_CODES_FILE=str(LABELS))
+ok(rc == 0 and "plus " + str(LABELS) in o, "kit-ppmx check names a codes file in use", o + e)
 rc, o, e = kp("call", "list_projects", "{oops", PPMX_TOKEN=ALEX)
 ok(rc == 2 and "JSON" in e, "kit-ppmx call with bad JSON")
 rc, o, e = kp("call", "create_task", json.dumps({"project_id": F.A1, "name": "x"}), PPMX_TOKEN=ALEX, PPMX_WRITES="off")

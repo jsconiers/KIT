@@ -286,13 +286,22 @@ def summarize(row, roles, extra):
         if key:
             out[key] = value
     for key in extra or []:
-        if key in row:
+        if key in row and key not in codes_mod.INTERNAL:
             out[key] = row[key]
-    if isinstance(row.get("codes"), dict):
-        kept = {k: v for k, v in row["codes"].items() if k in out}
-        if kept:
-            out["codes"] = kept
     return out
+
+
+def add_notes(out, notes):
+    """Add notes to a result, after any it has."""
+    notes = [n for n in notes if n]
+    if notes:
+        out.setdefault("notes", []).extend(notes)
+    return out
+
+
+def record(row, entity=None):
+    """(the record as a tool returns it, a note about codes in it with no label or None)."""
+    return codes_mod.public(row), codes_mod.unlabeled_note([row], entity)
 
 
 def sort_value(row, role):
@@ -315,12 +324,16 @@ def page(rows, args, ctx, default_sort, roles, keep=()):
     keyed = [(sort_value(r, role), r) for r in rows]
     ordered = [r for _, r in sorted([k for k in keyed if k[0] is not None], key=lambda k: k[0], reverse=desc)]
     ordered += [r for v, r in keyed if v is None]     # records without the value come last either way
+    shown = ordered[offset:offset + limit]
+    items = [summarize(r, roles, list(keep) + list(args.get("fields") or [])) for r in shown]
     out = {"total": total, "offset": offset, "limit": limit, "sort": f"{role} {'desc' if desc else 'asc'}",
-           "items": [summarize(r, roles, list(keep) + list(args.get("fields") or []))
-                     for r in ordered[offset:offset + limit]]}
+           "items": items}
     if offset + limit < total:
         out["next_offset"] = offset + limit
-    return out
+    # codes with no label, among the fields shown
+    return add_notes(out, [codes_mod.unlabeled_note(
+        [{"unlabeled": {f: c for f, c in (r.get("unlabeled") or {}).items() if f in item}}
+         for r, item in zip(shown, items)])])
 
 
 # ---------------------------------------------------------------- the tools
@@ -369,7 +382,8 @@ def t_project(ctx, args):
     found = ctx.rows("project", id=pid)
     if not found:
         raise ToolError("PPM Express returned no project for that ID")
-    out = {"project": found[0]}
+    project, note = record(found[0], "Project")
+    out = add_notes({"project": project}, [note])
     include = args.get("include") or []
     each = {"limit": args.get("limit_each") or ctx.settings.page_size}
     if "key_dates" in include:
@@ -379,7 +393,7 @@ def t_project(ctx, args):
         if args.get("open_tasks_only", True):
             tasks, unknown = open_rows(tasks)
             if unknown:
-                out["notes"] = [f"{unknown} task(s) kept as open: their status is a code with no label yet"]
+                add_notes(out, [f"{unknown} task(s) kept as open: their status is a code with no label yet"])
         out["tasks"] = page(tasks, each, ctx, "due", SUMMARY["tasks"])
     if "deliverables" in include:
         out["deliverables"] = page(ctx.rows("deliverables", id=pid), each, ctx, "due", SUMMARY["deliverables"])
@@ -405,9 +419,7 @@ def t_tasks(ctx, args):
             if matches(r, "name", args.get("name_contains")) and person_matches(ctx, r, "assignee", args.get("assignee"))]
     notes = []
     rows = due_filters(rows, args, ctx, notes, "task")
-    out = page(rows, args, ctx, "due", SUMMARY["tasks"])
-    if notes:
-        out["notes"] = notes
+    out = add_notes(page(rows, args, ctx, "due", SUMMARY["tasks"]), notes)
     return with_me(out, ctx, args, ["assignee"])
 
 
@@ -417,9 +429,7 @@ def t_deliverables(ctx, args):
             and person_matches(ctx, r, "assignee", args.get("assignee"))]
     notes = []
     rows = due_filters(rows, args, ctx, notes, "deliverable")
-    out = page(rows, args, ctx, "due", SUMMARY["deliverables"])
-    if notes:
-        out["notes"] = notes
+    out = add_notes(page(rows, args, ctx, "due", SUMMARY["deliverables"]), notes)
     return with_me(out, ctx, args, ["assignee"])
 
 
@@ -427,7 +437,8 @@ def t_deliverable(ctx, args):
     found = ctx.rows("deliverable", id=args["project_id"], deliverable_id=args["deliverable_id"])
     if not found:
         raise ToolError("PPM Express returned no deliverable for that ID")
-    return {"project_id": args["project_id"], "deliverable": found[0]}
+    deliverable, note = record(found[0], "Deliverable")
+    return add_notes({"project_id": args["project_id"], "deliverable": deliverable}, [note])
 
 
 def t_my_work(ctx, args):
@@ -484,9 +495,7 @@ def t_my_work(ctx, args):
                      + ": narrow it with name_contains, portfolio, program, manager, or project_ids.")
     if failed:
         notes.append(f"{failed} list(s) couldn't be read and were skipped.")
-    if notes:
-        out["notes"] = notes
-    return out
+    return add_notes(out, notes)
 
 
 def t_key_dates(ctx, args):
@@ -583,11 +592,11 @@ def written(ctx, action, kind, value, sent, entity, known_id=None):
     """What a write tool returns: what happened, to which record, the field names sent (never their
     values, which the audit log leaves out too), and the record as PPM Express now has it."""
     recs = records(value) if value is not None else []
-    rec = codes_mod.decode(recs[0], ctx.tables, entity) if recs else {}
+    rec, note = record(codes_mod.decode(recs[0], ctx.tables, entity), entity) if recs else ({}, None)
     out = {"result": action, "kind": kind, "id": rec.get("id") or known_id, "fields": sorted(sent)}
     if rec:
         out["record"] = rec
-    return out
+    return add_notes(out, [note])
 
 
 def t_create_project(ctx, args):
@@ -738,8 +747,8 @@ TOOLS = [
      "handler": t_programs},
     {"name": "list_projects", "title": "PPM Express: projects", "kind": "read",
      "description": "Projects the token can see, filtered by name, portfolio, program, manager, or status, "
-                    "sorted and a page at a time. Coded fields (status, progress) come as labels, with the "
-                    "numbers under codes.",
+                    "sorted and a page at a time. Coded fields (status, progress, priority, and the like) come as "
+                    "their labels: On Track, At Risk, In Progress.",
      "inputSchema": {"type": "object", "additionalProperties": False, "properties": {
          "name_contains": _text("Part of the project's name."), "portfolio": _text("Part of a portfolio's name."),
          "program": _text("Part of a program's name."), "manager": PERSON("manager"),

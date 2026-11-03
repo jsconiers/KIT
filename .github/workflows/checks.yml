@@ -2,15 +2,17 @@
 #   checks:          syntax for the shell, Python, and PowerShell, job templates and JSON, a scan for
 #                    personal details (patterns in the SCAN_PATTERNS secret), the owner-name test, the
 #                    connector guard's fail-closed launch (kit-hook), the credential lookup doctor and
-#                    kit-connect share, the end-of-day wrap and review rehearsal tests, the vendor desk,
+#                    kit-connect share, kit-mcp-env (MCP servers' tokens from the Keychain), kit-update
+#                    (reinstall, landed patches), the end-of-day wrap and review rehearsal tests, the vendor desk,
 #                    team coverage map, and architecture digest tests, and the letter builder test.
 #                    See .github/scripts/checks.py.
 #   windows-install: the Windows installer, run for real on GitHub's Windows runners under Windows
 #                    PowerShell 5.1 and PowerShell 7: install, reinstall, and the repair of an install
 #                    whose files lost their permissions (.github/scripts/windows-install-test.ps1, with
 #                    the connector guard's installed hooks run in Git Bash), the guard launcher's tests
-#                    in Git Bash (tests/test_kit_hook.py), the credential lookup against the real
-#                    Credential Manager (tests/test_credentials.py), the PPM Express connector's tests
+#                    in Git Bash (tests/test_kit_hook.py), the credential lookup and kit-mcp-env against the
+#                    real Credential Manager (tests/test_credentials.py, tests/test_mcp_env.py), kit-update
+#                    with install.ps1 (tests/test_kit_update.py), the PPM Express connector's tests
 #                    on Windows (Credential Manager, the pulse, and meeting actions included), the wrap,
 #                    rehearsal, vendor desk, team map, and digest tests, and the Windows fixes tests
 #                    (tests/test_windows_fixes.py, with python-docx).
@@ -46,6 +48,10 @@ jobs:
         run: python3 tests/test_kit_hook.py
       - name: Credential lookup tests (doctor and kit-connect)
         run: python3 tests/test_credentials.py
+      - name: kit-mcp-env tests (MCP servers' tokens from the credential store)
+        run: python3 tests/test_mcp_env.py
+      - name: kit-update tests (reinstall when the install lags; landed patches with rebuilt documents)
+        run: python3 tests/test_kit_update.py
       - name: End-of-day wrap and review rehearsal tests
         run: |
           python3 tests/test_wrap.py
@@ -91,6 +97,10 @@ jobs:
         run: python tests/test_kit_hook.py
       - name: Credential lookup tests on Windows (Credential Manager, for real)
         run: python tests/test_credentials.py
+      - name: kit-mcp-env tests on Windows (Credential Manager, for real)
+        run: python tests/test_mcp_env.py
+      - name: kit-update tests on Windows (install.ps1 stand-in)
+        run: python tests/test_kit_update.py
       # One test per step: PowerShell fails a step only on its last command's exit code.
       - name: PPM Express MCP tests on Windows
         run: python tests/test_ppmx.py

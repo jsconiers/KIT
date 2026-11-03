@@ -1,16 +1,24 @@
 #!/usr/bin/env python3
 """kit-update: bring Kit up to date from the public repo, showing what changes before anything does.
 
-  kit-update            fetch, then show what's new: commits, files, and what would happen
-  kit-update --apply    move the repo clone onto GitHub's main and rerun the installer
-  kit-update --yes      with --apply, skip the confirmation question
-  kit-version           which version is installed (also: kit-version --check)
+  kit-update              fetch, then show what's new: commits, files, and what would happen
+  kit-update --apply      move the repo clone onto GitHub's main and rerun the installer
+  kit-update --yes        with --apply, skip the confirmation question
+  kit-update --reinstall  rerun the installer even when the install already matches the clone
+  kit-version             which version is installed (also: kit-version --check)
 
 It works on the repo clone (~/KIT, or KIT_REPO if set) and never pushes. It stops, changing
 nothing, when the clone has uncommitted changes, or has commits GitHub doesn't (send those first
 with kit-patch). The one exception is a patch GitHub has already applied: if one of GitHub's
-commits has exactly the clone's files, the clone moves onto GitHub's main anyway, as
-`kit-patch --sync` would.
+commits has exactly the clone's files, or differs from them only in binary files (the Word and PDF
+documents rebuilt when a patch is published), the clone moves onto GitHub's main anyway, as
+`kit-patch --sync` would. The binary files that differ are named, and the clone's own versions stay
+on the backup branch.
+
+When the clone is already up to date with GitHub but the install isn't from the clone's commit (the
+clone moved without the installer, as after `kit-patch --sync` or a `git pull`), --apply reruns the
+installer without moving the clone. An install newer than the clone is left alone; --reinstall installs
+the clone's version anyway.
 
 Before moving, it saves the clone's current commit on a backup branch, backup/pre-update-<time>.
 The installer then copies the new version into ~/Claude/Agents/kit/.install and keeps your memory,
@@ -41,18 +49,72 @@ def git(*args, check=True, timeout=60):
     return r.stdout.strip()
 
 
+def git_ok(*args):
+    """Whether a git command succeeds (for questions git answers with its exit code)."""
+    r = subprocess.run(["git", "-C", str(REPO), *args], capture_output=True, text=True, timeout=60)
+    return r.returncode == 0
+
+
+def binary_only(sha):
+    """The files that differ between the clone and GitHub's commit SHA, when every one is a binary file
+    (as Git sees it) that both have, in the same place; otherwise []."""
+    status = git("diff", "--no-renames", "--name-status", "HEAD", sha).splitlines()
+    if not status or any(not line.startswith("M\t") for line in status):
+        return []
+    numstat = git("diff", "--no-renames", "--numstat", "HEAD", sha).splitlines()
+    if len(numstat) != len(status) or any(not line.startswith("-\t-\t") for line in numstat):
+        return []
+    return [line.split("\t", 1)[1] for line in status]
+
+
 def landed_patch(behind):
-    """GitHub's commit that has exactly the clone's files, if any (a patch GitHub applied)."""
+    """(sha, files): GitHub's commit where the clone's own commits landed, if any. A commit with exactly
+    the clone's files comes first (files is then []); failing that, the first that differs only in
+    binary files both have, named in files. (None, []) when there's neither."""
     tree = git("rev-parse", "HEAD^{tree}")
     for sha in behind:
         if git("rev-parse", f"{sha}^{{tree}}") == tree:
-            return sha
-    return None
+            return sha, []
+    for sha in behind:
+        files = binary_only(sha)
+        if files:
+            return sha, files
+    return None, []
+
+
+def installed_version():
+    try:
+        return json.loads((KIT / ".install/VERSION.json").read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return {}
+
+
+def known(commit):
+    """Whether the clone has COMMIT (the install's commit may come from somewhere else)."""
+    return bool(commit) and commit != "unknown" and git_ok("rev-parse", "--verify", "--quiet", f"{commit}^{{commit}}")
+
+
+def install_state():
+    """(state, why) for the install against the clone's commit: 'same'; 'newer' (the install's commit
+    has the clone's in its history, so installing the clone's would go back); or 'other' (older, from
+    elsewhere, or not recorded), with why it isn't the same."""
+    head = git("rev-parse", "HEAD")
+    v = installed_version()
+    have = (v.get("commit") or "").strip()
+    if have == head:
+        return "same", ""
+    if not v:
+        return "other", "Kit's install has no version record (.install/VERSION.json) yet"
+    if not have or have == "unknown":
+        return "other", "the install doesn't record which commit it came from"
+    if known(have) and git_ok("merge-base", "--is-ancestor", head, have):
+        return "newer", f"the install is from {have[:7]}, newer than the clone's {head[:7]}"
+    return "other", f"the install is from {have[:7]}, not the clone's {head[:7]}"
 
 
 def plan():
     """Work out what an update would do. Returns (action, detail); action is one of
-    'current', 'fast-forward', 'landed', 'stop'."""
+    'current', 'reinstall', 'fast-forward', 'landed', 'stop'."""
     if not (REPO / ".git").exists():
         return "stop", f"{REPO} isn't a git repo (set KIT_REPO to your clone)"
     if git("status", "--porcelain"):
@@ -61,22 +123,25 @@ def plan():
     ahead = git("rev-list", "origin/main..HEAD").split()
     behind = git("rev-list", "--reverse", "HEAD..origin/main").split()
     if not ahead and not behind:
-        return "current", "already up to date with GitHub"
+        state, why = install_state()
+        if state == "same":
+            return "current", "already up to date with GitHub, and the install matches the clone"
+        if state == "newer":
+            return "current", (f"already up to date with GitHub; {why}, so there's nothing to install "
+                               "(kit-update --reinstall installs the clone's version anyway)")
+        return "reinstall", f"the clone is up to date with GitHub, but {why}"
     if not ahead:
         return "fast-forward", f"{len(behind)} new commit(s) on GitHub"
-    sha = landed_patch(behind)
+    sha, files = landed_patch(behind)
+    if sha and files:
+        return "landed", (f"your {len(ahead)} local commit(s) landed on GitHub as {sha[:7]}, apart from "
+                          f"{len(files)} binary file(s) rebuilt there ({', '.join(files)}); your versions "
+                          f"stay on the backup branch; {len(behind)} GitHub commit(s) to take")
     if sha:
         return "landed", (f"your {len(ahead)} local commit(s) landed on GitHub as {sha[:7]}; "
                           f"{len(behind)} GitHub commit(s) to take")
     return "stop", (f"{REPO} has {len(ahead)} commit(s) GitHub doesn't; send them with kit-patch "
                     "first, then run kit-update again")
-
-
-def installed_version():
-    try:
-        return json.loads((KIT / ".install/VERSION.json").read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError):
-        return {}
 
 
 def version_at(ref):
@@ -92,6 +157,19 @@ def show_incoming():
     if stat:
         print("\nFiles:")
         print("\n".join("  " + ln for ln in stat.splitlines()))
+
+
+def show_uninstalled():
+    """What rerunning the installer would bring in: the clone's version, and its commits the install
+    doesn't have (when the install's commit is one the clone knows)."""
+    v = installed_version()
+    print(f"\nVersion: {v.get('version') or 'unknown'} (installed) -> {version_at('HEAD')} (the clone)")
+    have = (v.get("commit") or "").strip()
+    if known(have):
+        log = git("log", "--format=  %h %ad %s", "--date=short", f"{have}..HEAD", check=False)
+        if log:
+            print("\nIn the clone, not yet installed:")
+            print(log)
 
 
 def installer():
@@ -118,39 +196,58 @@ def main(argv):
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--apply", action="store_true", help="move the clone onto GitHub's main and install")
     ap.add_argument("--yes", action="store_true", help="with --apply, don't ask for confirmation")
+    ap.add_argument("--reinstall", action="store_true",
+                    help="rerun the installer even when the install matches the clone (implies --apply)")
     args = ap.parse_args(argv)
+    if args.reinstall:
+        args.apply = True
 
     action, detail = plan()
     print(f"kit-update: {detail}")
     if action == "stop":
         return 1
-    if action == "current":
+    if action == "current" and not args.reinstall:
         return 0
-    show_incoming()
+    moving = action in ("fast-forward", "landed")
+    if moving:
+        show_incoming()
+    else:
+        show_uninstalled()
     if not args.apply:
-        print("\nNothing changed. To update: kit-update --apply")
+        print("\nNothing changed. To " + ("update" if moving else "install the clone's version")
+              + ": kit-update --apply")
         return 0
     if not args.yes:
         if not sys.stdin.isatty():
             print("kit-update: no one at the keyboard to confirm; use --apply --yes")
             return 1
-        if input("\nUpdate and rerun the installer? [y/N] ").strip().lower() not in ("y", "yes"):
+        question = "Update and rerun the installer?" if moving else "Rerun the installer?"
+        if input(f"\n{question} [y/N] ").strip().lower() not in ("y", "yes"):
             print("Nothing changed.")
             return 0
 
-    backup = f"backup/pre-update-{datetime.datetime.now():%Y%m%d-%H%M%S}"
-    git("branch", backup, "HEAD")
-    if action == "landed":
-        git("reset", "--quiet", "--hard", landed_patch(git("rev-list", "--reverse", "HEAD..origin/main").split()))
-    git("merge", "--ff-only", "--quiet", "origin/main")
-    print(f"\nkit-update: {REPO} is now at {git('log', '-1', '--format=%h %s')}; "
-          f"the earlier commit is on {backup}")
+    backup = None
+    if moving:
+        backup = f"backup/pre-update-{datetime.datetime.now():%Y%m%d-%H%M%S}"
+        git("branch", backup, "HEAD")
+        if action == "landed":
+            sha, _ = landed_patch(git("rev-list", "--reverse", "HEAD..origin/main").split())
+            git("reset", "--quiet", "--hard", sha)
+        git("merge", "--ff-only", "--quiet", "origin/main")
+        print(f"\nkit-update: {REPO} is now at {git('log', '-1', '--format=%h %s')}; "
+              f"the earlier commit is on {backup}")
+    else:
+        print(f"\nkit-update: the clone stays at {git('log', '-1', '--format=%h %s')}")
 
     print("kit-update: running the installer\n")
     rc = subprocess.run(installer(), stdin=subprocess.DEVNULL).returncode
     if rc != 0:
-        print(f"\nkit-update: the installer failed (exit {rc}). To undo: "
-              f"git -C {REPO} reset --hard {backup}, then rerun the installer.")
+        if backup:
+            print(f"\nkit-update: the installer failed (exit {rc}). To undo: "
+                  f"git -C {REPO} reset --hard {backup}, then rerun the installer.")
+        else:
+            print(f"\nkit-update: the installer failed (exit {rc}). The clone didn't move; fix the problem "
+                  f"it names, then run kit-update --apply again.")
         return rc
     show_kit_md()
     v = installed_version()
@@ -159,7 +256,10 @@ def main(argv):
         print(f"\nkit-update: Kit {prev.get('version', 'unknown')} -> {v.get('version')} "
               f"({(v.get('commit') or 'unknown')[:7]}). The next morning brief lists what changed "
               f"(briefs/kit-release-notes.md).")
-    print(f"\nkit-update: done. To undo: git -C {REPO} reset --hard {backup}, then rerun the installer.")
+    if backup:
+        print(f"\nkit-update: done. To undo: git -C {REPO} reset --hard {backup}, then rerun the installer.")
+    else:
+        print("\nkit-update: done.")
     return 0
 
 

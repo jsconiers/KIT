@@ -133,7 +133,7 @@ The tools in `shared/bin/` are standard-library Python with a usage docstring, l
 | Closed reviews | `kit-preread`, `kit-rehearse` | One closed Claude run each, asked first |
 | Team | `kit-publish`, `kit-team`, `kit-teammap`, `kit-plugin` | None |
 | Models | `kit-models`, `kit-delegate`, `kit-run`, `kit-evals` | Only `kit-delegate`, `kit-run`, and `kit-evals --live` |
-| Safety and operations | `connector-guard`, `kit-audit`, `kit-pause`, `kit-connect`, `kit-ppmx`, `kit-backup`, `kit-audit-export`, `kit-retention`, `kit-alerts`, `kit-reliability`, `kit-cost`, `kit-update`, `kit-version` | Only `kit-connect test --read` (one guarded read per server) |
+| Safety and operations | `connector-guard`, `kit-audit`, `kit-pause`, `kit-connect`, `kit-ppmx`, `kit-mcp-env`, `kit-backup`, `kit-audit-export`, `kit-retention`, `kit-alerts`, `kit-reliability`, `kit-cost`, `kit-update`, `kit-version` | Only `kit-connect test --read` (one guarded read per server) |
 
 Most tools read local files and write only into `briefs/` or the library, and only with `--write` where
 the output is a register. That keeps them cheap, predictable, and testable without a model.
@@ -377,7 +377,8 @@ lines, deny rules for destructive tools) are in [CONNECTIVITY.md](CONNECTIVITY.m
 **Credentials.** Kit refers to every credential by name: an environment variable, a macOS Keychain entry,
 or a Windows Credential Manager entry, resolved only at call time by `kit_secrets.py`, never stored,
 logged, or printed. The health check scans Kit's notes for credential-shaped strings. A token found in
-Kit's config is ignored by `kit-ppmx`.
+Kit's config is ignored by `kit-ppmx`. Other MCP servers get theirs the same way through `kit-mcp-env`,
+which reads the entries as the server starts and passes them in that server's environment only.
 
 **Encrypted backups.** `kit-backup` encrypts with `openssl enc -aes-256-ctr -pbkdf2` (600,000 iterations),
 passing the passphrase on a file descriptor, never the command line, then computes an HMAC-SHA256 over a
@@ -488,8 +489,10 @@ The CI workflow has three jobs:
   brief shows new release notes once.
 - `kit-version` shows what's installed and whether GitHub is ahead. `kit-update` fetches and shows new
   commits and files without changing anything; `kit-update --apply` saves the clone's commit on a backup
-  branch, moves the clone onto GitHub's main, and reruns the installer. It stops when the clone has
-  uncommitted work or commits GitHub doesn't have.
+  branch, moves the clone onto GitHub's main, and reruns the installer. When the clone is already current
+  but the install isn't from its commit, `--apply` reruns the installer without moving the clone. It stops
+  when the clone has uncommitted work or commits GitHub doesn't have, unless GitHub's commit has the clone's
+  files, or differs only in binary files both have (documents rebuilt on publishing), which it names.
 - The maintainer publishes changes as a patch after a check that scans every added line, file name, and
   commit message against a private denylist and credential patterns, and refuses on any hit. Code changes
   must come with documentation changes (README, INSTALL, DESIGN, CHANGELOG) unless overridden on record.
