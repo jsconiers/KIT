@@ -32,6 +32,8 @@ versions follow [semantic versioning](https://semver.org).
   settings and tools, the PPM Express write path and its audit log, and the current known limits.
 
 ### Fixed
+- `list_my_work` with `PPMX_WORK_SECONDS=0` stops after the first project on Windows too, where the clock
+  can read a fast scan as 0 seconds.
 - `kit-connect test SERVER --read` names the server and its probe tool in the gateway's prompt; the old
   "the one tool you're allowed to call" was ambiguous with several servers allowed, and the gateway refused.
 - The installer now refreshes Kit's agents you haven't edited (keeping your edits and your models.json

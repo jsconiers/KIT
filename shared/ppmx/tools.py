@@ -449,7 +449,9 @@ def t_my_work(ctx, args):
                                                                          datetime.date.min).toordinal()))
     items, scanned, failed, stopped = [], 0, 0, False
     for proj in projects[:cap]:
-        if scanned and time.monotonic() - started > ctx.settings.work_seconds:
+        # >=, not >: Windows' clock ticks about every 16 ms, so a fast scan can read 0 seconds, and a 0-second
+        # limit must still stop after the first project.
+        if scanned and time.monotonic() - started >= ctx.settings.work_seconds:
             stopped = True
             break
         scanned += 1
