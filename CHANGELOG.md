@@ -5,7 +5,7 @@ What changed in each Kit release. The installed version is in
 morning brief summarizes the new entries once. Format: [Keep a Changelog](https://keepachangelog.com),
 versions follow [semantic versioning](https://semver.org).
 
-## [Unreleased]
+## [1.6.3] - 2026-11-03
 
 ### Added
 - `kit-mcp-env`: starts an MCP server with its tokens from the Keychain (Credential Manager on Windows), in
