@@ -141,7 +141,8 @@ allowed = cmd[cmd.index("--allowedTools") + 1:cmd.index("--disallowedTools")]
 ok("Glob" not in allowed and "Grep" not in allowed, "no bare Glob or Grep for texted questions", str(allowed))
 ok(all(f"Read(~/Claude/Agents/kit/{d}/**)" in cmd for d in tb.TEXT_CLOSED), "every closed folder denied")
 ok(set(tb.TEXT_CLOSED) == set(json.loads(subprocess.run(
-    [sys.executable, "-c", "import importlib.machinery as m,json;mod=m.SourceFileLoader('l',%r).load_module();"
+    [sys.executable, "-c", "import importlib.machinery as m,importlib.util as u,json;l=m.SourceFileLoader('l',%r);"
+     "mod=u.module_from_spec(u.spec_from_loader('l',l));l.exec_module(mod);"
      "print(json.dumps(mod.TEXT_CLOSED))" % str(LIB)], capture_output=True, text=True, env=ENV).stdout)),
    "kit-library and kit-textback close the same folders")
 
