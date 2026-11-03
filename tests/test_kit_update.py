@@ -83,6 +83,7 @@ class Case:
         self.clone = self.root / "KIT"
         self.clone.mkdir()
         git(self.clone, "init", "-q", "-b", "main")
+        git(self.clone, "config", "core.autocrlf", "false")    # LF on Windows too, as committed
         write(self.clone / "VERSION", "1.0.0\n")
         write(self.clone / "notes.txt", "first\n")
         write(self.clone / "docs/guide.pdf", b"%PDF-1.7\n\x00\x01\x02 first build\n")
@@ -94,7 +95,7 @@ class Case:
         git(self.clone, "push", "-q", "origin", "main")
         git(self.clone, "branch", "-q", "--set-upstream-to=origin/main", "main")
         self.other = self.root / "github-side"
-        run(["git", "clone", "-q", str(self.origin), str(self.other)])
+        run(["git", "clone", "-q", "--config", "core.autocrlf=false", str(self.origin), str(self.other)])
         self.env = dict(os.environ, HOME=str(self.home), USERPROFILE=str(self.home), KIT_REPO=str(self.clone))
 
     def kit_update(self, *args):
@@ -168,8 +169,9 @@ try:
        and "To install the clone's version: kit-update --apply" in r.stdout and c.runs() == 0,
        "the preview shows the versions and the commits not yet installed, and changes nothing", r.stdout)
     r = c.kit_update("--apply")
-    ok(r.returncode == 1 and "no one at the keyboard" in r.stdout and c.runs() == 0,
-       "--apply without --yes and no one to ask: nothing runs", r.stdout + r.stderr)
+    ok(r.returncode == 1 and "no one at the keyboard" in r.stdout and "Traceback" not in r.stderr and c.runs() == 0,
+       "--apply without --yes and no one to ask: nothing runs (on Windows too, where NUL counts as a terminal)",
+       r.stdout + r.stderr)
     r = c.kit_update("--apply", "--yes")
     ok(r.returncode == 0 and c.runs() == 1 and c.head() == new and not c.backups(),
        "--apply reruns the installer when the clone is current but the install isn't (the bug: it skipped it)",

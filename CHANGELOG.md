@@ -32,7 +32,8 @@ versions follow [semantic versioning](https://semver.org).
   install wasn't from the clone's commit (the clone had moved without the installer, as after
   `kit-patch --sync` or a `git pull`), though `kit-version` said GitHub was ahead of the install. It now
   reruns the installer then, without moving the clone; plain `kit-update` says the install lags and what
-  installing would bring in. An install newer than the clone is left alone.
+  installing would bring in. An install newer than the clone is left alone. On Windows, `--apply` without
+  `--yes` and with no one at the keyboard stopped with a Python error; it now says to use `--yes`.
 - `kit-update` refused a patch GitHub had applied when GitHub's commit differed from the clone's only in the
   Word and PDF documents rebuilt on publishing, as with 1.6.1. It now takes a commit whose only differences
   are binary files both have, names them, and keeps the clone's versions on the backup branch; a text

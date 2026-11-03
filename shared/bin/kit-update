@@ -179,6 +179,17 @@ def installer():
     return ["bash", str(REPO / "platform/mac/install.sh")]
 
 
+def ask(question):
+    """True for a yes typed at the keyboard, False for anything else, None when no one is there to answer."""
+    if not sys.stdin or not sys.stdin.isatty():
+        return None
+    try:
+        return input(f"\n{question} [y/N] ").strip().lower() in ("y", "yes")
+    except EOFError:              # Windows counts NUL as a terminal, so a run with no keyboard lands here
+        print()
+        return None
+
+
 def show_kit_md():
     new = KIT / "KIT.md.new"
     if not new.exists():
@@ -218,11 +229,11 @@ def main(argv):
               + ": kit-update --apply")
         return 0
     if not args.yes:
-        if not sys.stdin.isatty():
+        answer = ask("Update and rerun the installer?" if moving else "Rerun the installer?")
+        if answer is None:
             print("kit-update: no one at the keyboard to confirm; use --apply --yes")
             return 1
-        question = "Update and rerun the installer?" if moving else "Rerun the installer?"
-        if input(f"\n{question} [y/N] ").strip().lower() not in ("y", "yes"):
+        if not answer:
             print("Nothing changed.")
             return 0
 
