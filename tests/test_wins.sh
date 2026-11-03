@@ -60,6 +60,21 @@ r = run("report", "--from", "01-Oct-2026", "--to", "2026-10-31")
 ok("## Decisions" in r.stdout and "## POCs and labs" in r.stdout and "item(s)" in r.stdout, "report grouped by theme")
 r = run("report", "--from", "nonsense")
 ok(r.returncode != 0, "bad date refused")
+# A hand-edited log sticks: collect keeps its own record (.accomplishments-seen.json) of what it took.
+logf = kit / "memory/accomplishments.md"; seen = kit / "memory/.accomplishments-seen.json"
+ok(seen.exists(), "collect records what it took in .accomplishments-seen.json")
+logf.write_text("# Accomplishments\n\n- 18-Oct-2026 [Kit and automation] Rewritten by hand (queue)\n")
+r = run("collect")
+ok("added 0" in r.stdout and "connector harness" not in logf.read_text(), "after a hand rewrite, collect brings nothing back")
+# Without the record (a log from before it existed), the log's own lines decide, as before.
+seen.unlink(); r = run("collect", "--dry-run")
+ok("would add" in r.stdout and "connector harness" in r.stdout, "no record: collect falls back to the log's lines")
+r = run("mark", "--dry-run")
+ok(r.returncode == 0 and "would record" in r.stdout and not seen.exists(), "mark --dry-run changes nothing")
+before = logf.read_text(); r = run("mark")
+ok(r.returncode == 0 and seen.exists() and logf.read_text() == before, "mark records the sources and leaves the log alone")
+r = run("collect")
+ok("added 0" in r.stdout, "after mark, collect adds nothing")
 shutil.rmtree(tmp)
 print(f"kit-wins tests: {P} passed, {F} failed"); sys.exit(1 if F else 0)
 PY

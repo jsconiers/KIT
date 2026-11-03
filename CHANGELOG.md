@@ -5,6 +5,12 @@ What changed in each Kit release. The installed version is in
 morning brief summarizes the new entries once. Format: [Keep a Changelog](https://keepachangelog.com),
 versions follow [semantic versioning](https://semver.org).
 
+## [Unreleased]
+
+### Fixed
+
+- `kit-wins collect` remembers what it took (`memory/.accomplishments-seen.json`), so a line you edit or delete in the accomplishments log stays that way; `kit-wins mark` records what the sources hold now, for a log rewritten by hand.
+
 ## [1.6.2] - 2026-11-03
 
 ### Fixed

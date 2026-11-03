@@ -116,7 +116,7 @@ The installer links these into `~/.local/bin` (all in `shared/bin/`):
 | `kit-commitments` | Proposes to-dos from promises in your sent mail or minutes; you confirm |
 | `kit-holds` | Draft calendar holds as .ics files you open and save; Kit never writes to the calendar |
 | `kit-oneonone` | One-page prep for your 1:1 with your manager (by role); `--done` records the date |
-| `kit-wins` | Accomplishments log for reviews and 1:1s: collect, this month, report by theme |
+| `kit-wins` | Accomplishments log for reviews and 1:1s: collect, this month, report by theme; `mark` after editing the log by hand |
 | `kit-feedback` | A private log of feedback on the people you lead (praise, coaching, goals): 1:1 prep, review notes, and who's had no note lately; never shared or texted |
 | `kit-meetload` | Meeting load audit: hours and share of working hours, recurring meetings' weekly cost, back-to-back runs, focus time left, after-hours meetings, double bookings, suggestions; `--holds` drafts focus time; reads the calendar, a JSON file, or an .ics export |
 | `kit-dates` | Important dates (birthdays, anniversaries, work anniversaries), with a to-do and a drafted card or note when one comes up |

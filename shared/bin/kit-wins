@@ -3,16 +3,20 @@
 
   kit-wins                         this month's entries
   kit-wins collect [--dry-run]     add new entries from the sources below
+  kit-wins mark [--dry-run]        record what the sources hold now as collected, adding nothing (after
+                                   you rewrite the log by hand, so collect doesn't bring old lines back)
   kit-wins report --from D --to D  a summary grouped by theme (dates DD-Mmm-YYYY or YYYY-MM-DD)
 
 Sources: QUEUE.md's Done section (Kit's own items, and the owner's items tagged [work]), finished
 sprint items, accepted ADRs (decisions/INDEX.md in the library), POC verdicts (poc/INDEX.md),
 documents added to the library (LOG.md), and Kit's own release notes (briefs/kit-release-notes-*).
-Entries go to memory/accomplishments.md, one dated line each, never twice. Work only: an owner's
+Entries go to memory/accomplishments.md, one dated line each, never twice: what's been collected is
+also kept in memory/.accomplishments-seen.json, so editing or deleting a line by hand sticks. Work only: an owner's
 item without the [work] tag is skipped, and nothing under memory/personal/ is read.
 """
 import argparse
 import datetime as dt
+import json
 import pathlib
 import re
 import sys
@@ -21,6 +25,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import kit_daily as kd  # noqa: E402
 
 LOG = kd.KIT / "memory/accomplishments.md"
+SEEN = kd.KIT / "memory/.accomplishments-seen.json"   # keys of every source item already collected
 HEADER = ("# Accomplishments\n\nFinished work, one line each: date, theme, what, and where it came from.\n"
           "Written by `kit-wins collect`; edit freely.\n\n")
 THEMES = [
@@ -136,8 +141,36 @@ def gather():
     return from_queue() + from_library() + from_releases()
 
 
+def load_seen():
+    """Keys collect has already taken from the sources. Without the file (a log from before it existed),
+    the log's own lines stand in, as they always did."""
+    try:
+        data = json.loads(SEEN.read_text(encoding="utf-8-sig"))
+        return set(data.get("keys", [])) if isinstance(data, dict) else set()
+    except (OSError, ValueError):
+        return set()
+
+
+def save_seen(keys):
+    SEEN.parent.mkdir(parents=True, exist_ok=True)
+    tmp = SEEN.with_name(SEEN.name + ".tmp")
+    tmp.write_text(json.dumps({"keys": sorted(keys)}, indent=0) + "\n", encoding="utf-8")
+    tmp.replace(SEEN)
+
+
+def mark(dry=False):
+    """Record every item the sources hold now as collected, without adding any line: the number newly
+    recorded."""
+    seen = load_seen() | {key(e["text"]) for e in existing()}
+    found = {k for k in (key(e["text"]) for e in gather()) if k}
+    added = found - seen
+    if not dry:
+        save_seen(seen | found)
+    return len(added)
+
+
 def collect(dry=False):
-    have = {key(e["text"]) for e in existing()}
+    have = {key(e["text"]) for e in existing()} | load_seen()
     new = []
     for e in gather():
         k = key(e["text"])
@@ -153,6 +186,8 @@ def collect(dry=False):
             text += "\n"
         text += "".join(f"- {kd.fmt(e['date'])} [{e['theme']}] {kd.clip(e['text'], 200)} ({e['src']})\n" for e in new)
         kd.write(LOG, text)
+    if not dry:
+        save_seen(have)
     return new
 
 
@@ -174,6 +209,7 @@ def main(argv):
     ap = argparse.ArgumentParser(prog="kit-wins", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd")
     c = sub.add_parser("collect"); c.add_argument("--dry-run", action="store_true")
+    m = sub.add_parser("mark"); m.add_argument("--dry-run", action="store_true")
     r = sub.add_parser("report"); r.add_argument("--from", dest="start", required=True); r.add_argument("--to", dest="end")
     args = ap.parse_args(argv)
     if args.cmd == "collect":
@@ -182,6 +218,11 @@ def main(argv):
         print(f"kit-wins: {verb} {len(new)} entr{'y' if len(new) == 1 else 'ies'} to {LOG}")
         for e in new:
             print(f"  {kd.fmt(e['date'])} [{e['theme']}] {kd.clip(e['text'], 90)}")
+        return 0
+    if args.cmd == "mark":
+        n = mark(args.dry_run)
+        print(f"kit-wins: {'would record' if args.dry_run else 'recorded'} {n} source item(s) as collected; "
+              f"{LOG.name} is unchanged")
         return 0
     if args.cmd == "report":
         a = kd.parse_date(args.start)

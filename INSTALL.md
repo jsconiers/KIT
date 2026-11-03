@@ -389,7 +389,9 @@ kit-settings email you@example.com            # where Outlook drafts are address
   `--from-queue`, `--meeting-prep 30m`) writes draft .ics files to `briefs/holds/<date>/`; `kit-holds
   open all` hands them to your calendar app to review and save.
 - **1:1 and wins:** `kit-oneonone` before a 1:1 (`--done` after it); `kit-wins collect` weekly (the
-  weekly review runs it), `kit-wins report --from ... --to ...` for reviews.
+  weekly review runs it), `kit-wins report --from ... --to ...` for reviews. Edit `memory/accomplishments.md` freely: collect remembers
+  what it took (`memory/.accomplishments-seen.json`), and `kit-wins mark` records the sources as collected if
+  you rewrite the log before that record exists.
 - **Letters:** write the letter as plain text (`letters/<folder>/letter.md`, blocks separated by blank
   lines, `{{SIGNATURE}}` where the signature goes), then `kit-letter build FILE` (room for a pen
   signature) or `kit-letter sign FILE` (your saved PNG from `letters/signature/`; Claude Code asks every
