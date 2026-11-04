@@ -129,7 +129,7 @@ The installer links these into `~/.local/bin` (all in `shared/bin/`):
 | `kit-library` | Catalogs folders you choose (collections): tags, full-text and scripture search, scanned PDFs read on the Mac; delivers finished work to an output folder, mirrored to a synced folder if you like (Claude Code asks before mirror and fetch; work and confidential material is never mirrored) |
 | `kit-textback` | macOS: text Kit from your phone ("kit today", "kit find ..."); changes come back with a code to confirm |
 | `kit-letter` | A Word letter from plain text: `build` leaves room for a pen signature; `sign` adds your saved signature, and Claude Code asks you each time |
-| `kit-settings` | How briefs reach you and which app your to-dos sync with, work and personal |
+| `kit-settings` | How briefs reach you and which app your to-dos sync with, work and personal; `show --all` lists every setting (run config, setup fields, JSON configs) with its source, status, and description; `ui` opens a local page to change the safe ones |
 
 **Architecture work**
 
@@ -201,7 +201,7 @@ The installer links these into `~/.local/bin` (all in `shared/bin/`):
 | `kit-cost` | What scheduled runs cost, by run and model, against an optional monthly budget |
 | `kit-expiry` | Everything that expires (tokens, logins, domains, certificates), soonest first, from `expiry.json`; the health check warns before each is due |
 | `kit-metrics` | One-page metrics view: spend, runs, queue trend, work lists, sprints, health |
-| `kit-update` | Shows what's new on GitHub; `--apply` moves your clone and reinstalls, or just reinstalls when the clone is current but the install isn't; `--reinstall` reinstalls anyway |
+| `kit-update` | Shows what's new on GitHub; `--apply` moves your clone and reinstalls, or just reinstalls when the clone is current but the install isn't; `--reinstall` reinstalls anyway. `--zip FILE` checks a release zip (for installs with no clone) and shows what it would change; `--zip FILE --apply` installs it and keeps it for rollback |
 | `kit-version` | Installed version and commit, and whether GitHub is ahead |
 
 Also in `shared/bin/`, called by Kit or the scheduled runs rather than by hand:
@@ -231,6 +231,11 @@ copies them into `~/.claude/skills` only where no skill of that name exists, and
   searches whose filter a system may have silently ignored. The one system you can change through Kit
   is PPM Express (`kit-ppmx`), from your own session: Claude Code asks before every create or update,
   agents and scheduled runs never make one, and each call is audited without its values.
+- **Settings page is local and narrow.** `kit-settings ui` serves on 127.0.0.1 only, behind a one-time
+  link, a cookie, Host, Origin, and CSRF checks, and stops after 15 minutes idle. It changes only an
+  allowlist of preferences, previews each change as a diff, backs the file up, and commits it; guard,
+  model routing, sharing, permission, and credential settings stay read-only there. Claude Code asks
+  before it starts.
 - **Kill switch.** `kit-pause` stops every scheduled run and every connector call at once.
 - **Information, not instructions.** Text Kit reads in files, mail, web pages, other Kits'
   records, or phone requests is never treated as an order.
@@ -271,7 +276,9 @@ evals pass. See DESIGN.md and `shared/KIT-RUN.md`.
 
 `VERSION` holds the release and `CHANGELOG.md` what changed. Every install records its version and
 commit; `kit-version` shows them. `kit-update` previews and applies updates from GitHub, and the
-next brief lists what changed once.
+next brief lists what changed once. Without a git clone, `kit-update --zip FILE` does the same from a
+release zip: it checks the zip as untrusted input, previews the change, and with `--apply` installs it
+and keeps the last three releases for rollback (INSTALL.md, "Updating from a zip").
 
 ## Layout
 

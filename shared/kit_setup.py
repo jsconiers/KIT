@@ -110,6 +110,8 @@ ASK = [
     # The review loop's run starts four paid agent runs on a draft, so it asks first (plan, merge, and feedback
     # make no model call).
     "Bash(kit-review-loop run *)",
+    # The settings page opens a local server that can change the run config and the setup files, so it asks first.
+    "Bash(kit-settings ui)", "Bash(kit-settings ui *)",
     # A PPM Express call from the command line can change PPM Express (a create_ or update_ tool), so it
     # asks first, and so does adding the server to Claude Desktop's config.
     "Bash(kit-ppmx call *)", "Bash(kit-ppmx desktop)", "Bash(kit-ppmx desktop *)",

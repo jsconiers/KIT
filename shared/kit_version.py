@@ -32,8 +32,27 @@ def git(repo, *args):
     return r.stdout.strip() if r.returncode == 0 else None
 
 
+COMMIT_RX = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+
+
+def release_marker(repo):
+    """The note kit-update leaves in a release it keeps (.install/releases/<version>-<commit>/), or {}."""
+    try:
+        m = json.loads((Path(repo) / ".kit-release.json").read_text(encoding="utf-8"))
+        return m if isinstance(m, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
 def package_commit(repo):
+    """The package's git commit. For a package that isn't a git clone (a release zip), the commit
+    kit-update read from the zip's comment: passed in KIT_PACKAGE_COMMIT, or in the note it keeps with
+    the release; else "unknown"."""
     if not (Path(repo) / ".git").exists():
+        for given in (os.environ.get("KIT_PACKAGE_COMMIT", ""), release_marker(repo).get("commit") or ""):
+            given = given.strip().lower()
+            if COMMIT_RX.fullmatch(given):
+                return given
         return "unknown"
     return git(repo, "rev-parse", "HEAD") or "unknown"
 
@@ -55,23 +74,40 @@ def inventory(install_dir):
     return {"agents": agents, "commands": tools}
 
 
+def _entry(v):
+    """An install's version, commit, and date for previous and history, with where it came from when
+    kit-update recorded that (a zip)."""
+    out = {k: v.get(k) for k in ("version", "commit", "installed")}
+    if v.get("source"):
+        out["source"] = v["source"]
+    return out
+
+
 def record(repo, install_dir, now=None):
     """Write VERSION.json. Returns (previous, current); previous is {} on a first install."""
     install_dir = Path(install_dir)
     prev = load(install_dir)
     now = now or datetime.datetime.now()
     version, commit = package_version(repo), package_commit(repo)
-    if commit == "unknown" and prev.get("version") == version:
+    marker = release_marker(repo) if not (Path(repo) / ".git").exists() else {}
+    carried = (commit == "unknown" and prev.get("version") == version and not marker
+               and not os.environ.get("KIT_PACKAGE_COMMIT"))
+    if carried:
         commit = prev.get("commit") or "unknown"   # a rerun from the installed copy, which isn't a repo
     cur = {
         "version": version,
         "commit": commit,
         "installed": now.strftime("%Y-%m-%d %H:%M"),
-        "previous": {k: prev.get(k) for k in ("version", "commit", "installed")} if prev else None,
+        "previous": _entry(prev) if prev else None,
     }
+    if marker:                                     # a release kit-update kept from a zip
+        cur["source"] = {"type": "zip", "file": marker.get("file"), "sha256": marker.get("sha256"),
+                         "commit": marker.get("commit"), "release": str(repo)}
+    elif carried and prev.get("source"):
+        cur["source"] = prev["source"]             # a rerun from the installed copy of a zip install
     history = list(prev.get("history", []))
     if prev:
-        history.append({k: prev.get(k) for k in ("version", "commit", "installed")})
+        history.append(_entry(prev))
     cur["history"] = history[-HISTORY_KEEP:]
     install_dir.mkdir(parents=True, exist_ok=True)
     tmp = install_dir / "VERSION.json.tmp"

@@ -7,6 +7,11 @@
   kit-update --reinstall  rerun the installer even when the install already matches the clone
   kit-version             which version is installed (also: kit-version --check)
 
+  kit-update --zip FILE                 check a release zip and show what it would change; changes nothing
+  kit-update --zip FILE --sha256 HEX    the same, and check the zip against its published SHA-256
+  kit-update --zip FILE --apply [--yes] install it (--allow-downgrade for an older version,
+                                        --reinstall for the same one)
+
 It works on the repo clone (~/KIT, or KIT_REPO if set) and never pushes. It stops, changing
 nothing, when the clone has uncommitted changes, or has commits GitHub doesn't (send those first
 with kit-patch). The one exception is a patch GitHub has already applied: if one of GitHub's
@@ -27,18 +32,37 @@ KIT.md.new for you to compare; kit-update shows the difference.
 
 To undo: git -C ~/KIT reset --hard backup/pre-update-<time>, then rerun the installer
 (bash ~/KIT/platform/mac/install.sh, or install.ps1 on Windows).
+
+From a zip (for an install with no git clone; the zip is the one `git archive` makes, with one
+top-level folder and the commit in the zip comment): kit-update never fetches anything and treats the
+zip as untrusted. It refuses absolute paths, `..`, drive letters, backslashes, symlinks and other
+special entries, encrypted entries, more than one top-level folder, more than 200 MB or 20,000 files
+uncompressed, and a zip without VERSION, kit/, shared/, and the installers. It extracts into a new
+temporary folder, runs nothing from it, and shows the versions, the CHANGELOG entries in between, and
+a file summary against the installed copy. --apply keeps the release in
+~/Claude/Agents/kit/.install/releases/<version>-<commit>/ (the last 3 are kept), runs that copy's
+installer, and records the zip's name, SHA-256, and commit in VERSION.json. To roll back, rerun an
+earlier release's installer from that folder. A git clone, if there is one, is left as it is.
 """
 import argparse
-import json
 import datetime
+import hashlib
+import json
 import os
 import pathlib
+import re
+import shutil
+import stat
 import subprocess
 import sys
+import tempfile
+import zipfile
 
 HOME = pathlib.Path.home()
 REPO = pathlib.Path(os.environ.get("KIT_REPO", HOME / "KIT")).expanduser()
 KIT = HOME / "Claude/Agents/kit"
+INSTALL = KIT / ".install"
+RELEASES = INSTALL / "releases"
 IS_WIN = os.name == "nt"
 
 
@@ -94,21 +118,44 @@ def known(commit):
     return bool(commit) and commit != "unknown" and git_ok("rev-parse", "--verify", "--quiet", f"{commit}^{{commit}}")
 
 
-def install_state():
-    """(state, why) for the install against the clone's commit: 'same'; 'newer' (the install's commit
-    has the clone's in its history, so installing the clone's would go back); or 'other' (older, from
-    elsewhere, or not recorded), with why it isn't the same."""
-    head = git("rev-parse", "HEAD")
+def vkey(v):
+    """A version string's numbers, for comparing (1.6.3 -> (1, 6, 3)); () when it has none."""
+    return tuple(int(x) for x in re.findall(r"\d+", v or "")[:3])
+
+
+def from_zip(v):
+    return (v.get("source") or {}).get("type") == "zip"
+
+
+def install_state(ref="HEAD"):
+    """(state, why) for the install against the clone's commit at REF: 'same'; 'newer' (the install's
+    commit has REF's in its history, or the install came from a zip of a later version, so installing
+    REF would go back); 'different' (from a zip of the same version whose commit the clone doesn't
+    have); or 'other' (older, from elsewhere, or not recorded), with why it isn't the same."""
+    head = git("rev-parse", ref)
     v = installed_version()
     have = (v.get("commit") or "").strip()
     if have == head:
         return "same", ""
     if not v:
         return "other", "Kit's install has no version record (.install/VERSION.json) yet"
+    there = version_at(ref)
+    if known(have):
+        if git_ok("merge-base", "--is-ancestor", head, have):
+            return "newer", f"the install is from {have[:7]}, newer than the clone's {head[:7]}"
+        if not (from_zip(v) and vkey(v.get("version")) > vkey(there)):
+            return "other", f"the install is from {have[:7]}, not the clone's {head[:7]}"
+    if from_zip(v):
+        name = (v.get("source") or {}).get("file") or "a zip"
+        what = f"the install is Kit {v.get('version')} from {name}"
+        if vkey(v.get("version")) > vkey(there):
+            return "newer", f"{what}, newer than the clone's {there}"
+        if vkey(v.get("version")) == vkey(there):
+            return "different", (f"{what}" + (f" ({have[:7]})" if have and have != "unknown" else "")
+                                 + f", the clone's version but not from the clone's commit {head[:7]}")
+        return "other", f"{what}, older than the clone's {there}"
     if not have or have == "unknown":
         return "other", "the install doesn't record which commit it came from"
-    if known(have) and git_ok("merge-base", "--is-ancestor", head, have):
-        return "newer", f"the install is from {have[:7]}, newer than the clone's {head[:7]}"
     return "other", f"the install is from {have[:7]}, not the clone's {head[:7]}"
 
 
@@ -126,7 +173,7 @@ def plan():
         state, why = install_state()
         if state == "same":
             return "current", "already up to date with GitHub, and the install matches the clone"
-        if state == "newer":
+        if state in ("newer", "different"):
             return "current", (f"already up to date with GitHub; {why}, so there's nothing to install "
                                "(kit-update --reinstall installs the clone's version anyway)")
         return "reinstall", f"the clone is up to date with GitHub, but {why}"
@@ -201,6 +248,470 @@ def show_kit_md():
     print("Compare them, then keep yours or replace it with the new one (and delete KIT.md.new).")
 
 
+# ------------------------------------------------------------------ updating from a release zip
+
+ZIP_MAX_BYTES = 200 * 1024 * 1024      # uncompressed total; a Kit release is a few MB
+ZIP_MAX_FILES = 20000
+KEEP_RELEASES = 3
+MARKER = ".kit-release.json"           # written in each release folder Kit keeps; pruning only touches those
+COPIED = ("README.md", "INSTALL.md", "DESIGN.md", "VERSION", "CHANGELOG.md", "GOVERNANCE.md", "ONBOARDING.md")
+COMMIT_RX = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+VERSION_RX = re.compile(r"\d+\.\d+\.\d+(?:[-+.][0-9A-Za-z.-]{1,30})?")
+WIN_RESERVED = re.compile(r"(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?", re.I)
+METHODS = {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED, zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA}
+
+
+class Refused(Exception):
+    pass
+
+
+def sha256_of(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def entry_parts(name):
+    """The path parts of a zip entry's name, or Refused when it could land outside the folder it's
+    extracted into, or can't be written the same way on macOS, Linux, and Windows."""
+    if not name or any(ord(ch) < 32 for ch in name):
+        raise Refused(f"entry {name!r}: an empty name or a control character")
+    if "\\" in name:
+        raise Refused(f"entry {name!r}: a backslash in the path")
+    if name.startswith("/"):
+        raise Refused(f"entry {name!r}: an absolute path")
+    if re.match(r"[A-Za-z]:", name) or ":" in name:
+        raise Refused(f"entry {name!r}: a drive letter or a colon in the path")
+    parts = name[:-1].split("/") if name.endswith("/") else name.split("/")
+    for part in parts:
+        if part in ("", ".", ".."):
+            raise Refused(f"entry {name!r}: an empty, '.', or '..' part in the path")
+        if part[-1] in " ." or any(ch in '<>"|?*' for ch in part) or WIN_RESERVED.fullmatch(part):
+            raise Refused(f"entry {name!r}: a name Windows can't hold as it is")
+    return parts
+
+
+def entry_kind(info):
+    """'dir' or 'file', or Refused for a symlink, a device, or any other special entry."""
+    is_dir = info.filename.endswith("/")
+    mode = (info.external_attr >> 16) & 0xFFFF
+    kind = stat.S_IFMT(mode)
+    if kind:                                           # a Unix file type in the mode, whatever made the zip
+        # (git archive gives executables one and leaves the rest as plain MS-DOS entries)
+        if kind == stat.S_IFLNK:
+            raise Refused(f"entry {info.filename!r}: a symbolic link")
+        if kind == stat.S_IFDIR:
+            if not is_dir:
+                raise Refused(f"entry {info.filename!r}: a folder whose name doesn't end in /")
+            return "dir"
+        if kind != stat.S_IFREG:
+            raise Refused(f"entry {info.filename!r}: a device, pipe, or other special file")
+        if is_dir:
+            raise Refused(f"entry {info.filename!r}: a file whose name ends in /")
+        return "file"
+    return "dir" if is_dir else "file"
+
+
+def inspect_zip(path):
+    """Check a release zip without extracting it. Returns a dict: top folder, entries [(info, parts,
+    kind)], files, total bytes, version, commit (from the zip comment, or None) and what the comment
+    said, and the installer to run (relative parts). Refused for anything unsafe or unexpected."""
+    path = pathlib.Path(path)
+    if not path.is_file():
+        raise Refused(f"{path} isn't a file")
+    if path.stat().st_size > ZIP_MAX_BYTES:
+        raise Refused(f"{path.name} is larger than {ZIP_MAX_BYTES // (1024 * 1024)} MB")
+    if not zipfile.is_zipfile(path):
+        raise Refused(f"{path.name} isn't a zip file")
+    with zipfile.ZipFile(path) as zf:
+        infos = zf.infolist()
+        if len(infos) > ZIP_MAX_FILES:
+            raise Refused(f"{len(infos)} entries, more than the {ZIP_MAX_FILES} allowed")
+        entries, seen, tops, total, files = [], set(), set(), 0, 0
+        for info in infos:
+            parts = entry_parts(info.filename)
+            kind = entry_kind(info)
+            if info.flag_bits & 0x1:
+                raise Refused(f"entry {info.filename!r}: encrypted")
+            if info.compress_type not in METHODS:
+                raise Refused(f"entry {info.filename!r}: an unknown compression method")
+            key = "/".join(parts).lower()          # macOS and Windows don't tell case apart
+            if key in seen:
+                raise Refused(f"entry {info.filename!r}: appears twice (perhaps in a different case)")
+            seen.add(key)
+            tops.add(parts[0])
+            if len(parts) == 1 and kind == "file":
+                raise Refused(f"entry {info.filename!r}: a file outside the release's folder")
+            if kind == "file":
+                files += 1
+                total += info.file_size
+                if total > ZIP_MAX_BYTES:
+                    raise Refused(f"more than {ZIP_MAX_BYTES // (1024 * 1024)} MB uncompressed")
+            entries.append((info, parts, kind))
+        if len(tops) != 1:
+            raise Refused(f"{len(tops)} top-level folders ({', '.join(sorted(tops)[:5])}); a release has exactly one")
+        top = tops.pop()
+        names = {"/".join(p[1:]): k for _, p, k in entries if len(p) > 1}
+        has_dir = lambda d: any(n.startswith(d + "/") for n in names)
+        missing = [n for n in ("VERSION",) if names.get(n) != "file"]
+        missing += [d + "/" for d in ("kit", "shared") if not has_dir(d)]
+        top_inst = names.get("install.sh") == "file" and names.get("install.ps1") == "file"
+        plat = {"mac": "platform/mac/install.sh", "win": "platform/windows/install.ps1"}
+        plat_inst = all(names.get(n) == "file" for n in plat.values())
+        if not (top_inst or plat_inst):
+            missing.append("install.sh and install.ps1 (or platform/mac/install.sh and platform/windows/install.ps1)")
+        if missing:
+            raise Refused("not a Kit release: missing " + ", ".join(missing))
+        if IS_WIN:
+            run = plat["win"] if names.get(plat["win"]) == "file" else "install.ps1"
+        else:
+            run = plat["mac"] if names.get(plat["mac"]) == "file" else "install.sh"
+        vinfo = zf.getinfo(f"{top}/VERSION")
+        if vinfo.file_size > 64:
+            raise Refused("VERSION is too long to be a version")
+        version = zf.read(vinfo).decode("utf-8", "replace").strip()
+        if not VERSION_RX.fullmatch(version):
+            raise Refused(f"VERSION holds {version[:40]!r}, not a version like 1.6.3")
+        comment = zf.comment.decode("ascii", "replace").strip()
+    commit = comment.lower() if COMMIT_RX.fullmatch(comment.lower()) else None
+    return {"top": top, "entries": entries, "files": files, "total": total, "version": version,
+            "commit": commit, "comment": comment, "installer": run.split("/")}
+
+
+def extract(path, info, dest):
+    """Extract the checked zip into DEST, a new empty folder Kit made. Files are written fresh (never
+    over another), with no set-id bits; nothing extracted is run or imported. Returns the release root."""
+    dest = pathlib.Path(dest).resolve()
+    if any(dest.iterdir()):
+        raise Refused(f"{dest} isn't empty")
+    written = 0
+    with zipfile.ZipFile(path) as zf:
+        for entry, parts, kind in info["entries"]:
+            target = dest.joinpath(*parts)
+            if dest not in target.resolve().parents:
+                raise Refused(f"entry {entry.filename!r}: would land outside {dest}")
+            try:
+                if kind == "dir":
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(entry) as src, open(target, "xb") as out:
+                    for chunk in iter(lambda: src.read(1 << 20), b""):
+                        written += len(chunk)
+                        if written > ZIP_MAX_BYTES:
+                            raise Refused(f"more than {ZIP_MAX_BYTES // (1024 * 1024)} MB uncompressed")
+                        out.write(chunk)
+            except (OSError, zipfile.BadZipFile, EOFError) as e:
+                raise Refused(f"entry {entry.filename!r}: couldn't extract it ({e})")
+            if not IS_WIN:
+                mode = (entry.external_attr >> 16) & 0o777
+                os.chmod(target, 0o700 if mode & 0o111 else 0o600)
+    if not IS_WIN:
+        for d in [dest, *(p for p in dest.rglob("*") if p.is_dir())]:
+            os.chmod(d, 0o700)
+    return dest / info["top"]
+
+
+def release_files(root):
+    """Relative paths (POSIX) of the files the installer copies from a package or an install."""
+    out = {}
+    for name in COPIED:
+        if (root / name).is_file():
+            out[name] = root / name
+    for sub in ("kit", "shared", "platform"):
+        base = root / sub
+        if not base.is_dir():
+            continue
+        for p in base.rglob("*"):
+            rel = p.relative_to(root)
+            if p.is_file() and "__pycache__" not in rel.parts and p.suffix != ".pyc" and p.name != MARKER:
+                out[rel.as_posix()] = p
+    return out
+
+
+def same_bytes(a, b):
+    try:
+        if a.stat().st_size != b.stat().st_size:
+            return False
+        return a.read_bytes() == b.read_bytes()
+    except OSError:
+        return False
+
+
+def compare(release):
+    """(added, changed, only_installed): the release's files against the installed copy."""
+    new, have = release_files(release), release_files(INSTALL)
+    added = sorted(set(new) - set(have))
+    changed = sorted(n for n in set(new) & set(have) if not same_bytes(new[n], have[n]))
+    only = sorted(set(have) - set(new))
+    return added, changed, only
+
+
+def changelog(text, low, high):
+    """CHANGELOG sections for versions after LOW up to and including HIGH (by number)."""
+    out, keep = [], False
+    for line in text.splitlines():
+        m = re.match(r"^## \[?([^\]\s]+)\]?", line)
+        if m:
+            ver = m.group(1)
+            keep = ver.lower() != "unreleased" and vkey(low) < vkey(ver) <= vkey(high)
+        if keep:
+            out.append(line)
+    return out
+
+
+def read_text(p):
+    try:
+        return pathlib.Path(p).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+def owner_env():
+    """The environment for the installer: KIT_OWNER kept from the existing install's settings when it
+    isn't set already, so the new release calls the owner what the old one did."""
+    env = dict(os.environ)
+    if env.get("KIT_OWNER", "").strip():
+        return env
+    for line in read_text(INSTALL / "shared/morning/config").splitlines():
+        m = re.match(r'\s*OWNER_NAME\s*=\s*"?([^"\n]*)"?\s*$', line)
+        if m and m.group(1).strip():
+            env["KIT_OWNER"] = m.group(1).strip()
+            break
+    return env
+
+
+def release_cmd(root, parts):
+    script = root.joinpath(*parts)
+    if IS_WIN:
+        return ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)]
+    return ["bash", str(script)]
+
+
+def kept_releases():
+    """Kit's release folders, newest first: folders directly in RELEASES that carry Kit's marker."""
+    out = []
+    if not RELEASES.is_dir():
+        return out
+    for d in RELEASES.iterdir():
+        if d.name.startswith(".") or d.is_symlink() or not d.is_dir():
+            continue
+        try:
+            m = json.loads((d / MARKER).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        out.append((m.get("kept") or "", d.stat().st_mtime, d, m))
+    out.sort(key=lambda t: (t[0], t[1]), reverse=True)
+    return [(d, m) for _, _, d, m in out]
+
+
+def remove_release(d):
+    """Delete a release folder, only when it sits directly in RELEASES and isn't a link."""
+    d = pathlib.Path(d)
+    if d.is_symlink() or d.resolve().parent != RELEASES.resolve():
+        return False
+    shutil.rmtree(d, ignore_errors=True)
+    return not d.exists()
+
+
+def prune(current):
+    removed = []
+    for d, _ in kept_releases()[KEEP_RELEASES:]:
+        if d.resolve() != current.resolve() and remove_release(d):
+            removed.append(d.name)
+    return removed
+
+
+def record_zip(zip_path, digest, info):
+    """Note in VERSION.json that this install came from a zip: its name, SHA-256, and commit."""
+    p = INSTALL / "VERSION.json"
+    try:
+        v = json.loads(p.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        v = {"installed": datetime.datetime.now().strftime("%Y-%m-%d %H:%M")}
+    v["version"] = info["version"]
+    v["commit"] = info["commit"] or "unknown"
+    v["source"] = {"type": "zip", "file": pathlib.Path(zip_path).name, "sha256": digest,
+                   "commit": info["commit"], "release": info["release"]}
+    INSTALL.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name("VERSION.json.tmp")
+    tmp.write_text(json.dumps(v, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, p)
+    return v
+
+
+def clone_note(done=True):
+    """A warning about the git clone, if there is one: it's left as it is, and (once DONE) differs from
+    the install."""
+    if not (REPO / ".git").exists():
+        return None
+    head = git("rev-parse", "--short", "HEAD", check=False) or "unknown"
+    if done:
+        return (f"Warning: the git clone at {REPO} is left as it is ({head}, Kit {version_at('HEAD')}), and "
+                "now differs from the install. kit-update without --zip will report the install as newer "
+                "than, or different from, the clone, and won't install the clone over it unless you pass "
+                "--reinstall.")
+    return (f"Note: the git clone at {REPO} ({head}, Kit {version_at('HEAD')}) would be left as it is, "
+            "and would then differ from the install.")
+
+
+def zip_update(args):
+    zpath = pathlib.Path(args.zip).expanduser()
+    try:
+        digest = sha256_of(zpath)
+    except OSError as e:
+        print(f"kit-update: can't read {zpath}: {e}")
+        return 1
+    print(f"kit-update: {zpath.name}")
+    print(f"  SHA-256: {digest}")
+    if args.sha256:
+        want = args.sha256.strip().lower()
+        if want != digest:
+            print(f"kit-update: refused: the SHA-256 doesn't match the published value {want}. Nothing changed.")
+            return 1
+        print("  SHA-256 matches the published value.")
+    try:
+        info = inspect_zip(zpath)
+    except (Refused, zipfile.BadZipFile, OSError) as e:
+        print(f"kit-update: refused: {e}. Nothing changed.")
+        return 1
+    commit = info["commit"]
+    print(f"  Kit {info['version']}, folder {info['top']}/, {info['files']} files, "
+          f"{info['total'] / (1024 * 1024):.1f} MB uncompressed")
+    if commit:
+        print(f"  Commit: {commit} (from the zip comment)")
+    elif info["comment"]:
+        print("  Commit: unknown (the zip comment isn't a commit id, so this zip didn't come straight from git archive)")
+    else:
+        print("  Commit: unknown (the zip has no comment; git archive writes the commit there)")
+
+    v = installed_version()
+    have_v, have_c = v.get("version") or "unknown", (v.get("commit") or "unknown")
+    if v:
+        src = (v.get("source") or {}).get("file")
+        print(f"\nInstalled: Kit {have_v} ({have_c[:7]})" + (f", from {src}" if src else ""))
+    else:
+        print("\nInstalled: no version record (.install/VERSION.json)")
+    zk, hk = vkey(info["version"]), vkey(have_v)
+    if not v or zk > hk:
+        state = "newer"
+    elif zk < hk:
+        state = "older"
+    else:
+        state = "same"
+    if state == "same" and commit and have_c not in ("unknown", commit):
+        print(f"The zip is the same version, from a different commit ({commit[:7]}, installed {have_c[:7]}).")
+    print({"newer": "The zip is newer.", "older": "The zip is OLDER than the install.",
+           "same": "The zip is the same version as the install."}[state])
+
+    base = pathlib.Path(tempfile.mkdtemp(prefix="kit-update-zip-"))
+    try:
+        try:
+            root = extract(zpath, info, base)
+        except Refused as e:
+            print(f"kit-update: refused: {e}. Nothing changed.")
+            return 1
+        if state == "newer":
+            notes = changelog(read_text(root / "CHANGELOG.md"), have_v if v else "0", info["version"])
+            print(f"\nCHANGELOG from {have_v} to {info['version']}:")
+        elif state == "older":
+            notes = changelog(read_text(INSTALL / "CHANGELOG.md"), info["version"], have_v)
+            print(f"\nCHANGELOG entries a downgrade to {info['version']} would undo:")
+        else:
+            notes = None
+        if notes is not None:
+            print("\n".join("  " + ln for ln in notes[:60]) if notes else "  (no entries for these versions)")
+            if len(notes) > 60:
+                print(f"  ... {len(notes) - 60} more lines in CHANGELOG.md")
+        added, changed, only = compare(root)
+        print(f"\nFiles against the installed copy: {len(added)} added, {len(changed)} changed, "
+              f"{len(only)} only in the install (the installer leaves those in place)")
+        main_files = (changed + added)[:12]
+        for n in main_files:
+            print(f"  {'+' if n in added else '~'} {n}")
+        if len(changed) + len(added) > len(main_files):
+            print(f"  ... and {len(changed) + len(added) - len(main_files)} more")
+
+        if state == "older" and not args.allow_downgrade:
+            print("\nkit-update: refused: the zip is older than the install. Nothing changed. "
+                  "To go back anyway: --allow-downgrade.")
+            return 1
+        if state == "same" and not args.reinstall:
+            print("\nkit-update: nothing to do; the install is already this version "
+                  "(--reinstall installs it again).")
+            return 0
+        if not args.apply:
+            print("\nNothing changed. To install it: kit-update --zip " + str(zpath) + " --apply"
+                  + (" --allow-downgrade" if state == "older" else "")
+                  + (" --reinstall" if state == "same" else ""))
+            note = clone_note(done=False)
+            if note:
+                print("\n" + note)
+            return 0
+        if not args.yes:
+            answer = ask(f"Install Kit {info['version']} from {zpath.name}?")
+            if answer is None:
+                print("kit-update: no one at the keyboard to confirm; use --apply --yes")
+                return 1
+            if not answer:
+                print("Nothing changed.")
+                return 0
+
+        # Keep the release for rollback, in a folder Kit owns, then run its installer.
+        RELEASES.mkdir(parents=True, exist_ok=True)
+        if not IS_WIN:
+            os.chmod(RELEASES, 0o700)
+        name = f"{info['version']}-{commit[:7] if commit else 'zip' + digest[:7]}"
+        final = RELEASES / name
+        incoming = pathlib.Path(tempfile.mkdtemp(prefix=".incoming-", dir=RELEASES))
+        try:
+            shutil.move(str(root), str(incoming / "release"))
+            (incoming / "release" / MARKER).write_text(json.dumps({
+                "version": info["version"], "commit": commit, "file": zpath.name, "sha256": digest,
+                "kept": datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")}, indent=2) + "\n",
+                encoding="utf-8")
+            if final.exists() and not remove_release(final):
+                print(f"kit-update: refused: {final} is in the way and isn't one Kit can remove. Nothing installed.")
+                return 1
+            os.replace(incoming / "release", final)
+        finally:
+            shutil.rmtree(incoming, ignore_errors=True)
+        info["release"] = str(final)
+        print(f"\nkit-update: release kept in {final}")
+        print("kit-update: running its installer\n")
+        env = owner_env()
+        if commit:
+            env["KIT_PACKAGE_COMMIT"] = commit
+        rc = subprocess.run(release_cmd(final, info["installer"]), stdin=subprocess.DEVNULL, env=env,
+                            cwd=str(final)).returncode
+        if rc != 0:
+            print(f"\nkit-update: the installer failed (exit {rc}). The release stays in {final}; fix the "
+                  "problem it names, then run kit-update --zip again.")
+            return rc
+        record_zip(zpath, digest, info)
+        show_kit_md()
+        removed = prune(final)
+        if removed:
+            print(f"\nkit-update: kept the last {KEEP_RELEASES} releases; removed {', '.join(removed)}")
+        print(f"\nkit-update: Kit {have_v} -> {info['version']} ({(commit or 'unknown')[:7]}), from {zpath.name}. "
+              "The next morning brief lists what changed (briefs/kit-release-notes.md).")
+        earlier = [d for d, _ in kept_releases() if d.resolve() != final.resolve()]
+        if earlier:
+            print("To roll back: rerun the previous release's installer:\n  "
+                  + " ".join(f'"{x}"' if " " in x else x for x in release_cmd(earlier[0], info["installer"])))
+        else:
+            print("To roll back: no earlier release is kept in " + str(RELEASES)
+                  + "; reinstall the earlier version from its zip (kit-update --zip FILE --apply --allow-downgrade).")
+        note = clone_note()
+        if note:
+            print("\n" + note)
+        return 0
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
 def main(argv):
     sys.stdout.reconfigure(line_buffering=True)
     ap = argparse.ArgumentParser(prog="kit-update", description=__doc__,
@@ -208,8 +719,16 @@ def main(argv):
     ap.add_argument("--apply", action="store_true", help="move the clone onto GitHub's main and install")
     ap.add_argument("--yes", action="store_true", help="with --apply, don't ask for confirmation")
     ap.add_argument("--reinstall", action="store_true",
-                    help="rerun the installer even when the install matches the clone (implies --apply)")
+                    help="rerun the installer even when the install matches the clone (implies --apply); "
+                         "with --zip, allow the same version (--apply still needed)")
+    ap.add_argument("--zip", metavar="FILE", help="update from a release zip instead of the git clone")
+    ap.add_argument("--sha256", metavar="HEX", help="with --zip, the zip's published SHA-256 to check")
+    ap.add_argument("--allow-downgrade", action="store_true", help="with --zip, allow an older version")
     args = ap.parse_args(argv)
+    if args.zip:
+        return zip_update(args)
+    if args.sha256 or args.allow_downgrade:
+        ap.error("--sha256 and --allow-downgrade go with --zip")
     if args.reinstall:
         args.apply = True
 
@@ -220,6 +739,13 @@ def main(argv):
     if action == "current" and not args.reinstall:
         return 0
     moving = action in ("fast-forward", "landed")
+    hold = None
+    if moving and not args.reinstall:
+        state, why = install_state("origin/main")
+        if state in ("newer", "different"):
+            hold = why.replace("the clone's", "GitHub's")
+            print(f"kit-update: {hold}; the clone can move, but the installer won't run over it "
+                  "(--reinstall runs it anyway)")
     if moving:
         show_incoming()
     else:
@@ -249,6 +775,10 @@ def main(argv):
               f"the earlier commit is on {backup}")
     else:
         print(f"\nkit-update: the clone stays at {git('log', '-1', '--format=%h %s')}")
+    if hold:
+        print(f"kit-update: not running the installer: {hold}. To undo the move: "
+              f"git -C {REPO} reset --hard {backup}")
+        return 0
 
     print("kit-update: running the installer\n")
     rc = subprocess.run(installer(), stdin=subprocess.DEVNULL).returncode

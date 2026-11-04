@@ -11,6 +11,12 @@
   kit-settings email ADDRESS                where Outlook drafts are addressed (usually your own)
   kit-settings text NUMBER-OR-ADDRESS       where iMessage texts go (macOS)
   kit-settings setup                        answer a few questions (the installer runs this)
+  kit-settings show --all [--not-set] [--area AREA] [--json]
+                                            every setting: the run config, the setup fields in memory/context,
+                                            and the JSON configs, with source, status, and description
+  kit-settings ui [--no-open] [--idle MINUTES]
+                                            open a local page to change settings (127.0.0.1 only, a one-time
+                                            link, stops after 15 minutes idle); Claude Code asks before it runs
 
 Delivery channels: local (desktop notification and dashboard), imessage (macOS text),
 outlook-drafts (a draft saved in Outlook, never sent), outlook-review (the same draft, opened for
@@ -300,6 +306,48 @@ def cmd_setup():
     return show()
 
 
+def _settings_module():
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+    import kit_settings
+    return kit_settings
+
+
+def cmd_show_all(args):
+    if "--all" not in args and "--json" not in args:
+        return show()
+    ks = _settings_module()
+    area = None
+    if "--area" in args:
+        i = args.index("--area")
+        area = " ".join(args[i + 1:i + 2]).lower() or None
+        if area not in ks.AREAS:
+            sys.exit("Areas: " + ", ".join(ks.AREAS))
+    items = ks.collect(KIT)
+    if "--json" in args:
+        import json
+        rows = [ks.public(s) for s in items if (not area or s["area"] == area)
+                and ("--not-set" not in args or s["status"] == "not set")]
+        print(json.dumps(rows, indent=1))
+        return 0
+    print(ks.text_report(items, only_not_set="--not-set" in args, area=area))
+    return 0
+
+
+def cmd_ui(args):
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+    import kit_settings_ui
+    idle = 15
+    if "--idle" in args:
+        i = args.index("--idle")
+        try:
+            idle = float(args[i + 1])
+        except (IndexError, ValueError):
+            sys.exit("--idle takes a number of minutes")
+        if not 0 < idle <= 240:
+            sys.exit("--idle is 1 to 240 minutes")
+    return kit_settings_ui.main(KIT, idle=idle * 60, open_browser="--no-open" not in args)
+
+
 def main(argv):
     force = "--force" in argv
     argv = [a for a in argv if a != "--force"]
@@ -321,6 +369,10 @@ def main(argv):
         return show()
     if cmd == "setup":
         return cmd_setup()
+    if cmd == "show":
+        return cmd_show_all(rest)
+    if cmd == "ui":
+        return cmd_ui(rest)
     sys.exit("Unknown command. Run: kit-settings --help")
 
 

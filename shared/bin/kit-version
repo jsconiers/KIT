@@ -48,6 +48,8 @@ def main(argv):
         v = {}
     out = {"installed": {k: v.get(k) for k in ("version", "commit", "installed")} if v else None,
            "repo": None, "github": None, "github_ahead": None}
+    if v.get("source"):
+        out["installed"]["source"] = v["source"]          # kit-update --zip: the zip's name, SHA-256, commit
 
     if (REPO / ".git").exists():
         if args.check:
@@ -71,6 +73,9 @@ def main(argv):
         print("kit-version: no version recorded yet; it's written the next time the installer runs")
     else:
         print(f"Kit {v.get('version')} ({short(v.get('commit'))}), installed {v.get('installed')}")
+        src = v.get("source") or {}
+        if src.get("type") == "zip":
+            print(f"From a zip: {src.get('file')} (SHA-256 {src.get('sha256')})")
         prev = v.get("previous")
         if prev:
             print(f"Before that: {prev.get('version')} ({short(prev.get('commit'))}), installed {prev.get('installed')}")

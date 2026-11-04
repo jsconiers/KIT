@@ -22,6 +22,7 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import kit_template  # noqa: E402  (shared/kit_template.py)
 import kit_queue  # noqa: E402  (shared/kit_queue.py)
+import kit_settings  # noqa: E402  (shared/kit_settings.py: the Settings panel)
 
 # strftime no-pad hour: glibc/BSD use %-I, the Windows CRT uses %#I.
 HOUR = "%#I" if os.name == "nt" else "%-I"
@@ -45,6 +46,7 @@ $audit_banner<div>$hero</div>$lane_you $lane_kit $lane_wait
 <section><h2>Today</h2>$schedule</section><section><h2>Briefs</h2>$briefs</section>
 <section><h2>Health</h2><ul>$health_checks</ul><table><thead><tr><th></th>$runs_head</tr></thead><tbody>$runs_rows</tbody></table></section>
 <section><h2>Sprint</h2>$sprint</section><section><h2>Reliability</h2>$reliability</section><section><h2>Audit</h2>$audit</section><section><h2>Kit's staff</h2><ul>$staff</ul></section>
+<section id="settings"><h2>Settings</h2>$settings</section>
 </body></html>
 """
 
@@ -522,6 +524,16 @@ def sprint_panel():
             + burndown_svg(sp, total, hist) + f'<ul class="strips">{rows}</ul>')
 
 
+def add_settings(page, panel):
+    """A template from before the Settings panel has no $settings: add the panel at the end of its main area."""
+    block = f'<section class="panel" id="settings" aria-labelledby="p-settings"><h2 id="p-settings">Settings</h2>{panel}</section>'
+    for mark in ("</main>", "</body>"):
+        i = page.rfind(mark)
+        if i >= 0:
+            return page[:i] + block + "\n" + page[i:]
+    return page + block
+
+
 def main(argv):
     template_arg, argv = kit_template.args_template(argv)
     me = owner()
@@ -564,8 +576,13 @@ def main(argv):
         "sprint": sprint_panel(), "reliability": reliability_panel(),
     }
     tpl = kit_template.find("dashboard.html", template_arg, "KIT_DASHBOARD_TEMPLATE")
-    page = kit_template.render(tpl.read_text(encoding="utf-8") if tpl else FALLBACK, values,
-                               str(tpl) if tpl else "built-in page")
+    text = tpl.read_text(encoding="utf-8") if tpl else FALLBACK
+    settings = kit_settings.dashboard_panel(KIT)
+    if re.search(r"\$\{?settings\b", text):
+        values["settings"] = settings
+    page = kit_template.render(text, values, str(tpl) if tpl else "built-in page")
+    if "settings" not in values:
+        page = add_settings(page, settings)
     OUT.write_text(page)
     if "--open" in argv:
         if os.name == "nt":

@@ -70,7 +70,7 @@ For installing and configuring, see INSTALL.md; for how the pieces fit, see DESI
 | `kit-onepager` | Python 3.8; pdftotext for PDFs (optional) | Same code; pdftotext optional | Write the one-pager from the template |
 | `kit-settings` | Python 3.8 | Same code | Edit `.install/shared/morning/config` by hand |
 | `kit-stakeholders` | Python 3.8; the demand register, minutes, status reports, intake notes | Same code | Fill the stakeholder map template by hand |
-| `kit-update` | Python 3.8; git; the repo clone | Same code | Rerun the installer from the repo |
+| `kit-update` | Python 3.8; git and the repo clone (`--zip`: a release zip, no git) | Same code | Rerun the installer from the repo, or unzip a release and run its installer |
 | `kit-viewpoints` | Python 3.8; kit-drawio; pdftotext for PDFs (optional) | Same code | Draw the viewpoints by hand |
 | `kit-sizing` | Python 3.8 | Same code | Size by hand from the template |
 | `kit-diagram-diff` | Python 3.8 | Same code | Compare diagrams by eye |

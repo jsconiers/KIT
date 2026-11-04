@@ -3,7 +3,7 @@
 #                    personal details (patterns in the SCAN_PATTERNS secret), the owner-name test, the
 #                    connector guard's fail-closed launch (kit-hook), the credential lookup doctor and
 #                    kit-connect share, kit-mcp-env (MCP servers' tokens from the Keychain), kit-update
-#                    (reinstall, landed patches), the end-of-day wrap and review rehearsal tests, the vendor desk,
+#                    (reinstall, landed patches, release zips), the end-of-day wrap and review rehearsal tests, the vendor desk,
 #                    team coverage map, and architecture digest tests, and the letter builder test.
 #                    See .github/scripts/checks.py.
 #   windows-install: the Windows installer, run for real on GitHub's Windows runners under Windows
@@ -12,7 +12,7 @@
 #                    the connector guard's installed hooks run in Git Bash), the guard launcher's tests
 #                    in Git Bash (tests/test_kit_hook.py), the credential lookup and kit-mcp-env against the
 #                    real Credential Manager (tests/test_credentials.py, tests/test_mcp_env.py), kit-update
-#                    with install.ps1 (tests/test_kit_update.py), the PPM Express connector's tests
+#                    with install.ps1 (tests/test_kit_update.py, tests/test_kit_update_zip.py), the PPM Express connector's tests
 #                    on Windows (Credential Manager, the pulse, and meeting actions included), the wrap,
 #                    rehearsal, vendor desk, team map, and digest tests, and the Windows fixes tests
 #                    (tests/test_windows_fixes.py, with python-docx).
@@ -58,6 +58,8 @@ jobs:
         run: python3 tests/test_review_loop.py
       - name: kit-update tests (reinstall when the install lags; landed patches with rebuilt documents)
         run: python3 tests/test_kit_update.py
+      - name: kit-update zip tests (release zips checked as untrusted, installed, kept, pruned)
+        run: python3 tests/test_kit_update_zip.py
       - name: End-of-day wrap and review rehearsal tests
         run: |
           python3 tests/test_wrap.py
@@ -113,6 +115,8 @@ jobs:
         run: python tests/test_review_loop.py
       - name: kit-update tests on Windows (install.ps1 stand-in)
         run: python tests/test_kit_update.py
+      - name: kit-update zip tests on Windows (install.ps1 stand-in)
+        run: python tests/test_kit_update_zip.py
       # One test per step: PowerShell fails a step only on its last command's exit code.
       - name: PPM Express MCP tests on Windows
         run: python tests/test_ppmx.py

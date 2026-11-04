@@ -40,6 +40,12 @@ cd KIT
 or download and unzip a release into a folder named `kit-agent` in your Downloads folder (the
 installer then offers to delete the download afterward).
 
+A release zip is made from a clone with
+`git archive --format=zip --prefix=KIT-<version>/ -o KIT-<version>-<sha>.zip HEAD`: one top-level
+folder, with the commit written in the zip comment. Publish its SHA-256 with it (`shasum -a 256` on
+macOS, `Get-FileHash` on Windows) so whoever installs it can check it. Once Kit is installed, later
+zips go through `kit-update --zip` (section 11, "Updating from a zip"), not by hand.
+
 ## 3. Run the installer
 
 **macOS**
@@ -337,7 +343,41 @@ kit-settings delivery work outlook-drafts     # work items one way...
 kit-settings delivery personal local          # ...personal items another
 kit-settings todos outlook                    # Outlook Tasks (reaches your phone through Microsoft To Do)
 kit-settings email you@example.com            # where Outlook drafts are addressed
+kit-settings show --all                       # every setting, by area, with source, status, and description
+kit-settings show --all --not-set             # only the ones still to fill in (--area AREA, --json also work)
+kit-settings ui                               # open the settings page in your browser (Claude Code asks first)
 ```
+
+**Seeing every setting.** The dashboard has a Settings panel (at the bottom; open it to search and
+filter): the run config, every `- **Field:** value` line in the setup files in `memory/context/`, and
+the JSON configs (`connector-guard.json`, `models.json`, `sharing-policy.json`, `retention.json`, and the
+diagram files), grouped by area, each with its value, its file and line, a one-line description, and a
+status: **set**, **not set** (highlighted), or **default**. Credentials show by name only, and anything
+that looks like a credential is masked. `memory/personal/` is never shown, and neither are Kit's own
+memory notes in `memory/context/` (only the setup files Kit ships are listed). `kit-settings show --all`
+prints the same list. An owner copy of the dashboard template without `$settings` still gets the panel,
+at the end of its main area.
+
+**Changing settings in a page.** `kit-settings ui` starts a small local server on 127.0.0.1, on a free
+port, and opens a one-time link in your browser (`--no-open` prints it instead; `--idle MINUTES`, default
+15, sets when it stops by itself; the Stop button or Ctrl-C stops it sooner). Change a value, press
+Preview to see the diff, then Confirm. Each change touches one line of one file (a wrapped setup field
+becomes one line), keeps every other byte, backs the old file up to `.install/backups/settings/`, is
+logged to `.install/logs/settings-ui.log`, is committed to Kit's private repo when the file is tracked
+there (the run config lives in `.install/`, which isn't, and the page says so), and rebuilds the
+dashboard. If the commit fails the change is kept and the page says so.
+
+The page edits only an allowlist: run config preferences (delivery and to-do routing, with work items
+kept inside Microsoft 365; timings, budgets and alert thresholds, on/off switches for checks, monitors,
+the wrap, the digest, and the pulse) and the setup-file fields. It checks each value by type: a path
+field must start with a backticked path, a date must be DD-Mmm-YYYY, a channel must be a known one, a
+number must be in range, and nothing credential-shaped is ever written. Read-only there, each with how to
+change it instead: `connector-guard.json`, `models.json` and the `*_MODEL` keys, `sharing-policy.json`
+and `sharing.md` (except Kit id, Owner role, Overload threshold, Default project), `connectors.md`,
+`agents.md`, `retention.md`, the data rules, `ALLOW_TOOLS`/`BLOCK_TOOLS`, the commands Kit runs
+(`*_CMD`), backup location and encryption, phone approvals and publishing, the guard monitor, connector
+endpoints, Claude Code's permission rules, and every credential. Undo a change from the backup, or with
+`git -C ~/Claude/Agents/kit revert <commit>`.
 
 | Key | Default | What it does |
 |---|---|---|
@@ -668,6 +708,45 @@ uncommitted work or commits GitHub doesn't have, except when GitHub already appl
 its commits has the same files, or differs only in binary files both have (the Word and PDF documents
 rebuilt on publishing), which it names; your versions stay on the backup branch. After an update, the
 next brief adds "What changed in Kit" once. Rerun `doctor.py --fix-agents` if agents changed.
+
+### Updating from a zip
+
+For an install with no git clone (you received Kit as a zip):
+
+```bash
+kit-update --zip KIT-1.7.0-abc1234.zip                      # check it and show what changes; changes nothing
+kit-update --zip KIT-1.7.0-abc1234.zip --sha256 <published>  # the same, and check the published SHA-256
+kit-update --zip KIT-1.7.0-abc1234.zip --apply               # install it (asks first; --yes skips that)
+```
+
+Without `--apply`, `kit-update` checks the zip, extracts it into a new temporary folder, and deletes
+that folder afterward; it runs nothing from the zip and changes nothing in the install. It prints the
+zip's SHA-256, its version and commit (from the zip comment; it says so when there's none), the
+installed version and commit, whether the zip is newer, the same, or older, the CHANGELOG entries in
+between, and how many files are added or changed against the installed copy, with the main ones.
+
+It refuses the zip, changing nothing, when an entry has an absolute path, a `..` part, a drive letter,
+a backslash, or a name Windows can't hold; when it holds a symbolic link, a device, or another special
+file, or an encrypted entry; when there isn't exactly one top-level folder; when it's over 200 MB
+uncompressed or 20,000 entries; when VERSION, `kit/`, `shared/`, or the installers are missing; or
+when `--sha256` doesn't match. An older zip needs `--allow-downgrade`; the same version has nothing to
+do unless you add `--reinstall` (with `--zip`, `--reinstall` doesn't imply `--apply`).
+
+`--apply` keeps the release in `~/Claude/Agents/kit/.install/releases/<version>-<commit>/` (the last
+three; older ones are deleted, only from that folder), runs that copy's installer
+(`platform/mac/install.sh`, or `platform/windows/install.ps1` on Windows) with your name from the
+existing settings as `KIT_OWNER`, and records in `.install/VERSION.json` that the install came from
+the zip: its file name, SHA-256, and commit (`kit-version` shows them). Nothing is fetched from the
+network.
+
+To roll back, rerun an earlier release's installer, which `kit-update` prints, for example
+`bash ~/Claude/Agents/kit/.install/releases/1.6.3-9488927/platform/mac/install.sh`, or install the
+earlier zip with `kit-update --zip FILE --apply --allow-downgrade`.
+
+If you also have a git clone, `--zip` leaves it as it is and warns that it now differs from the
+install. `kit-update` without `--zip` then reports the install as newer than, or different from, the
+clone and won't install the clone over it unless you pass `--reinstall`; if GitHub has moved on but is
+still behind the zip, `--apply` moves the clone and skips the installer.
 
 ## 12. Backup and restore
 

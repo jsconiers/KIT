@@ -8,6 +8,19 @@ versions follow [semantic versioning](https://semver.org).
 ## [Unreleased]
 
 ### Added
+- Settings view: the dashboard's Settings panel and `kit-settings show --all` (`--not-set`, `--area`, `--json`)
+  list every setting, from the run config, the setup fields in `memory/context/*.md` (the files Kit ships;
+  never `memory/personal/`), and the JSON configs, by area, with value, file and line, description, and
+  status (set, not set, default). Credentials show by name; credential-shaped values are masked. The panel
+  has an inline search box and filters, with no outside assets; an owner template without `$settings` still
+  gets it (shared/kit_settings.py, tests/test_settings.py).
+- `kit-settings ui`: a local page for changing settings, on 127.0.0.1 only, with a one-time link traded for a
+  cookie, Host, Origin or Referer, and CSRF checks, and a 15-minute idle stop or a Stop button. It edits only an
+  allowlist (run config preferences and setup-file fields), checks each value by type, previews a diff,
+  changes one line and keeps every other byte, backs the file up, commits it to Kit's private repo, logs the
+  change, and rebuilds the dashboard. Guard, model routing, sharing, permission, and credential settings stay
+  read-only, with how to change each. Claude Code asks before it starts (new ask rule)
+  (shared/kit_settings_ui.py).
 - `kit-review-loop`, the review loop for a draft IA or GDS that Kit had been running by hand. `plan` prints
   the steps, each agent's Claude Code command, and a cost estimate (read-only). `run` runs the reviewer,
   then the red team, threat modeler, and standards checker side by side, each as an unattended
@@ -31,6 +44,20 @@ versions follow [semantic versioning](https://semver.org).
   looked up by entry name and never read; TLS checking turned off (`NODE_TLS_REJECT_UNAUTHORIZED=0`, an
   `SSL_VERIFY` of false); `npx` with `@latest`, a tag, or no version; and a launcher script that's missing.
   Warnings only. Launchers that couldn't start had failed silently for days (tests/test_mcp_launch.py).
+
+- `kit-update --zip FILE`, for installs with no git clone. Read-only by default: it checks the zip as
+  untrusted input (refusing absolute paths, `..`, drive letters, backslashes, symlinks, devices and other
+  special or encrypted entries, more than one top-level folder, over 200 MB or 20,000 entries
+  uncompressed, and a missing VERSION, `kit/`, `shared/`, or installer), extracts it into a new temporary
+  folder, runs nothing from it, and reports its SHA-256 (`--sha256 HEX` checks a published value), its
+  version and commit (from the zip comment), the installed version, newer, same, or older, the CHANGELOG
+  entries in between, and the files added and changed against the installed copy. `--apply` (asks first
+  unless `--yes`) keeps the release in `.install/releases/<version>-<commit>/` (the last 3), runs its
+  installer with the owner's name kept, records the zip's name, SHA-256, and commit in `VERSION.json`,
+  and prints how to roll back. Older zips need `--allow-downgrade`, the same version `--reinstall`. A git
+  clone is left alone, with a warning; `kit-update` without `--zip` then leaves a newer zip install
+  alone unless `--reinstall` (tests/test_kit_update_zip.py, on Linux and Windows). `kit-version` shows
+  when the install came from a zip.
 
 ### Changed
 - The red team, threat modeler, and standards checker save a copy of each note, under the same file

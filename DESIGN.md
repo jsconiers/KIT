@@ -151,7 +151,31 @@ Code and must pass before an agent moves to another model.
 | Letter signing | `shared/bin/kit-letter`, ask rule | `kit-letter build` is allowed; `kit-letter sign` (which adds the saved signature) asks every time. The letters desk signs only a letter the owner asks it to sign, and never sends one. |
 | Library mirror and fetch | `shared/bin/kit-library`, ask rules | `mirror` and `fetch` ask first. Work and confidential material (collections or output kinds marked so, or tagged so) is never mirrored to the synced phone folder, and nothing is when the sharing policy blocks the mirror folder. Long digit runs are blanked from the stored text. |
 | Network lookups | `shared/bin/kit-expiry` | Looks certificates up over TLS and domains over RDAP only with `--live`; the health check and brief read the saved results. |
+| Release zips | `shared/bin/kit-update --zip` | A zip is checked before extraction (paths, links and special files, one top-level folder, size and entry caps, layout, optional `--sha256`), extracted into a new temporary folder, and never run or imported, apart from its installer on `--apply` after a yes. No network. Rollback copies live only in `.install/releases/`, and pruning deletes only folders there that carry Kit's note. |
+| Settings page | `shared/kit_settings.py`, `shared/kit_settings_ui.py`, `kit-settings ui`, ask rule | A local server started on demand that edits an allowlist of settings; threats and mitigations below. |
 | Plugin builds | `shared/bin/kit-plugin` | Builds in a temporary folder and swaps it in; refuses to replace a plugin folder holding files it didn't write unless `--force`; never pushes or publishes. |
+
+### The settings page's security model
+
+`kit-settings show --all` and the dashboard's Settings panel only read. `kit-settings ui` writes, so it is
+built as a small attack surface: Python's `http.server`, one request at a time, standard library only.
+
+| Threat | Mitigation |
+|---|---|
+| Another computer on the network reaches the page | Binds `127.0.0.1` only, on a port the system picks; nothing listens once it stops. |
+| Another local user or web page guesses its way in | A random token per run (`secrets.token_urlsafe(32)`) is in the opened link. The first load trades it for a session cookie (HttpOnly, SameSite=Strict, named for the port) and the link then stops working, so a copy in browser history or a terminal log is useless. Every request without the cookie (or an `X-Kit-Token` header) gets 403. Tokens are compared in constant time. |
+| DNS rebinding (an outside site resolving its name to 127.0.0.1) | The Host header must be `127.0.0.1:<port>` or `localhost:<port>`, checked before anything else, the token included. |
+| Cross-site request forgery from a page open in the same browser | Every POST needs an Origin (or, without one, a Referer) of the page itself, a CSRF token that is only in the page, and a JSON content type (which a plain cross-site form can't send). SameSite=Strict keeps the cookie off cross-site requests anyway. |
+| Clickjacking and injected script | Content-Security-Policy `default-src 'none'`, script and style only with a per-page nonce, `frame-ancestors 'none'`, `X-Frame-Options: DENY`; every value is HTML-escaped; `Cache-Control: no-store`. |
+| Changing a security setting through the page | Writes go only through `kit_settings.apply_edit`, which re-reads the settings and refuses any id that isn't on the allowlist: the connector guard, model routing, sharing policy and sharing fields, permission rules and `ALLOW_TOOLS`, commands Kit runs, backup location and encryption, phone approvals and publishing, connectors and agent reach, data rules, retention, and credentials stay read-only, each with how to change it (tests/test_settings.py posts to each and checks the files are unchanged). Adding to the allowlist is a code change. |
+| A value that runs code or breaks a parser | The run config is shell, so its values may not hold quotes, `$`, backticks, backslashes, or control characters; setup values can't hold line breaks, start a heading or list item, or contain `**`. Each field is checked by type (channel, on/off, number range, weekdays, DD-Mmm-YYYY date, backticked path the way `kit_compliance.setup_path` reads it). Work delivery and work to-dos can't be routed outside Microsoft 365 here. |
+| A credential written into a file or shown on screen | Values matching `kit_records.SECRET_PATTERNS` are refused on write and masked on display; keys named for a token, secret, or password are masked unless they hold a name (`_ENV`, `_KEYCHAIN`). The log masks the same way, and the server never logs request lines (the link holds the token). |
+| A bad or lost edit | Preview first; a stale page (the value changed since it loaded) is refused; one line changes and every other byte stays; the old file goes to `.install/backups/settings/`; the change is committed (only that file) to Kit's private repo where it's tracked, and the page says when it isn't or the commit fails. |
+| A page left open | It stops after 15 minutes with no request (`--idle`), on Stop, or on Ctrl-C. Claude Code asks before `kit-settings ui` starts (ask rule in `kit_setup.py`), so no agent or scheduled run opens it unasked. |
+
+Not covered: a process already running as the owner can read Kit's files directly, so the page doesn't
+try to defend against one; the cookie is visible to other servers on 127.0.0.1 the browser visits while
+the page runs, which is why it's per run and useless once the server stops.
 
 ## 6. Scheduled runs
 
@@ -417,7 +441,18 @@ or `kit-run`, never as Claude Code's own model. Precedence: organization ceiling
 - `VERSION` is the release; `CHANGELOG.md` records changes under **Unreleased** until a release.
 - The installer records version, commit, and install history in `.install/VERSION.json` and writes
   release notes when they change (`shared/kit_version.py`); the next brief shows them once.
-- `kit-update` previews and applies updates from GitHub, keeping a backup branch.
+- `kit-update` previews and applies updates from GitHub, keeping a backup branch. For installs with no
+  git clone, `kit-update --zip FILE` updates from a release zip (`git archive` output: one top-level
+  folder, the commit in the zip comment). The zip is untrusted input: entries are checked before
+  anything is extracted (no absolute paths, `..`, drive letters, backslashes, symlinks, special or
+  encrypted entries; one top-level folder; at most 200 MB and 20,000 entries; the expected layout), then
+  extracted into a new temporary folder with fresh files and no set-id bits, and nothing from it is run
+  or imported except, on `--apply` after confirmation, its own installer. `--apply` keeps the release
+  in `.install/releases/<version>-<commit>/` with a `.kit-release.json` note (only folders with that
+  note are pruned, to the last three) and records the zip's name, SHA-256, and commit in
+  `VERSION.json` under `source`; `kit_version.py` reads the note too, so rerunning a kept release's
+  installer (the rollback) records the right commit. The git path compares a zip install by version
+  when the clone doesn't know its commit, and doesn't install the clone over a newer one.
 - `.github/workflows/checks.yml` runs on every push and pull request: syntax for shell, Python, and
   PowerShell, job templates and JSON, a scan for personal details (patterns held in a repository
   secret), and named Python suites on Linux; the Windows installer for real (install, reinstall, repair)
@@ -486,6 +521,8 @@ or `kit-run`, never as Claude Code's own model. Precedence: organization ceiling
 
 ## 12. Known limits
 
+- `kit-update --zip` trusts a zip that passes its checks as far as running its installer; the SHA-256
+  check is only as good as where the published value comes from, and zips aren't signed.
 - Windows is narrower: the installer and the listed suites run in CI on Windows, but the Outlook COM
   adapters, the Task Scheduler tasks, `preflight.ps1`, and `uninstall.ps1` haven't run on a real Windows
   machine, and there's no text-back or Outlook check before runs.
