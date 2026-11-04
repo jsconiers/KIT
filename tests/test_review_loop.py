@@ -48,8 +48,9 @@ DRAFT.write_text("# Payments hub IA v0.2\n## 1 Scope\nOne database in one zone.\
 (PROJ / "drafts/Payments hub IA v0.1.md").write_text("# v0.1\n", encoding="utf-8")
 (PROJ / "feedback-v0.2.md").write_text("# Feedback for v0.2\n", encoding="utf-8")
 
+# PYTHONDONTWRITEBYTECODE: macOS's own Python 3.9 caches bytecode under ~/Library/Caches, which is in TMP here.
 ENV = dict(os.environ, KIT_DIR=str(KIT), HOME=str(HOME), USERPROFILE=str(HOME), KIT_TODAY="2026-11-03",
-           CLAUDE_CODE_OAUTH_TOKEN="placeholder-for-tests", FAKE_CALLS=str(CALLS))
+           CLAUDE_CODE_OAUTH_TOKEN="placeholder-for-tests", FAKE_CALLS=str(CALLS), PYTHONDONTWRITEBYTECODE="1")
 ENV.pop("COST_BUDGET_MONTHLY", None)
 
 
@@ -290,7 +291,8 @@ stdin = p + 1 >= len(argv) or argv[p + 1].startswith("--")      # no prompt afte
 brief = sys.stdin.read() if stdin else argv[p + 1]
 calls = pathlib.Path(os.environ["FAKE_CALLS"])
 (calls / ("%f-%s.json" % (time.time(), agent))).write_text(json.dumps({"agent": agent, "argv": argv,
-    "token_set": bool(os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")), "cwd": os.getcwd(), "stdin": stdin}))
+    "token_set": bool(os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")), "cwd": os.getcwd(), "stdin": stdin,
+    "brief": brief}))
 folder = pathlib.Path(re.search(r"whose library folder is (.+?)\.(?: The IA|\n)", brief).group(1))
 sub = {"reviewer": "reviews", "red-team": "red-team", "threat-modeler": "threat-model",
        "standards-checker": "standards"}[agent]
@@ -335,7 +337,7 @@ ok(any(x.startswith("Edit(") and x.endswith("payments-hub/**)") for x in allowed
    and all(not x.startswith(("Edit(", "Write(")) or x.endswith("payments-hub/**)") for x in allowed),
    "run: writes allowed only in the project folder", allowed)
 ok(pathlib.Path(first["cwd"]).resolve() == KIT.resolve(), "run: in Kit's folder", first["cwd"])
-ok("nobody can answer you" in argv[argv.index("-p") + 1], "run: the brief says it's unattended")
+ok("nobody can answer you" in first["brief"], "run: the brief says it's unattended")
 ok((PROJ / "reviews/payments-hub-threat-model-v2.md").is_file() and "copied to" in out
    and "payments-hub-threat-model-v2.md (the agent didn't)" in out,
    "run: a note an agent didn't copy into reviews/ is copied there", out)
