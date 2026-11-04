@@ -189,7 +189,7 @@ class Map:
 
 
 def read_register(root, project, m):
-    rel = re.search(r"`([^`]+)`", kd.setting(kd.read(kd.CONTEXT / "demands.md"), "Register") or "")
+    rel = re.match(r"`([^`]+)`", kd.setting(kd.read(kd.CONTEXT / "demands.md"), "Register") or "")
     path = pathlib.Path(os.path.expanduser(rel.group(1))) if rel else pathlib.Path("demands/REGISTER.md")
     path = path if path.is_absolute() else root / path
     text = kd.read(path)

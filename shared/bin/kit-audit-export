@@ -367,7 +367,7 @@ def collect(source, pack, dest, start, end, snapshot_ok):
         return src, len(keep), f"{len(keep)} exception(s) in force"
     if src == "adrs":
         val = kc.setting(kc.read(CTX / "decisions.md"), "Folder")
-        m = re.search(r"`([^`]+)`", val)
+        m = re.match(r"`([^`]+)`", val)
         ddir = pathlib.Path(os.path.expanduser(m.group(1) if m else "decisions/"))
         root = kc.library_root(KIT)
         if not ddir.is_absolute():
@@ -516,7 +516,8 @@ def main(argv):
         mp = pathlib.Path(os.path.expanduser(a.controls)) if a.controls else None
         if not mp:
             val = kc.setting(kc.read(CTX / "compliance.md"), "Control map")
-            m = re.search(r"`([^`]+)`", val)
+            # Only a value that starts with the path: the shipped line names `kit-audit-export --controls` first.
+            m = re.match(r"`([^`]+)`", val)
             if m:
                 mp = pathlib.Path(os.path.expanduser(m.group(1)))
                 if not mp.is_absolute() and kc.library_root(KIT):

@@ -63,10 +63,11 @@ def regimes(compliance_text):
 
 
 def path_value(value):
-    """A folder path from a setup value: backtick-quoted text if there is some, else the value."""
+    """A folder path from a setup value: the backtick-quoted text it starts with, else the value.
+    A backticked word later in the line (the shipped description's `~/` example) is not the path."""
     if unset(value):
         return ""
-    m = re.search(r"`([^`]+)`", value)
+    m = re.match(r"`([^`]+)`", value.strip())
     v = (m.group(1) if m else value).strip().rstrip(".").strip()
     return v if re.match(r"^(~[\\/]|/|[A-Za-z]:[\\/])", v) else ""
 

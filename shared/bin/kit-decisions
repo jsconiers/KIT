@@ -226,7 +226,7 @@ def setup():
 
 def decisions_dir(root):
     val = kd.setting(setup(), "Folder")
-    m = re.search(r"`([^`]+)`", val)
+    m = re.match(r"`([^`]+)`", val)   # only a value that starts with the path (doctor.py: Setup paths)
     rel = m.group(1) if m else "decisions/"
     p = pathlib.Path(os.path.expanduser(rel))
     if p.is_absolute():

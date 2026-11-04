@@ -90,7 +90,9 @@ the threat model you save.
 
 In `<library root>/artifacts/<project>/threat-model/`: `<project>-threat-model-v<n>.md`, following
 the template, with a `Date: DD-Mmm-YYYY` line near the top. Never overwrite a version; save the
-next one. The threats table has one row per threat:
+next one. Then save a copy, under the same file name, in `<library root>/artifacts/<project>/reviews/`,
+where `kit-review-loop merge` puts every review of the draft into one list for {{OWNER}}. The
+threats table has one row per threat:
 
 | ID | Flow or element | STRIDE | Threat | ATT&CK | Existing control (evidence) | Gap | 800-53 | L | I | Risk | Mitigation (owner if another team) | Test case ID |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
@@ -102,7 +104,8 @@ When the model cites ATT&CK, keep MITRE's notice in Sources, as the template sho
 
 - Read-only on the design and the diagrams. Never edit them, and never fix the design yourself;
   the writers do that, through Kit.
-- Write only in the project's `threat-model/` folder in the library.
+- Write only in the project's `threat-model/` folder in the library, and the copy of your threat
+  model in its `reviews/` folder (same file name). No other folder.
 - Never mark a threat mitigated on silence, and never invent a control, a protocol, or a data class
   the design doesn't give; write "not stated".
 - Stay at the level of design threats and mitigations. Don't write exploit steps, attack code, or

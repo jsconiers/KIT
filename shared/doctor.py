@@ -242,6 +242,60 @@ def check_textback():
     check(age < 900, "Texting Kit", "listening", f"no check for {int(age // 60)} min (see: kit-textback status)", "warn")
 
 
+# Path-type setup fields and what reads them. Every reader takes a value only when it starts with a
+# backticked path ("- **Field:** `path` ..."): a line that names the path later ("the register at
+# `x.md`") reads as not set, and a backticked placeholder (`<library root>/...`) is read as it stands.
+SETUP_PATH_FIELDS = (
+    ("library.md", "Library root", "every tool that uses the library"),
+    ("compliance.md", "Regulatory watch folder", "the monthly regulatory watch"),
+    ("compliance.md", "Exception register", "kit-exceptions"),
+    ("compliance.md", "Control map", "kit-audit-export --controls"),
+    ("compliance.md", "PBC tracker", "kit-pbc"),
+    ("decisions.md", "Folder", "kit-decisions and kit-audit-export"),
+    ("decisions.md", "Vendor evaluations", "kit-vendors"),
+    ("demands.md", "Register", "kit-stakeholders"),
+    ("future-tech.md", "Folder", "the radar tools"),
+    ("sharing.md", "Shared root", "kit-publish and kit-team"),
+    ("sharing.md", "Outbox", "kit-publish and kit-audit-export"),
+)
+# A value that starts like this is unset on purpose (the shipped "optional. ... Default: `...`" lines).
+SETUP_UNSET = re.compile(r"^[_*`]*(?:not set|optional|none)\b", re.I)
+
+
+def setup_path_problems(context=None):
+    """[(file, field, problem)] for path fields in the setup files that look set but won't be read the way
+    they're written: a value that doesn't start with a backticked path but has one later (read as not set),
+    or one that starts with a backticked <placeholder> (read literally). Values that start with "not set",
+    "optional", or "none" are unset on purpose and pass."""
+    context = pathlib.Path(context or MEM / "context")
+    out = []
+    for name, field, reader in SETUP_PATH_FIELDS:
+        text = _read(context / name)
+        m = re.search(r"^- \*\*" + re.escape(field) + r":\*\*[ \t]*(.*)$", text or "", re.M)
+        if not m:
+            continue
+        value = m.group(1).strip()
+        if not value or SETUP_UNSET.match(value):
+            continue
+        first = re.match(r"`([^`]*)`", value)
+        if first:
+            if re.match(r"\s*<[^>]+>", first.group(1)):
+                out.append((name, field, f"starts with the placeholder `{first.group(1)[:60]}`, which {reader} "
+                            "reads as it stands; write the real path (relative to the library root, or in full)"))
+        elif "`" in value:
+            out.append((name, field, f"doesn't start with a backticked path, so {reader} reads it as not set; "
+                        f"put the path first: - **{field}:** `path`"))
+    return out
+
+
+def check_setup_paths(context=None):
+    problems = setup_path_problems(context)
+    if problems:
+        add("warn", "Setup paths", "; ".join(f"{n} {f}: {p}" for n, f, p in problems))
+    else:
+        add("ok", "Setup paths", "every path field set in memory/context reads as written")
+
+
 def check_library():
     """When collections are set up (kit-library), the catalog should be fresh, its PDF reader built, and
     nothing stuck waiting to be delivered to the output folder."""
@@ -708,6 +762,146 @@ def check_grammar():
         if found else "LanguageTool or Java not installed; optional, reviews skip the grammar pass")
 
 
+# ---- MCP servers' launch setup (user scope, ~/.claude.json) ----------------------------------------------
+# A server whose launch is broken fails silently: Claude Code just shows it as failed, and nothing in the
+# brief says so. This looks at how each one starts, without starting it, reading any value, or printing
+# anything but the server's name: kit-mcp-env credentials missing from the environment and the credential
+# store (by name), TLS checking turned off, and npx packages that aren't pinned to a version.
+SCRIPT_SUFFIXES = (".sh", ".bash", ".zsh", ".command", ".ps1", ".cmd", ".bat")
+TLS_OFF = (re.compile(r"NODE_TLS_REJECT_UNAUTHORIZED[\"']?\s*[:=]\s*[\"']?0(?![0-9])"),
+           re.compile(r"\b(?:[A-Z][A-Z0-9_]*_)?SSL_VERIFY[\"']?\s*[:=]\s*[\"']?(?:false|0|no|off)\b", re.I))
+NPX_FLAGS = {"-y", "--yes", "-q", "--quiet", "--no-install", "--prefer-offline", "--prefer-online", "-s", "--silent"}
+
+
+def _script_text(path):
+    """A launcher script's commands: continuation lines joined (sh \\, PowerShell `, cmd ^), comments dropped."""
+    text = _read(path) or ""
+    text = re.sub(r"[\\`^][ \t]*\r?\n", " ", text)
+    keep = [ln for ln in text.splitlines()
+            if not re.match(r"\s*(?:#|::|rem\b|REM\b)", ln)]
+    return "\n".join(keep)
+
+
+def _words(line):
+    import shlex
+    try:
+        return shlex.split(line, posix=os.name != "nt")
+    except ValueError:
+        return line.split()
+
+
+def _base(word):
+    return re.split(r"[\\/]", word.strip("\"'"))[-1].lower()
+
+
+def _mcp_env_specs(words):
+    """[(NAME, ENTRY)] from a kit-mcp-env command line: the names between kit-mcp-env and "--"."""
+    out = []
+    for i, w in enumerate(words):
+        if _base(w) in ("kit-mcp-env", "kit-mcp-env.py", "kit-mcp-env.cmd"):
+            for spec in words[i + 1:]:
+                if spec == "--":
+                    break
+                if spec.startswith("-"):
+                    continue
+                name, _, entry = spec.partition("=")
+                if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+                    out.append((name, entry or name))
+    return out
+
+
+def _npx_problem(words):
+    """"@latest" or "no version" for an npx command whose package isn't pinned, else ""."""
+    for i, w in enumerate(words):
+        if _base(w) not in ("npx", "npx.cmd", "npx.exe"):
+            continue
+        pkgs, rest = [], iter(words[i + 1:])
+        for a in rest:
+            if a in ("-p", "--package"):
+                pkgs.append(next(rest, ""))
+            elif a.startswith("--package="):
+                pkgs.append(a.split("=", 1)[1])
+            elif a in NPX_FLAGS or (a.startswith("-") and not pkgs):
+                continue
+            else:
+                if not pkgs:
+                    pkgs.append(a)
+                break
+        for p in pkgs:
+            if not p or re.match(r"^(?:\.|/|~|[A-Za-z]:[\\/]|file:|git[+:]|https?:)", p):
+                continue
+            name, _, ver = (p[1:].partition("@") if p.startswith("@") else p.partition("@"))
+            if ver.lower() == "latest":
+                return "@latest"
+            if not re.match(r"v?\d", ver):
+                return "no version" if not ver else f"@{ver[:20]} (a tag, not a version)"
+    return ""
+
+
+def mcp_launch_problems(home=None, env=None):
+    """{"credentials": [server], "tls": [server], "unpinned": [(server, why)], "launcher": [server]} for the
+    user-scope MCP servers in HOME/.claude.json, and how many were checked; None when there's no config."""
+    home = pathlib.Path(home or HOME)
+    env = os.environ if env is None else env
+    try:
+        servers = json.loads((home / ".claude.json").read_text(encoding="utf-8-sig")).get("mcpServers") or {}
+    except (OSError, ValueError, AttributeError):
+        return None
+    ks = _secrets()
+    found = {"credentials": [], "tls": [], "unpinned": [], "launcher": [], "checked": 0}
+    for name, s in sorted(servers.items()):
+        if not isinstance(s, dict):
+            continue
+        found["checked"] += 1
+        words = [str(s.get("command") or "")] + [str(a) for a in s.get("args") or []]
+        senv = {str(k): str(v) for k, v in (s.get("env") or {}).items()}
+        lines = [words]
+        texts = [" ".join(f"{k}={v}" for k, v in senv.items() if "TLS" in k.upper() or "SSL" in k.upper()),
+                 " ".join(words)]
+        for w in words:
+            if w.lower().endswith(SCRIPT_SUFFIXES):
+                p = pathlib.Path(os.path.expanduser(w))
+                if not p.is_absolute():
+                    p = home / p
+                if not p.is_file():
+                    found["launcher"].append(name)
+                    continue
+                text = _script_text(p)
+                texts.append(text)
+                lines += [_words(ln) for ln in text.splitlines() if ln.strip()]
+        if any(r.search(t) for t in texts for r in TLS_OFF):
+            found["tls"].append(name)
+        specs = [sp for ws in lines for sp in _mcp_env_specs(ws)]
+        if specs and ks.STORE is not None:
+            if any(not (env.get(n) or senv.get(n)) and not ks.stored(e, env.get("PATH")) for n, e in specs):
+                found["credentials"].append(name)
+        why = next((p for p in (_npx_problem(ws) for ws in lines) if p), "")
+        if why:
+            found["unpinned"].append((name, why))
+    return found
+
+
+def check_mcp_launch(home=None, env=None):
+    found = mcp_launch_problems(home, env)
+    if not found or not found["checked"]:
+        return
+    store = _secrets().STORE or "credential store"
+    if found["launcher"]:
+        add("warn", "MCP launchers", "launcher script missing: " + ", ".join(found["launcher"]))
+    if found["credentials"]:
+        add("warn", "MCP credentials", ", ".join(found["credentials"]) + f": a credential kit-mcp-env starts it with "
+            f"is neither set nor in the {store}, so it won't start (kit-mcp-env --check NAME=ENTRY says which)")
+    if found["tls"]:
+        add("warn", "MCP TLS checking", "turned off for " + ", ".join(found["tls"]) + " (NODE_TLS_REJECT_UNAUTHORIZED=0 "
+            "or an SSL_VERIFY of false; use node --use-system-ca instead, INSTALL.md section 8)")
+    if found["unpinned"]:
+        add("warn", "MCP versions", "npx runs an unpinned package: " + ", ".join(f"{n} ({w})" for n, w in found["unpinned"])
+            + "; pin a version with no known advisories (package@1.2.3)")
+    if not any(found[k] for k in ("launcher", "credentials", "tls", "unpinned")):
+        add("ok", "MCP launch setup", f"{found['checked']} server(s): credentials present by name, TLS checked, "
+            "npx versions pinned")
+
+
 def check_servers():
     code, out = run([str(HOME / ".local/bin/claude"), "mcp", "list"], timeout=180)
     bad = [ln.split(":")[0] for ln in out.splitlines() if "✗" in ln or "Failed" in ln]
@@ -929,11 +1123,11 @@ def main(argv):
         r = readiness()
         print(json.dumps(r, indent=1) if "--json" in argv else render_readiness(r))
         return 0
-    for fn in (check_import, check_settings, check_index, check_jobs, check_runs, check_tokens, check_expiry, check_offsite, check_textback, check_library, check_feedback, check_mail_index,
+    for fn in (check_import, check_settings, check_index, check_setup_paths, check_jobs, check_runs, check_tokens, check_expiry, check_offsite, check_textback, check_library, check_feedback, check_mail_index,
                check_secrets, check_permissions, check_agents, check_connector_hooks, check_git, check_calendar, check_mail,
                check_guard, check_grammar, check_delivery, check_paused, check_outlook, check_holds,
                check_cost, check_version, check_models, check_direct_models, check_sharing_policy,
-               check_connectors_quick, check_phone, check_reliability, check_readiness):
+               check_connectors_quick, check_mcp_launch, check_phone, check_reliability, check_readiness):
         try:
             fn()
         except Exception as e:  # noqa: BLE001

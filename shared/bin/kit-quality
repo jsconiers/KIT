@@ -10,7 +10,8 @@
   kit-quality --today YYYY-MM-DD     pretend it's another day (for checks and tests)
 
 Input: the reviewer's review notes in the library, artifacts/<project>/reviews/*.md. Each note has
-a "Findings" table, the format reviewer.md sets out:
+a "Findings" table, the format reviewer.md sets out (the red team's, threat modeler's, and standards
+checker's copies there, named *-red-team-v*, *-threat-model-v*, *-standards-check-v*, are passed over):
 
   | ID | Severity | Category | Template | Section | Finding | Fix |
 
@@ -51,6 +52,8 @@ CATEGORIES = ("template", "style", "source", "risk", "precedent", "grammar", "ac
 SEVERITIES = ("critical", "major", "minor")
 BRIEFS = kr.KIT / "briefs"
 LESSONS = kr.KIT / "lessons"
+# The red team, threat modeler, and standards checker save a copy of each note in reviews/ too.
+COPIES = re.compile(r"-(?:red-team|threat-model|standards-check)-v\d+", re.I)
 
 
 def settings():
@@ -92,6 +95,8 @@ def read_findings(root):
     """Every finding row in every review note, with its project, review file, and date."""
     found, skipped = [], []
     for note in sorted((root / "artifacts").glob("*/reviews/*.md")):
+        if COPIES.search(note.name):          # a red-team, threat-model, or standards copy, not a review note
+            continue
         text = note.read_text(errors="ignore")
         rows = kr.rows_with(text, "severity", "category", "finding")
         if not rows:

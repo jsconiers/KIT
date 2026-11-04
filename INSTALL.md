@@ -115,7 +115,10 @@ Then say "Kit, introduce yourself."
 
 Each agent reads a setup file in `~/Claude/Agents/kit/memory/context/` before every job. Fields
 marked "not set" limit what the agent can do; the health check and the agents themselves say what's
-missing. Fill in what applies to you, in roughly this order:
+missing. A path field (a folder or file) is read only when its value starts with the backticked path,
+for example `- **Exception register:** \`compliance/waivers.md\`. Kept by ...`; a path named later in
+the line reads as not set, and the health check's "Setup paths" warning names the field and file.
+Fill in what applies to you, in roughly this order:
 
 | File | Used by | What to fill in |
 |---|---|---|
@@ -315,7 +318,10 @@ the library root first; a missing source only empties its section. No model call
 and Windows.
 
 The red team and threat modeler need no setup beyond `standards.md` and `compliance.md`; name a
-team copy of their templates under "Design review templates" in `standards.md`.
+team copy of their templates under "Design review templates" in `standards.md`. They and the standards
+checker save each note in their own project folder (`red-team/`, `threat-model/`, `standards/`) and a
+copy, same file name, in the project's `reviews/`, next to the reviewer's notes. Rerun
+`doctor.py --fix-agents` after updating so the installed agents have this.
 
 To start the lifecycle radar, save a configuration-management export (JSON or CSV with fields such
 as name, os, os_version, support_group, environment) and run
@@ -370,6 +376,7 @@ kit-settings email you@example.com            # where Outlook drafts are address
 | `PPMX_TASK_DUE_FIELD` | FinishDate | The task field a meeting action's due date goes in when a project has no tasks to copy it from |
 | `PREREAD_MODEL`, `PREREAD_TIMEOUT` | opus, 900 s | `kit-preread`'s model and time limit |
 | `REHEARSE_MODEL`, `REHEARSE_TIMEOUT` | opus, 900 s | `kit-rehearse`'s model and time limit |
+| `REVIEW_LOOP_MODEL`, `REVIEW_LOOP_TIMEOUT` | each agent's own, 1800 s | `kit-review-loop run`'s model (empty: the agent's) and time limit per agent run |
 | `TEAMMAP_COVERAGE` | empty | Another coverage file for `kit-teammap` (empty: `briefs/team/coverage.json`) |
 | `TEXTBACK` | off | macOS only: answer texts you send yourself that start with "Kit" |
 | `TEXTBACK_ASK` | on | Let texted questions go to Claude (read-only, Kit's folder only); "off" allows commands only |
@@ -416,6 +423,15 @@ kit-settings email you@example.com            # where Outlook drafts are address
 - **Design reviews:** `kit-preread FILE --meeting "TITLE"` before reviewing someone else's design;
   `kit-rehearse FILE --board "NAME"` before defending your own. Both are closed, paid Claude runs that
   Claude Code asks before; `--dry-run` shows what would be sent.
+- **The review loop on your own draft:** `kit-review-loop plan PROJECT DRAFT` (the steps, each agent's
+  command, the cost), `kit-review-loop run PROJECT DRAFT` (the reviewer, then the red team, threat
+  modeler, and standards checker side by side; it asks first, and Claude Code does too, `--yes` for no
+  prompt), `kit-review-loop merge PROJECT` (writes `review-decisions-<date>.md`: fill in Decision with
+  accept, change, or reject, and a note for each change), then `kit-review-loop feedback PROJECT`
+  (writes `feedback-v<next>.md` for the writer). After the writer's next version,
+  `kit-review-loop run PROJECT NEXT-DRAFT --only reviewer`. The runs read Kit's folder and the
+  library and write only in the project; they get no shell, web, or MCP servers, so the reviewer's
+  document QA scripts and `kit-exceptions` are skipped (the notes say so).
 - **Vendor evaluations:** `kit-vendors new SLUG --title T --vendors "A, B"`, `kit-vendors questions SLUG
   --csv FILE` (for you to send), `kit-vendors import SLUG VENDOR FILE`, `kit-vendors score ...`, and
   `kit-vendors show SLUG`. Nothing is sent to a vendor.
@@ -486,7 +502,17 @@ through mcp-atlassian on Server or Data Center, for example:
 
 When a token can't be found, the server doesn't start and `claude mcp list` shows it failed; Claude Code's
 MCP log has `kit-mcp-env`'s note naming the entry to store. `NAME=ENTRY` reads an entry with another name,
-but then `doctor.py` and `kit-connect` can't find it by the variable's name.
+but then `kit-connect` can't find it by the variable's name.
+
+The health check, and so the morning brief, looks at how each user-scope server in `~/.claude.json` starts,
+without starting it, and warns by server name only: **MCP credentials** (a `kit-mcp-env` credential, in the
+entry or in a launcher script it runs, that's neither set nor in the Keychain or Credential Manager, looked
+up by entry name, never read), **MCP TLS checking** (`NODE_TLS_REJECT_UNAUTHORIZED=0` or an `SSL_VERIFY` of
+false in the entry's `env`, its arguments, or its launcher), **MCP versions** (`npx` with `@latest`, a tag,
+or no version), and **MCP launchers** (a launcher script the entry names that isn't there). A launcher is
+any `.sh`, `.ps1`, `.cmd`, or `.bat` file in the entry's command line, such as
+`~/.mcp-servers/launchers/NAME.sh` running `kit-mcp-env NAME=ENTRY -- node --use-system-ca ...`. Files
+passed with `--env-file` aren't opened: they hold tokens.
 
 ### PPM Express (kit-ppmx)
 
@@ -716,6 +742,10 @@ run `platform\windows\uninstall.ps1` and `unregister-tasks.ps1`. To reinstall la
 | "waiting for another run to finish" in the log | The lock is working; a run that died leaves a lock that's cleared automatically |
 | Calendar and mail marked stale, AppleEvent error -1712 | Outlook didn't answer; restart Outlook. `kit-outlook` retries before each run. |
 | A tool "needed approval" in an unattended run | Add it to `ALLOW_TOOLS` or `ALLOW_TOOLS_WEEKLY` |
+| "Setup paths: FILE FIELD: doesn't start with a backticked path" | Put the path first on the field's line (`- **Field:** \`path\` ...`): the tools read only a value that starts with it, so the line reads as not set. "starts with the placeholder": replace `<library root>/...` with the real path, relative to the library root or in full |
+| "MCP credentials: SERVER: a credential kit-mcp-env starts it with is neither set nor in the Keychain" | The server won't start. `kit-mcp-env --check NAME=ENTRY` (the names in its launcher or entry) says which; store it with the command it prints |
+| "MCP TLS checking: turned off for SERVER" | Remove `NODE_TLS_REJECT_UNAUTHORIZED=0` or `..._SSL_VERIFY=false` from the entry or its launcher; for a company CA, run node with `--use-system-ca` or name the bundle (`NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`) |
+| "MCP versions: npx runs an unpinned package" | Pin the package to a reviewed version with no known advisories (`npx -y pkg@1.2.3`) in `~/.claude.json` |
 | "Connector credentials: missing by name" | The name in `credential_env` is neither a variable that's set nor a Keychain (Credential Manager) entry: set the variable or store the entry under that name; `kit-connect test` confirms |
 | "Direct model calls: no credential found" | Only matters with `enabled_phase` 2: set the provider's credential variable |
 | "Kit version: the repo clone is at ..." | Rerun the installer, or `kit-update --apply` |

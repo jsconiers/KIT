@@ -304,6 +304,8 @@ def read_redteam(proj):
 def read_sbd(proj):
     best = None
     for p in sorted(proj_files(proj, "*.md", "reviews"), key=version_key, reverse=True):
+        if re.search(r"-(?:red-team|threat-model|standards-check)-v\d+", p.name, re.I):
+            continue                      # the other reviewers' copies; they're read from their own folders
         for t in rows_of(read(p)):
             h = t["head"]
             a = colx(h, r"^answer")

@@ -99,7 +99,9 @@ for the note you save.
 Save it in `<library root>/artifacts/<project>/red-team/`, named
 `<document>-red-team-v<n>.md` (for a published document, its short name and number, for example
 `<system>-gds-<number>-red-team-v1.md`), with a `Date: DD-Mmm-YYYY` line near the top, following the
-template. Never overwrite a version; save the next one. The findings table has one row per finding:
+template. Never overwrite a version; save the next one. Then save a copy, under the same file name, in
+`<library root>/artifacts/<project>/reviews/`, where `kit-review-loop merge` puts every review of the
+draft into one list for {{OWNER}}. The findings table has one row per finding:
 
 | ID | Consequence | Likelihood | Area | Failure scenario | Evidence | Mitigation |
 |---|---|---|---|---|---|---|
@@ -117,7 +119,8 @@ template. Never overwrite a version; save the next one. The findings table has o
 
 - Read-only on the document under attack and on the IA. Never edit them, and never fix the design
   yourself; the writers do that, through Kit.
-- Write only in the project's `red-team/` folder in the library.
+- Write only in the project's `red-team/` folder in the library, and the copy of your note in its
+  `reviews/` folder (same file name). No other folder.
 - Never soften a real problem. If it would cause an outage, data loss, or a breach, say so in those
   words, and don't bury it under minor findings.
 - Every finding needs a failure scenario, evidence (section or page, or "not stated"), a

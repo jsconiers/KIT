@@ -34,12 +34,18 @@ note gamma ds-3-review-2026-10-05.md 05-Oct-2026 \
   "| F-01 | major | template | gds | §4.2 | Key management missing. | Name the encryption standard and where it applies. |" \
   "| F-02 | minor | style | GDS | 2 Scope | Passive voice again. | Use active voice. |"
 echo "# Old review with no table" > "$L/artifacts/gamma/reviews/old-notes.md"
+# The red team's, threat modeler's, and standards checker's copies in reviews/ aren't review notes.
+for n in ds-3-red-team-v1 ds-3-threat-model-v2 ds-3-standards-check-v1; do
+  printf '# Copy\n\n| ID | Severity | Category | Finding |\n|---|---|---|---|\n| X-01 | major | risk | Not a reviewer finding. |\n' \
+    > "$L/artifacts/gamma/reviews/$n.md"
+done
 
 out=$(python3 "$TOOL" --today 2026-10-19 --json)
 echo "$out" > "$T/q.json"
 c() { python3 -c "import json;d=json.load(open('$T/q.json'));print($1)"; }
 [ "$(c "d['findings']")" = "6" ] && ok "reads 6 findings from 3 notes" || bad "finding count $(c "d['findings']")"
 [ "$(c "len(d['skipped_notes'])")" = "1" ] && ok "a note with no Findings table is skipped and counted" || bad "skipped"
+[ "$(c "d['findings']")" = "6" ] && ok "the security agents' copies in reviews/ are passed over, not read or counted" || bad "copies read"
 [ "$(c "len(d['recurring'])")" = "1" ] && ok "one recurring finding (3 in 90 days across reviews)" || bad "recurring $(c "d['recurring']")"
 [ "$(c "d['recurring'][0]['key']")" = "template|gds|4.2" ] && ok "section numbers group '4.2 Security', '4.2 Security controls', '§4.2'" || bad "key $(c "d['recurring'][0]['key']")"
 [ "$(c "d['trend']['by_category']['template']")" = "3" ] && ok "trend by category" || bad "trend"

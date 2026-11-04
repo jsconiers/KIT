@@ -22,7 +22,9 @@
       "Never soften a real problem",
       "by consequence, not by how easy",
       "can't tell",
-      "Read-only"
+      "Read-only",
+      "Write only in the project's `red-team/` folder in the library, and the copy",
+      "`reviews/` folder \\(same file name\\)\\. No other folder"
     ],
     "forbids": [
       "edit the (document|draft) (directly|yourself)",

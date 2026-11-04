@@ -5,6 +5,51 @@ What changed in each Kit release. The installed version is in
 morning brief summarizes the new entries once. Format: [Keep a Changelog](https://keepachangelog.com),
 versions follow [semantic versioning](https://semver.org).
 
+## [Unreleased]
+
+### Added
+- `kit-review-loop`, the review loop for a draft IA or GDS that Kit had been running by hand. `plan` prints
+  the steps, each agent's Claude Code command, and a cost estimate (read-only). `run` runs the reviewer,
+  then the red team, threat modeler, and standards checker side by side, each as an unattended
+  `claude -p --agent` run through `kit_claude` (budget check, cost record, no MCP servers, no shell or
+  web, writes only in the project folder); it asks first unless `--yes`, Claude Code asks before it too,
+  and it reports each run's cost and note. `merge` writes `review-decisions-<date>.md`: every open
+  finding from the latest notes in `reviews/` (F-, RT-, T- with a gap, and the standards gaps) in one
+  table ranked must fix, should fix, nit, with source ID, location, finding, suggested fix, and empty
+  Decision and Notes columns. `feedback` turns the decisions into `feedback-v<next>.md` for the writer:
+  accepted and changed items only, by ID (tests/test_review_loop.py, with synthetic notes and a fake
+  claude).
+- Health check "Setup paths" (warning): path fields in `memory/context/*.md` that look set but won't be
+  read as written, by field and file: a value that doesn't start with a backticked path but has one
+  later (the tools read it as not set), or one that starts with a backticked `<library root>/...`
+  placeholder (read as it stands). Values starting with "not set", "optional", or "none" pass
+  (tests/test_setup_paths.py).
+- Health check (and so the morning brief) on how each user-scope MCP server in `~/.claude.json` starts,
+  without starting it, by server name only: a `kit-mcp-env` credential (in the entry or a launcher script
+  such as `~/.mcp-servers/launchers/NAME.sh`) that's neither set nor in the Keychain or Credential Manager,
+  looked up by entry name and never read; TLS checking turned off (`NODE_TLS_REJECT_UNAUTHORIZED=0`, an
+  `SSL_VERIFY` of false); `npx` with `@latest`, a tag, or no version; and a launcher script that's missing.
+  Warnings only. Launchers that couldn't start had failed silently for days (tests/test_mcp_launch.py).
+
+### Changed
+- The red team, threat modeler, and standards checker save a copy of each note, under the same file
+  name, in the project's `reviews/` folder as well as their own (`red-team/`, `threat-model/`,
+  `standards/`), so every review of a draft is in one place and none has to be copied by hand. No
+  other folder; nothing else enforces their paths (they have no hooks). `kit-quality` passes over the
+  copies (they aren't reviewer notes) and `kit-coverage` keeps reading them from their own folders,
+  so nothing counts twice. Run `doctor.py --fix-agents` after updating.
+
+### Fixed
+- `kit-decisions` (Folder), `kit-stakeholders` (demands Register), and `kit-audit-export` (decisions
+  Folder, Control map) still took the first backticked word anywhere on the line; they now follow
+  the same rule as the others: only a value that starts with the backticked path counts.
+- `kit-exceptions` and `kit-pbc` (and `kit-vendors`) took the first backticked word on a setup line as
+  the file's path, so the shipped description ("... register `kit-exceptions` reads ...") made them
+  write a file called `kit-exceptions` or `kit-pbc` in the library root, not the default under
+  `compliance/`. A setup value now counts only when it starts with the backticked path; the
+  regulatory watch folder follows the same rule. Move a stray `kit-exceptions` file in the library
+  root to `compliance/exception-register.md` (tests/test_exceptions.sh).
+
 ## [1.6.3] - 2026-11-03
 
 ### Added

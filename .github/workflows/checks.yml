@@ -50,6 +50,12 @@ jobs:
         run: python3 tests/test_credentials.py
       - name: kit-mcp-env tests (MCP servers' tokens from the credential store)
         run: python3 tests/test_mcp_env.py
+      - name: Health check tests (setup paths, MCP launch setup)
+        run: |
+          python3 tests/test_setup_paths.py
+          python3 tests/test_mcp_launch.py
+      - name: kit-review-loop tests (merge and feedback offline, run with a fake claude)
+        run: python3 tests/test_review_loop.py
       - name: kit-update tests (reinstall when the install lags; landed patches with rebuilt documents)
         run: python3 tests/test_kit_update.py
       - name: End-of-day wrap and review rehearsal tests
@@ -99,6 +105,12 @@ jobs:
         run: python tests/test_credentials.py
       - name: kit-mcp-env tests on Windows (Credential Manager, for real)
         run: python tests/test_mcp_env.py
+      - name: Setup paths health check tests on Windows
+        run: python tests/test_setup_paths.py
+      - name: MCP launch health check tests on Windows
+        run: python tests/test_mcp_launch.py
+      - name: kit-review-loop tests on Windows
+        run: python tests/test_review_loop.py
       - name: kit-update tests on Windows (install.ps1 stand-in)
         run: python tests/test_kit_update.py
       # One test per step: PowerShell fails a step only on its last command's exit code.

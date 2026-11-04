@@ -23,7 +23,9 @@
       "Elevation of privilege",
       "trust boundar",
       "Never mark a threat mitigated on silence",
-      "Read-only"
+      "Read-only",
+      "Write only in the project's `threat-model/` folder in the library, and the copy",
+      "`reviews/` folder \\(same file name\\)\\. No other folder"
     ],
     "forbids": [
       "edit the design (directly|yourself)",

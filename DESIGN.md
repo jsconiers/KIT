@@ -292,9 +292,16 @@ with no change step, plus orphan tests; missing documents show as "not checked".
 **Design review pipeline.** A GDS draft goes to the red team first (it assumes the design is wrong
 and ranks failure scenarios by consequence), then the threat modeler (STRIDE per data flow), then
 the reviewer and standards checker. Both new agents run on a tools allowlist (no connector, web, or
-agent tools) and write only to their own project folders (`red-team/`, `threat-model/`), outside
-`reviews/`, so kit-quality reads only the reviewer's notes. Threat-model controls go to the risk and
-compliance mapper and test cases to the implementation planner, through Kit.
+agent tools) and write only to their own project folders (`red-team/`, `threat-model/`, and the
+standards checker's `standards/`) plus a copy of each note, same file name, in the project's `reviews/`,
+so every review of a draft is in one place. Nothing enforces the paths beyond the agents' rules: they
+have no hooks, and Claude Code's permission rules aren't scoped per agent. kit-quality reads only the
+reviewer's Findings tables and passes over the copies (`-red-team-v`, `-threat-model-v`,
+`-standards-check-v` in the name), and kit-coverage reads them from their own folders, so nothing
+counts twice. Threat-model controls go to the risk and
+compliance mapper and test cases to the implementation planner, through Kit. `kit-review-loop`
+runs the reviewer and then the three security agents on a draft, merges their findings into one
+ranked list for the owner's decisions, and turns the decisions into the writer's feedback file.
 
 **Connector health.** The morning run calls `connector_health.py`, which runs `kit-connect test
 --json` (no `--read`, so no model cost) in the shell before the model and adds one PASS/FAIL line per
@@ -369,6 +376,7 @@ settings are incomplete, or when time is short.
 |---|---|
 | PPM Express (`kit-ppmx`, `shared/ppmx/`) | One standard-library MCP server package run two ways: stdio for Claude Code and Claude Desktop with the owner's own token, and Streamable HTTP for a team on OpenShift, each caller sending their own token. Reads and writes (no delete); see the guardrail above. `pulse` keeps a weekly snapshot and diffs it; `actions` turns minuted actions into proposals made one at a time. |
 | End-of-day wrap (`kit-wrap`) | Built from Kit's files with no model call, so it costs nothing and still runs at the budget's stop level; hooks in `.install/wrap.d/` add sections. |
+| Review loop (`kit-review-loop`) | The IA and GDS review loop as one tool. `run` starts each agent as an unattended Claude Code run (`claude -p BRIEF --agent NAME` through `kit_claude.ask_claude`, as `kit-connect test --read` runs the gateway): Kit's login, the budget check before and a cost record after (mode `review-loop`), no MCP servers, Bash and web denied, reads allowed in Kit's folder and the library, writes only in the project folder. The reviewer runs first, then the three security agents in parallel threads; a note an agent saved in its own folder but not in `reviews/` is copied there. `merge` (no model call) takes the latest note of each kind in `reviews/`, found by its table (Findings; Consequence and Failure scenario; STRIDE and Threat; Result and Standard), and ranks every open finding: critical, high, and standards gaps are must fix; major, medium, partial, and not stated should fix; minor and low nits; fixed rows, threats with no gap, and conforming or not-applicable results are left out. It never overwrites a decisions file that has a decision. `feedback` keeps accepted and changed rows only, stops on a blank decision or a change with no note unless `--partial`, and numbers the file after the highest version among the feedback files and drafts. Plan estimates cost from the ledger's review-loop average, else an assumed $2 a run. |
 | Pre-read and rehearsal (`kit-preread`, `kit-rehearse`) | Closed Claude runs through `kit_claude.py`: the document's text, the red team's playbook, and the team's standards in the prompt; output to `briefs/preread/` and `briefs/rehearse/`; never texted. |
 | Library (`kit-library`) | Collections cataloged into an owner-only SQLite full-text index (`.install/library/index.db`, rebuilt from the folders, never committed or backed up); Office, PDF (through `kit-pdftext`, with on-device OCR for scans), web, EPUB, and Scrivener text; an output folder fed by `deliver`. On macOS, KitLibrary.app holds the folder permission and runs only index, flush, mirror, fetch, and check. Markdown is delivered as Word through textutil (macOS), python-docx, or Word over COM (Windows), else kept as Markdown with the reason. |
 | Letters (`kit-letter`, letters desk) | A Word letter from plain text with the standard library; signing is its own command so it can ask every time. |
@@ -398,7 +406,7 @@ or `kit-run`, never as Claude Code's own model. Precedence: organization ceiling
 | Test suites | `tests/test_*.sh` (one per tool or module), run before every release |
 | Agent evals | `tests/evals/`, `kit-evals` |
 | Quality loop | Reviewer findings tables, `kit-quality` proposals for lessons and template changes |
-| Health | `shared/doctor.py`: install, settings, schedules, runs, agents, models, connectors, policy, cost, version |
+| Health | `shared/doctor.py`: install, settings, schedules, runs, agents, models, connectors, policy, cost, version, MCP launch setup (for each user-scope server in `~/.claude.json`, without starting it, by server name only: `kit-mcp-env` credentials missing by entry name, in the entry or the launcher script it runs; TLS checking turned off; `npx` unpinned or `@latest`; a missing launcher script; `--env-file` files are never opened), and setup paths (path fields in `memory/context/*.md`, listed in `SETUP_PATH_FIELDS`, that look set but won't read as written: a value that doesn't start with a backticked path but has one later, or a backticked `<placeholder>`; "not set", "optional", and "none" are unset on purpose). Every reader of a path field takes only a value that starts with the backticked path. |
 | Cost | `kit-cost` ledger per run and per model; budget guard |
 | Metrics | `kit-metrics` page: spend, runs, queue trend, work lists, sprints, health, reliability |
 | Run reliability | `kit-reliability` reads the run logs, `backup.log`, `sync.log`, and the cost ledger: success, degraded, and failure counts, time-outs, retries, and skips per run type over 7, 30, and 90 days against the window before; alerts on 2+ failures in 7 days, a 30-day success rate under `RELIABILITY_MIN_PCT`, median duration up more than 50%, no recent success of a morning, weekly, or backup run, or 8+ sync failures in 7 days; writes `briefs/reliability.json` for the dashboard panel, the metrics page, and the health check |

@@ -101,5 +101,19 @@ r=$(python3 "$HERE/shared/morning/monitor_exceptions.py" --kit "$S/nowhere"); [ 
 before=$(shasum "$REG"); python3 "$HERE/shared/morning/monitor_exceptions.py" --kit "$K" >/dev/null
 [ "$before" = "$(shasum "$REG")" ] && ok "monitor never edits the register" || bad "monitor wrote"
 
+
+# Regression (03-Nov-2026): the shipped compliance.md lines describe each field, and their first
+# backticked word is a command or an example, not a path. Those lines must leave the defaults in place.
+SHIP="$(cd "$HERE" && sed -n '/^- \*\*Exception register:\*\*/,/^- \*\*[A-Z]/p;/^- \*\*PBC tracker:\*\*/p;/^- \*\*Regulatory watch folder:\*\*/,/^- \*\*[A-Z]/p' kit/memory/context/compliance.md)"
+printf '# Compliance setup\n\n%s\n' "$SHIP" > "$C/compliance.md"
+r=$(cd "$HERE/shared" && python3 -c "import kit_compliance as kc; print(kc.exception_register(None)); print(kc.setup_path(None, 'PBC tracker', 'compliance/audit-requests/pbc-tracker.md'))")
+echo "$r" | sed -n 1p | grep -qx "$L/compliance/exception-register.md" && ok "shipped Exception register line keeps the default" || bad "exception register path: $r"
+echo "$r" | sed -n 2p | grep -qx "$L/compliance/audit-requests/pbc-tracker.md" && ok "shipped PBC tracker line keeps the default" || bad "pbc path: $r"
+r=$(cd "$HERE/shared/morning" && python3 -c "import reg_watch as w; print(repr(w.path_value(w.field(open('$C/compliance.md').read(), 'Regulatory watch folder'))))")
+[ "$r" = "''" ] && ok "shipped Regulatory watch folder line is not a path" || bad "reg watch folder: $r"
+printf -- '- **Exception register:** `custom/reg.md`\n' > "$C/compliance.md"
+r=$(cd "$HERE/shared" && python3 -c "import kit_compliance as kc; print(kc.exception_register(None))")
+[ "$r" = "$L/custom/reg.md" ] && ok "a set Exception register is still used" || bad "set path: $r"
+
 echo "exceptions tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

@@ -30,7 +30,8 @@ affiliated with them.)
 - **Helps with architecture work.** Matches a new demand to published reference architectures,
   profiles a system from the library's records, sizes a workload, and compares diagram versions.
   Before peer review, the red team attacks a design and the threat modeler runs STRIDE per data flow;
-  `kit-trace` traces each requirement to the design, tests, and change.
+  they and the standards checker save a copy of each note in the project's `reviews/`, beside the
+  reviewer's; `kit-trace` traces each requirement to the design, tests, and change.
 - **Maps designs to frameworks.** A framework profile says which frameworks apply (NIST CSF 2.0,
   PCI DSS, CIS, CISA Zero Trust and Secure by Design, SOX ITGC); the compliance mapper maps only
   those, with a CSF 2.0 coverage check (`kit-csf`), a Zero Trust maturity rating, Secure by Design
@@ -98,7 +99,11 @@ budget's stop level is reached, or the morning run fails or times out, the brief
 the config). A run that fails in a way that looks transient (overload, rate limit, network, an API 5xx
 or 529) is retried once after two minutes (`RETRY_ON`, `RETRY_DELAY`); time-outs and refusals are never
 retried. `kit-reliability` tracks every run's outcome, and the health check and the dashboard's
-Reliability panel flag a run type that keeps failing, slows down, or hasn't succeeded lately.
+Reliability panel flag a run type that keeps failing, slows down, or hasn't succeeded lately. The
+health check (`doctor.py`, whose problems go in the brief) also warns about a setup path field that
+looks set but reads as not set because the path isn't first on its line, and about an MCP server that
+won't start or isn't safe as configured: a `kit-mcp-env` token missing from the Keychain, TLS checking
+turned off, or `npx` running `@latest` or an unpinned package (by server name only).
 
 ## Command-line tools
 
@@ -140,6 +145,7 @@ The installer links these into `~/.local/bin` (all in `shared/bin/`):
 | `kit-diaglint` | Checks draw.io and Visio diagrams against your team's diagramming standard (a JSON rules file): palette, fonts, title block, legend, line types, connectors, shapes, view labels |
 | `kit-onepager` | One-page executive summary of an IA or GDS (Markdown, .docx, or PDF), every line cited, "not stated" where the document is silent; Markdown, JSON, or Word |
 | `kit-preread` | Before a design review: Kit's red team reads the document (Word, PowerPoint, Excel, PDF) in a closed run and gives the findings that matter most, what it doesn't say, and five questions to ask, each tied to a finding; Claude Code asks before it runs; never texted |
+| `kit-review-loop` | The review loop for a draft IA or GDS: `plan` shows the steps, agent commands, and cost; `run` runs the reviewer, then the red team, threat modeler, and standards checker side by side, unattended, and reports the cost (Claude Code asks first); `merge` puts every finding in one table ranked must fix, should fix, nit, for your accept, change, or reject; `feedback` turns your decisions into the writer's `feedback-v<next>.md` |
 | `kit-rehearse` | Before your own design goes to a review board: the ten hardest questions the board will ask, where the document answers each (or that it doesn't) with the points of a strong answer, a two-minute talk track, and the gaps to close; a closed run like kit-preread; Claude Code asks before it runs; never texted |
 | `kit-decisions` | Drafts proposed ADRs from architectural decisions in meeting minutes, with the classifying rule shown; never accepts anything |
 | `kit-viewpoints` | DoDAF-style viewpoint drafts (OV-1, SV-1, SV-4, DIV-2) from a GDS, every element cited, with a draw.io file per view in the team style |

@@ -181,6 +181,19 @@ cat > "$L/waivers/waiver-register.md" <<'EOF'
 | WR-3 | ledger | DR standard v2 | Closed | 01-Feb-2026 |
 EOF
 
+# The standards checker's copy in reviews/ (its playbook saves one there) is never read as the reviewer's
+# Secure by Design answers, even when it has a table like it and a higher version.
+cat > "$A/payments-hub/reviews/payments-hub-standards-check-v9.md" <<'EOF'
+# Standards check copy
+
+## Secure by Design
+
+| # | Question (short) | Answer | Evidence |
+|---|---|---|---|
+| 1 | Secure by default | yes | 4.1 |
+| 4 | Removes classes of flaw | yes | 4.1 |
+EOF
+
 snap() { find "$L" -type f -exec shasum {} \; | sort; }
 before="$(snap)"
 

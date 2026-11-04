@@ -76,6 +76,8 @@ ALLOW = [f"Read({K}/**)", f"Edit({K}/memory/**)", f"Edit({K}/QUEUE.md)", f"Edit(
          # The team coverage map and the monthly architecture digest: they read Kit's registers (and PPM Express,
          # read only) and write only Kit's own files (the coverage file, briefs/teammap-*, briefs/digest-*).
          "Bash(kit-teammap)", "Bash(kit-teammap *)", "Bash(kit-digest)", "Bash(kit-digest *)",
+         # The review loop's plan only reads (it prints the steps, the agent commands, and the cost).
+         "Bash(kit-review-loop plan *)",
          # The vendor evaluation desk's reading commands. The rest change an evaluation in the library or write a
          # file you name, so they ask.
          "Bash(kit-vendors)", "Bash(kit-vendors list)", "Bash(kit-vendors list *)", "Bash(kit-vendors due)",
@@ -105,6 +107,9 @@ ASK = [
     "Bash(kit-library mirror)", "Bash(kit-library mirror *)", "Bash(kit-library fetch *)",
     # A pre-read or a rehearsal runs Claude on a document (a paid run), so it asks first.
     "Bash(kit-preread *)", "Bash(kit-rehearse *)",
+    # The review loop's run starts four paid agent runs on a draft, so it asks first (plan, merge, and feedback
+    # make no model call).
+    "Bash(kit-review-loop run *)",
     # A PPM Express call from the command line can change PPM Express (a create_ or update_ tool), so it
     # asks first, and so does adding the server to Claude Desktop's config.
     "Bash(kit-ppmx call *)", "Bash(kit-ppmx desktop)", "Bash(kit-ppmx desktop *)",

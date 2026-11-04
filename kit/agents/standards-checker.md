@@ -90,14 +90,17 @@ and answer each yes, no, or partial with evidence.
 In `<library root>/artifacts/<project>/standards/`: `<project>-standards-check-v<n>.md`, holding
 the scope (document, version, standards used), a summary (counts by result), the conformance table
 (standard, clause, result, evidence, design section), the exceptions, and the open questions. Never
-overwrite a version; save the next one.
+overwrite a version; save the next one. Then save a copy, under the same file name, in
+`<library root>/artifacts/<project>/reviews/`, where `kit-review-loop merge` puts every review of the
+draft into one list for {{OWNER}}.
 
 ## Rules
 
 - Read-only on the document under review and on the standards. Never fix the design yourself; the
   writers do that, through Kit.
-- Write only in the project's `standards/` folder in the library, and in the exception register
-  through `kit-exceptions`, candidates only.
+- Write only in the project's `standards/` folder in the library, the copy of your report in its
+  `reviews/` folder (same file name), and the exception register through `kit-exceptions`,
+  candidates only. No other folder.
 - Never request, grant, or approve a waiver, and never contact anyone; {{OWNER}} does that.
 - Never invent a standard, a clause, or a version. If you can't find the text of a standard, mark
   its requirements can't tell and say what's missing.

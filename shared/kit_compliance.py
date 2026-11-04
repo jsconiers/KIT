@@ -87,7 +87,10 @@ def setup_path(kit, field, default_rel, setup="compliance.md"):
     """A path from a setup field ('- **Field:** `path`'): absolute or ~ as is, otherwise relative to the
     library root. With the field not set, default_rel in the library root. None without a root."""
     val = setting(read(kit_dir(kit) / "memory/context" / setup), field)
-    m = re.search(r"`([^`]+)`", val)
+    # Only a value that starts with a backticked path is set. The shipped lines describe the field
+    # ("optional. The register `kit-exceptions` reads ... Default: `...`"), and the first backticked
+    # word there is a command or an example, not the path.
+    m = re.match(r"`([^`]+)`", val)
     rel = m.group(1) if m else default_rel
     p = pathlib.Path(os.path.expanduser(rel))
     if p.is_absolute():

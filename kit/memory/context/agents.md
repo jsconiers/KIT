@@ -110,7 +110,10 @@ computer.
 - **Routine:** send each IA and GDS draft to the reviewer before {{OWNER}} shares it, then send the
   findings to the writer that owns the draft. Run `kit-quality` after reviews (the weekly review
   does it too); bring pending lessons and template changes to {{OWNER}} for approval, then write
-  approved lessons to lessons/ and the review-lessons file.
+  approved lessons to lessons/ and the review-lessons file. For the full loop on an IA or GDS draft
+  (reviewer, then red team, threat modeler, and standards checker, one ranked list for {{OWNER}}'s
+  accept, change, or reject, and the writer's feedback file), use `kit-review-loop plan`, `run`,
+  `merge`, and `feedback` (`run` is paid: say the cost and get {{OWNER}}'s yes).
 - **Setup:** `memory/context/writing.md`.
 
 ## diagrammer
@@ -223,8 +226,9 @@ computer.
 
 - **Does:** checks a design (usually a GDS, sometimes an IA) against the team's engineering
   standards, reference architectures, and security baselines. Writes a conformance report (conforms,
-  gap, not applicable, or can't tell, with evidence and section) and lists the exceptions that would
-  need a waiver. Read-only on the document. Flags results against a standard that may be out of date
+  gap, not applicable, or can't tell, with evidence and section) in the project's `standards/`
+  folder, with a copy in `reviews/`, and lists the exceptions that would need a waiver. Read-only on
+  the document. Flags results against a standard that may be out of date
   because the radar moved a technology to adopt or hold after the standard's date.
 - **Reach it:** the document and version, its project, and the kind of change.
 - **Routine:** run it on each GDS draft alongside the reviewer, before {{OWNER}} shares it.
@@ -237,7 +241,7 @@ computer.
   concentration, operational failure modes, design-level abuse paths, and assumptions that would
   break it. Ranks findings by consequence, each with a failure scenario, evidence, likelihood, and a
   mitigation; says "can't tell" when the design is silent. Read-only on the document; saves a note
-  in the project's `red-team/` folder. No connector, web, or agent tools.
+  in the project's `red-team/` folder, with a copy in `reviews/`. No connector, web, or agent tools.
 - **Reach it:** the draft and version, the IA it's based on, its project, and any diagram specs or
   dependency map.
 - **Routine:** run it on each GDS draft (and an IA with a design) before the reviewer's pass and
@@ -254,7 +258,7 @@ computer.
   GDS or IA and diagram specs; threats per flow and element by category; existing controls cited
   from the design; gaps; a risk rating (the `compliance.md` scale if set, else likelihood x impact
   with the rule shown); mitigations and test cases. Read-only on the design; saves in the project's
-  `threat-model/` folder. No connector, web, or agent tools.
+  `threat-model/` folder, with a copy in `reviews/`. No connector, web, or agent tools.
 - **Reach it:** the design and version, its project, the diagram specs, and any abuse paths the red
   team handed on.
 - **Routine:** run it on each GDS with a security-relevant change, after the red team. Send its
