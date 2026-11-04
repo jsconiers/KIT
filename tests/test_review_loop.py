@@ -285,10 +285,12 @@ FAKE.write_text(r'''
 import json, os, pathlib, re, sys, time
 argv = sys.argv[1:]
 agent = argv[argv.index("--agent") + 1]
-brief = argv[argv.index("-p") + 1]
+p = argv.index("-p")
+stdin = p + 1 >= len(argv) or argv[p + 1].startswith("--")      # no prompt after -p: it's on standard input
+brief = sys.stdin.read() if stdin else argv[p + 1]
 calls = pathlib.Path(os.environ["FAKE_CALLS"])
 (calls / ("%f-%s.json" % (time.time(), agent))).write_text(json.dumps({"agent": agent, "argv": argv,
-    "token_set": bool(os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")), "cwd": os.getcwd()}))
+    "token_set": bool(os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")), "cwd": os.getcwd(), "stdin": stdin}))
 folder = pathlib.Path(re.search(r"whose library folder is (.+?)\.(?: The IA|\n)", brief).group(1))
 sub = {"reviewer": "reviews", "red-team": "red-team", "threat-modeler": "threat-model",
        "standards-checker": "standards"}[agent]
@@ -323,6 +325,9 @@ first = json.loads(calls[0].read_text())
 argv = first["argv"]
 ok("--strict-mcp-config" in argv and "--output-format" in argv and first["token_set"],
    "run: through kit_claude (JSON output, no MCP servers, Kit's login)", argv)
+ok(all(json.loads(c.read_text())["stdin"] == WIN for c in calls),
+   "run: the brief goes on standard input on Windows (cmd.exe cuts an argument at a line break), "
+   "on the command line elsewhere", [json.loads(c.read_text())["stdin"] for c in calls])
 allowed = argv[argv.index("--allowedTools") + 1: argv.index("--disallowedTools")]
 denied = argv[argv.index("--disallowedTools") + 1:]
 ok("Bash" in denied and "WebFetch" in denied and "Bash" not in allowed, "run: no shell and no web", (allowed, denied))

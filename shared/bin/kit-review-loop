@@ -21,7 +21,9 @@ PROJECT is a folder under <library root>/artifacts/ (the library root in memory/
 path to one. DRAFT is a file in the project (its drafts/ folder is looked in too), or a path. Work content.
 
 The agent runs: `claude -p BRIEF --agent NAME` in Kit's folder, through kit_claude (Kit's login, the budget
-check first, a cost record after), with no MCP servers, no shell, and no web. Each may read Kit's folder
+check first, a cost record after), with no MCP servers, no shell, and no web. On Windows the brief goes on
+standard input instead: claude is often claude.cmd there, and cmd.exe cuts an argument at its first line
+break. Each may read Kit's folder
 and the library, and write only in the project's folder: its note in its own folder and the copy in
 reviews/ (if an agent leaves the copy out, kit-review-loop makes it). The brief says nobody is watching:
 questions go in the note. Settings (shared/morning/config): REVIEW_LOOP_TIMEOUT (seconds per run, default
@@ -246,7 +248,8 @@ def one_run(agent, proj, draft, ia):
     started = time.time() - 2
     rc, _text = kit_claude.ask_claude(brief(agent, proj, draft, ia), mode=MODE, allowed=allowed, deny=deny,
                                       model=setting("REVIEW_LOOP_MODEL") or None, timeout=timeout(), cwd=kd.KIT,
-                                      mcp=False, log=log, extra_args=["--agent", agent])
+                                      mcp=False, log=log, extra_args=["--agent", agent],
+                                      prompt_stdin=os.name == "nt")   # cmd.exe cuts an argument at a line break
     saved = notes_since(proj, agent, started)
     copies = []
     if agent in SECURITY:

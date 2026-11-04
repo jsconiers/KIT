@@ -18,7 +18,8 @@ versions follow [semantic versioning](https://semver.org).
   table ranked must fix, should fix, nit, with source ID, location, finding, suggested fix, and empty
   Decision and Notes columns. `feedback` turns the decisions into `feedback-v<next>.md` for the writer:
   accepted and changed items only, by ID (tests/test_review_loop.py, with synthetic notes and a fake
-  claude).
+  claude). On Windows the brief goes to `claude` on standard input, since `cmd.exe` (which runs
+  `claude.cmd`) cuts a command-line argument at its first line break.
 - Health check "Setup paths" (warning): path fields in `memory/context/*.md` that look set but won't be
   read as written, by field and file: a value that doesn't start with a backticked path but has one
   later (the tools read it as not set), or one that starts with a backticked `<library root>/...`
