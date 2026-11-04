@@ -146,8 +146,11 @@ class Case:
         self.inst = self.home / "Claude/Agents/kit/.install"
         self.releases = self.inst / "releases"
         env = {k: v for k, v in os.environ.items() if k not in ("KIT_OWNER", "KIT_PACKAGE_COMMIT")}
+        # PYTHONDONTWRITEBYTECODE: macOS's own Python 3.9 caches bytecode under ~/Library/Caches, which is in
+        # the throwaway home the read-only checks compare.
         self.env = dict(env, HOME=str(self.home), USERPROFILE=str(self.home), TMPDIR=str(self.temp),
-                        TEMP=str(self.temp), TMP=str(self.temp), KIT_REPO=str(self.root / "no-clone"))
+                        TEMP=str(self.temp), TMP=str(self.temp), KIT_REPO=str(self.root / "no-clone"),
+                        PYTHONDONTWRITEBYTECODE="1")
 
     def installed(self, version, commit=None, files=None):
         """An existing install: VERSION.json and, optionally, some installed files."""
