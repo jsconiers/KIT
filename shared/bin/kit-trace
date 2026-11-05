@@ -6,6 +6,12 @@
                                          use these files instead of (or on top of) a project folder
   kit-trace PROJECT --json               the matrix as JSON
   kit-trace PROJECT --write [--force]    save it to PROJECT/traceability/trace-<YYYY-MM-DD>.md
+  kit-trace PROJECT --xlsx [FILE] [--force]
+                                         the matrix as an Excel workbook for reviewers (default
+                                         PROJECT/traceability/trace-<YYYY-MM-DD>.xlsx): IA requirements, then the
+                                         GDS sections, then the test cases and change steps, a row per
+                                         requirement with gaps shaded, empty Reviewer status and Reviewer notes
+                                         columns, and sheets for the gaps, orphan test cases, and a summary
   kit-trace PROJECT --prefix SEC         also treat SEC-1, SEC-2, ... as requirement IDs (repeatable)
   kit-trace PROJECT --root DIR           use a library root other than the one in library.md
 
@@ -38,6 +44,7 @@ import zipfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import kit_arch as ka  # noqa: E402
+import kit_xlsx  # noqa: E402  (shared/kit_xlsx.py: standard library only)
 
 REQ_PREFIXES = ["REQ", "FR", "NFR", "BR"]
 TEST_RX = re.compile(r"(?<![A-Za-z0-9])(TC|TEST|UAT|SIT)[-_]?(\d+(?:\.\d+)*)(?![A-Za-z0-9])")
@@ -658,6 +665,55 @@ def render(res):
     return "\n".join(out)
 
 
+def plain(entries):
+    """A cell's text for the workbook: one entry per line, its section or ID, (inferred) where it was guessed."""
+    return "\n".join(e["ref"] + (" (inferred)" if e["how"] == "inferred" else "" if e["how"] == "id"
+                                  else f" ({e['how']})") for e in entries)
+
+
+def as_xlsx(res, dest):
+    s, chk, src = res["summary"], res["checked"], res["sources"]
+    head = ["Requirement", "Statement", "IA location", "GDS section", "Test cases", "Change steps", "POC / verdict",
+            "Gaps", "Reviewer status", "Reviewer notes"]
+    rows = []
+    for r in res["rows"]:
+        rows.append([r["id"], r["text"] or "(no statement found)", r["ia_location"],
+                     plain(r["gds"]) or ("none" if chk["gds"] else "not checked"),
+                     plain(r["tests"]) or ("none" if chk["test_plan"] else "not checked"),
+                     plain(r["changes"]) or ("none" if chk["change"] else "not checked"),
+                     plain(r["poc"]) or "none", "; ".join(r["gaps"]) or "none", "", ""])
+    gaps = [[r["id"], g, r["text"] or "", r["ia_location"]] for r in res["rows"] for g in r["gaps"]]
+    orph = [[t["label"], t["text"], t["source"]] for t in res["orphans"]]
+    unknown = [[SHOWN.get(k, k), v] for k, v in res["unknown_ids"].items()]
+    g = s["gaps"]
+
+    def n(v):
+        return "not checked (no file)" if v is None else v
+    summary = [["Project", res["project"]], ["Generated", f"{res['generated']}, by kit-trace"],
+               ["Impact assessment", src["ia"] and pathlib.Path(src["ia"]).name],
+               ["Design specification", src["gds"] and pathlib.Path(src["gds"]).name or "not found"],
+               ["Test plan", src["test_plan"] and pathlib.Path(src["test_plan"]).name or "not found"],
+               ["Change request", src["change"] and pathlib.Path(src["change"]).name or "not found"],
+               ["Requirements in the IA", s["requirements"]], ["Addressed in the GDS", n(s["addressed_in_gds"])],
+               ["Tested", n(s["tested"])], ["Test cases in the plan", s["test_cases"]],
+               ["With a change step", n(s["with_change_step"])], ["Named in a POC", s["with_poc"]],
+               ["Not addressed in the GDS", g["not_addressed_in_gds"]],
+               ["Addressed but untested", g["addressed_but_untested"]],
+               ["Tested but no change step", g["tested_but_no_change_step"]],
+               ["Orphan test cases", g["orphan_test_cases"]], ["Inferred links", s["inferred_links"]],
+               ["Classification", "internal (raise it if any source is confidential)"],
+               ["How to read it", "Each row is an IA requirement, then the GDS section that addresses it, then its "
+                                  "test cases and change steps. (inferred) marks a keyword match a person should "
+                                  "confirm. Shaded rows have a gap. Fill in Reviewer status and Reviewer notes."]]
+    sheets = [kit_xlsx.Sheet("Matrix", head, rows, widths=[14, 48, 16, 22, 22, 18, 18, 28, 16, 36], flag_col=7),
+              kit_xlsx.Sheet("Gaps", ["Requirement", "Gap", "Statement", "IA location"], gaps, widths=[14, 28, 60, 16]),
+              kit_xlsx.Sheet("Orphan test cases", ["Test case", "Text", "Where"], orph, widths=[14, 60, 24]),
+              kit_xlsx.Sheet("Summary", ["Field", "Value"], summary, widths=[28, 90])]
+    if unknown:
+        sheets.insert(3, kit_xlsx.Sheet("IDs not in the IA", ["ID", "First seen"], unknown, widths=[16, 40]))
+    return kit_xlsx.write(dest, sheets, title=f"Traceability matrix: {res['project']}")
+
+
 def main(argv):
     ap = argparse.ArgumentParser(prog="kit-trace", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -670,6 +726,7 @@ def main(argv):
     ap.add_argument("--prefix", action="append", default=[])
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--write", action="store_true")
+    ap.add_argument("--xlsx", nargs="?", const="", default=None, metavar="FILE")
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--root")
     a = ap.parse_args(argv)
@@ -681,6 +738,21 @@ def main(argv):
     res = build(a, root)
     if a.json:
         print(json.dumps(as_json(res), indent=2))
+        return 0
+    if a.xlsx is not None:
+        if a.xlsx:
+            dest = ka.expand(a.xlsx)
+        elif res["folder"]:
+            dest = pathlib.Path(res["folder"]) / "traceability" / f"trace-{dt.date.today().isoformat()}.xlsx"
+        else:
+            sys.exit("kit-trace: --xlsx needs a file name when there's no project folder")
+        if dest.suffix.lower() != ".xlsx":
+            sys.exit("kit-trace: the workbook's name must end in .xlsx")
+        if dest.exists() and not a.force:
+            sys.exit(f"kit-trace: {dest} exists; add --force to replace it")
+        as_xlsx(res, dest)
+        print(f"kit-trace: wrote {dest} ({len(res['rows'])} requirements, "
+              f"{sum(len(r['gaps']) > 0 for r in res['rows'])} with a gap)")
         return 0
     text = render(res)
     if not a.write:

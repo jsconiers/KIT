@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+"""kit-tickets: what changed on your service-management tickets since the last morning brief.
+
+  kit-tickets diff [--today FILE] [--no-save] [--json]
+        compare today's tickets (briefs/tickets-today.json, which the morning run writes from the gateway's
+        answer) with the last ones saved, print the brief's "Your tickets" section, and save today's as the
+        new baseline (.install/cache/tickets-snapshot.json). --no-save leaves the baseline as it is
+  kit-tickets show [--json]
+        the tickets as of the last check
+
+The morning run (TICKET_WATCH="on"; see shared/morning/ticket_watch.py) has the gateway agent search the
+connector read-only for the owner's own tickets and runs this. It makes no connector or model call itself.
+
+What it reports, newest news first: tickets new to the search, state changes (old to new), priority changes,
+reassignments, other updates (the updated time moved: a comment or work note), and tickets that left the search
+(closed, or moved out of your queues). Every line is tagged [work]. Ticket text comes from an outside system, so
+it's cut to one short line, with email addresses masked, before it goes into the brief, and the short text gets
+numbers and counts only. The first check sets the baseline and lists what's open.
+
+Input: a JSON array of objects with number, title, state, priority, assigned_to, updated, and url (others are
+ignored), or an object holding such an array under "tickets", "result", or "records". KIT_DIR overrides the Kit
+folder (for tests).
+"""
+import argparse
+import json
+import pathlib
+import re
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import kit_daily as kd  # noqa: E402
+
+TODAY_FILE = kd.KIT / "briefs/tickets-today.json"
+SNAP = kd.KIT / ".install/cache/tickets-snapshot.json"
+FIELDS = ("number", "title", "state", "priority", "assigned_to", "updated", "url")
+CLOSED = re.compile(r"^(closed|resolved|cancel+ed|complete[d]?|done)\b", re.I)
+SHOWN = 12
+MAX_TICKETS = 500
+
+
+def one_line(v, n=90):
+    if isinstance(v, dict):                       # a reference field: {"display_value": ..., "value": ...}
+        v = v.get("display_value") or v.get("name") or v.get("value") or ""
+    s = re.sub(r"[\x00-\x1f\x7f]+", " ", str(v if v is not None else ""))
+    return kd.clip(s, n)
+
+
+def normalise(data):
+    """[{field: text}] from the gateway's answer, by ticket number; anything without a number is dropped."""
+    if isinstance(data, dict):
+        for k in ("tickets", "result", "records", "items"):
+            if isinstance(data.get(k), list):
+                data = data[k]
+                break
+    if not isinstance(data, list):
+        raise ValueError("expected a JSON array of tickets")
+    out = {}
+    for t in data[:MAX_TICKETS]:
+        if not isinstance(t, dict):
+            continue
+        alias = {"short_description": "title", "assigned": "assigned_to", "assignee": "assigned_to",
+                 "sys_updated_on": "updated", "updated_on": "updated", "link": "url"}
+        t = {alias.get(k, k): v for k, v in t.items()}
+        num = one_line(t.get("number"), 40)
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{2,40}", num):
+            continue
+        out[num] = {f: one_line(t.get(f), 200 if f == "url" else 90) for f in FIELDS}
+        out[num]["number"] = num
+        if not re.match(r"^https://", out[num]["url"]):
+            out[num]["url"] = ""
+    return out
+
+
+def load_snapshot():
+    try:
+        data = json.loads(SNAP.read_text(encoding="utf-8-sig"))
+        return data.get("tickets") or {}, data.get("checked")
+    except (OSError, ValueError, AttributeError):
+        return None, None
+
+
+def save_snapshot(tickets):
+    SNAP.parent.mkdir(parents=True, exist_ok=True)
+    kd.write(SNAP, json.dumps({"checked": kd.now().isoformat(timespec="minutes"), "tickets": tickets}, indent=1) + "\n")
+
+
+def is_open(t):
+    return not CLOSED.match(t.get("state") or "")
+
+
+def changes(old, new):
+    out = {"new": [], "state": [], "priority": [], "assigned": [], "updated": [], "gone": []}
+    for n, t in new.items():
+        o = old.get(n)
+        if o is None:
+            out["new"].append(t)
+            continue
+        if (o.get("state") or "") != (t.get("state") or ""):
+            out["state"].append((t, o.get("state") or "?", t.get("state") or "?"))
+        elif (o.get("priority") or "") != (t.get("priority") or ""):
+            out["priority"].append((t, o.get("priority") or "?", t.get("priority") or "?"))
+        elif (o.get("assigned_to") or "") != (t.get("assigned_to") or ""):
+            out["assigned"].append((t, o.get("assigned_to") or "nobody", t.get("assigned_to") or "nobody"))
+        elif t.get("updated") and t.get("updated") != o.get("updated"):
+            out["updated"].append(t)
+    for n, o in old.items():
+        if n not in new and is_open(o):
+            out["gone"].append(o)
+    return out
+
+
+def section(old, new, first):
+    lines = ["Your tickets"]
+    open_now = [t for t in new.values() if is_open(t)]
+    if first:
+        lines.append(f"[work] First check: {len(new)} ticket(s) on record, {len(open_now)} open. Changes show from "
+                     "the next brief.")
+        for t in sorted(open_now, key=lambda t: t.get("updated") or "", reverse=True)[:SHOWN]:
+            lines.append(f"[work] {t['number']} ({t['state'] or 'state not given'}): {t['title']}")
+        lines.append(f"Text: Tickets: {len(open_now)} open")
+        return lines, {"open": len(open_now), "changed": 0}
+    c = changes(old, new)
+    rows = ([f"[work] New: {t['number']} ({t['state'] or 'state not given'}): {t['title']}" for t in c["new"]]
+            + [f"[work] {t['number']}: {a} to {b}. {t['title']}" for t, a, b in c["state"]]
+            + [f"[work] {t['number']}: priority {a} to {b}. {t['title']}" for t, a, b in c["priority"]]
+            + [f"[work] {t['number']}: reassigned from {a} to {b}. {t['title']}" for t, a, b in c["assigned"]]
+            + [f"[work] {t['number']}: updated (a comment or work note). {t['title']}" for t in c["updated"]]
+            + [f"[work] {t['number']}: no longer in your search (closed, or moved out of your queues). {t['title']}"
+               for t in c["gone"]])
+    n = sum(len(v) for v in c.values())
+    if not rows:
+        lines.append(f"[work] No changes in {len(new)} ticket(s) ({len(open_now)} open).")
+    else:
+        lines += rows[:SHOWN]
+        if len(rows) > SHOWN:
+            lines.append(f"[work] and {len(rows) - SHOWN} more (kit-tickets show)")
+        lines.append(f"[work] {len(new)} ticket(s) in your search, {len(open_now)} open.")
+    nums = [t["number"] for t in c["new"]] + [x[0]["number"] for k in ("state", "priority", "assigned") for x in c[k]] \
+        + [t["number"] for t in c["updated"] + c["gone"]]
+    lines.append(f"Text: Tickets: {n} changed" + (f" ({', '.join(nums[:6])})" if nums else "") + f", {len(open_now)} open")
+    return lines, {"open": len(open_now), "changed": n, "by_kind": {k: len(v) for k, v in c.items()}}
+
+
+def cmd_diff(a):
+    src = pathlib.Path(a.today).expanduser() if a.today else TODAY_FILE
+    try:
+        new = normalise(json.loads(src.read_text(encoding="utf-8-sig")))
+    except OSError:
+        print("Your tickets\n[work] Not checked today: no tickets file (the gateway's answer wasn't saved).")
+        return 1
+    except ValueError as ex:
+        print(f"Your tickets\n[work] Not checked today: the tickets file isn't valid ({str(ex)[:80]}).")
+        return 1
+    old, _ = load_snapshot()
+    lines, counts = section(old or {}, new, old is None)
+    if a.json:
+        print(json.dumps({"lines": lines, **counts}, indent=2))
+    else:
+        print("\n".join(lines))
+    if not a.no_save:
+        save_snapshot(new)
+    return 0
+
+
+def cmd_show(a):
+    tickets, checked = load_snapshot()
+    if tickets is None:
+        print("kit-tickets: no check yet (TICKET_WATCH in the config turns on the morning check)")
+        return 0
+    if a.json:
+        print(json.dumps({"checked": checked, "tickets": tickets}, indent=2))
+        return 0
+    print(f"kit-tickets: {len(tickets)} ticket(s) as of {checked}")
+    for t in sorted(tickets.values(), key=lambda t: (not is_open(t), t.get("number"))):
+        print(f"  {t['number']:<14} {t['state'] or '-':<14} {t['priority'] or '-':<12} {t['title']}")
+    return 0
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-tickets", description=__doc__.split("\n\n")[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    d = sub.add_parser("diff")
+    d.add_argument("--today")
+    d.add_argument("--no-save", action="store_true")
+    d.add_argument("--json", action="store_true")
+    s = sub.add_parser("show")
+    s.add_argument("--json", action="store_true")
+    a = ap.parse_args(argv)
+    return {"diff": cmd_diff, "show": cmd_show}[a.cmd](a)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

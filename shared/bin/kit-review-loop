@@ -16,6 +16,11 @@
         turns the filled-in decisions file into PROJECT/feedback-v<next>.md for the writer: the accepted and
         changed items only, by ID. Stops while a row has no decision, or a change has no note (--partial
         leaves those out)
+  kit-review-loop score PROJECT [--draft FILE] [--json]
+        one "ready for ARB" score, 0 to 100, from the latest note of each kind in reviews/: the reviewer, red
+        team, threat model, and standards results, less what the latest decisions file rejected. Read-only
+  kit-review-loop status [--json]
+        every project with review notes: its last review, its score, and its notes and decisions files
 
 PROJECT is a folder under <library root>/artifacts/ (the library root in memory/context/library.md), or a
 path to one. DRAFT is a file in the project (its drafts/ folder is looked in too), or a path. Work content.
@@ -29,6 +34,13 @@ reviews/ (if an agent leaves the copy out, kit-review-loop makes it). The brief 
 questions go in the note. Settings (shared/morning/config): REVIEW_LOOP_TIMEOUT (seconds per run, default
 1800) and REVIEW_LOOP_MODEL (default: each agent's own model). Exit status 75: skipped for the budget.
 merge and feedback make no model call and never overwrite a decisions file that has a decision in it.
+
+The score. It starts at 100 and loses 12 points per open must-fix finding, 4 per should-fix, and 1 per nit,
+and 15 for each of the four reviews with no note. A finding is open unless its note marks it fixed or closed,
+or the latest decisions file (as new as the notes) rejected it. Ready for ARB needs all four notes, no open
+must-fix, notes newer than the latest draft in drafts/ (or --draft), and a score of READINESS_THRESHOLD (in
+shared/morning/config; 80 by default) or more. With no open must-fix and every note there it's "almost";
+otherwise "not ready". The dashboard's Reviews panel and kit-settings ui show it.
 """
 import argparse
 import concurrent.futures
@@ -664,6 +676,167 @@ def cmd_feedback(a):
     return 0
 
 
+# ---- readiness score and status ---------------------------------------------------------------------------
+POINTS = {"must fix": 12, "should fix": 4, "nit": 1}
+MISSING_POINTS = 15
+
+
+def threshold():
+    raw = setting("READINESS_THRESHOLD", "80")
+    return int(raw) if raw.isdigit() and 0 < int(raw) <= 100 else 80
+
+
+def latest_decisions(proj):
+    files = sorted(proj.glob("review-decisions-*.md"))
+    return files[-1] if files else None
+
+
+def rejected_ids(path):
+    if not path:
+        return set()
+    head, rows = decision_rows(kd.read(path))
+    if not head:
+        return set()
+    out = set()
+    for r in rows:
+        raw = clean(r.get(col(head, r"^decision") or "", "")).lower().rstrip(".")
+        if DECISIONS.get(raw.split()[0] if raw else "") == "reject":
+            out.add(clean(r.get(col(head, r"^id$") or "", "")))
+    return out
+
+
+def latest_draft(proj):
+    d = proj / "drafts"
+    files = [x for x in d.iterdir() if x.is_file() and not x.name.startswith(".")] if d.is_dir() else []
+    return max(files, key=lambda x: (versions(x.name), x.stat().st_mtime)) if files else None
+
+
+def readiness(proj, draft=None):
+    notes = latest_notes(proj)
+    dec = latest_decisions(proj)
+    newest_note = max((note_date(f, t) for f, t in notes.values()), default=None)
+    dec_date = None
+    if dec:
+        m = re.search(r"(\d{4}-\d{2}-\d{2})", dec.name)
+        dec_date = kd.parse_date(m.group(1)) if m else None
+    rejected = rejected_ids(dec) if dec and newest_note and dec_date and dec_date >= newest_note else set()
+    open_rows, dropped = [], 0
+    for kind in AGENTS:
+        if kind in notes:
+            for f in findings(kind, *notes[kind]):
+                if f["id"] in rejected:
+                    dropped += 1
+                else:
+                    open_rows.append(f)
+    counts = {r: sum(1 for x in open_rows if x["rank"] == r) for r in RANKS}
+    missing = [SOURCE[k] for k in AGENTS if k not in notes]
+    draft = draft or latest_draft(proj)
+    stale = []
+    if draft and draft.exists():
+        for k, (f, _t) in notes.items():
+            if f.stat().st_mtime < draft.stat().st_mtime:
+                stale.append(SOURCE[k])
+    score = 100 - sum(POINTS[r] * n for r, n in counts.items()) - MISSING_POINTS * len(missing)
+    score = max(0, min(100, score))
+    need = threshold()
+    if not missing and not counts["must fix"] and not stale and score >= need:
+        verdict = "ready"
+    elif not missing and not counts["must fix"]:
+        verdict = "almost"
+    else:
+        verdict = "not ready"
+    why = []
+    if counts["must fix"]:
+        why.append(f"{counts['must fix']} must fix")
+    if missing:
+        why.append("no note from: " + ", ".join(missing))
+    if stale:
+        why.append("older than the draft: " + ", ".join(stale))
+    if verdict != "ready" and not why:
+        why.append(f"score under {need}")
+    headline = {"ready": f"Ready for ARB: {score}/100",
+                "almost": f"Almost ready: {score}/100" + (f" ({'; '.join(why)})" if why else ""),
+                "not ready": f"Not ready: {score}/100 ({'; '.join(why)})"}[verdict]
+    return {"project": proj.name, "folder": str(proj), "score": score, "verdict": verdict, "headline": headline,
+            "threshold": need, "open": counts, "rejected_left_out": dropped, "missing": missing, "stale": stale,
+            "draft": str(draft) if draft else None, "decisions": str(dec) if dec else None,
+            "notes": {SOURCE[k]: str(notes[k][0]) for k in AGENTS if k in notes},
+            "findings": [{k: f[k] for k in ("rank", "source", "id", "location", "finding")} for f in open_rows]}
+
+
+def cmd_score(a):
+    proj = project_dir(a.project)
+    draft = find_draft(proj, a.draft) if a.draft else None
+    r = readiness(proj, draft)
+    if a.json:
+        import json
+        print(json.dumps(r, indent=2))
+        return 0
+    o = r["open"]
+    print(f"{r['project']}: {r['headline']}")
+    print(f"  Open findings: {o['must fix']} must fix (-{POINTS['must fix']} each), {o['should fix']} should fix "
+          f"(-{POINTS['should fix']}), {o['nit']} nit (-{POINTS['nit']})"
+          + (f"; {r['rejected_left_out']} rejected in {pathlib.Path(r['decisions']).name} left out"
+             if r["rejected_left_out"] else ""))
+    for src, path in r["notes"].items():
+        print(f"  {src}: {pathlib.Path(path).name}")
+    for src in r["missing"]:
+        print(f"  {src}: no note (-{MISSING_POINTS})")
+    if r["stale"]:
+        print(f"  Older than the draft ({pathlib.Path(r['draft']).name}): {', '.join(r['stale'])}. Run the loop again.")
+    print(f"  Ready for ARB needs all four notes, no must fix, notes newer than the draft, and {r['threshold']}+.")
+    musts = [f for f in r["findings"] if f["rank"] == "must fix"]
+    if musts:
+        print("  Must fix:")
+        for f in musts[:12]:
+            print(f"    {f['id']} ({f['source']}): {kd.clip(f['finding'], 110)}")
+    return 0
+
+
+def projects_with_reviews():
+    root = kd.library_root()
+    base = root / "artifacts" if root else None
+    if not base or not base.is_dir():
+        return []
+    return sorted((p for p in base.iterdir() if (p / "reviews").is_dir()), key=lambda p: p.name.lower())
+
+
+def status_all(limit=None):
+    """[{project, last, score, links}] for each project with review notes, most recent review first."""
+    out = []
+    for proj in projects_with_reviews():
+        notes = latest_notes(proj)
+        if not notes:
+            continue
+        r = readiness(proj)
+        last = max(note_date(f, t) for f, t in notes.values())
+        links = [{"label": src, "path": path} for src, path in r["notes"].items()]
+        if r["decisions"]:
+            links.append({"label": "decisions", "path": r["decisions"]})
+        fb = sorted(proj.glob("feedback-v*.md"), key=lambda x: (versions(x.name), x.stat().st_mtime))
+        if fb:
+            links.append({"label": fb[-1].stem, "path": str(fb[-1])})
+        out.append({"project": proj.name, "folder": str(proj), "last": kd.fmt(last), "last_iso": last.isoformat(),
+                    "score": {k: r[k] for k in ("score", "verdict", "headline", "open", "missing", "stale")},
+                    "links": links})
+    out.sort(key=lambda x: x["last_iso"], reverse=True)
+    return out[:limit] if limit else out
+
+
+def cmd_status(a):
+    rows = status_all()
+    if a.json:
+        import json
+        print(json.dumps(rows, indent=2))
+        return 0
+    if not rows:
+        print(f"{PROG}: no project in the library has review notes yet")
+        return 0
+    for r in rows:
+        print(f"{r['project']}: {r['score']['headline']} (last review {r['last']})")
+    return 0
+
+
 def main(argv):
     ap = argparse.ArgumentParser(prog=PROG, description=__doc__.split("\n\n")[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
@@ -686,9 +859,16 @@ def main(argv):
     p.add_argument("--version", help="the version the feedback is for (default: the next one)")
     p.add_argument("--partial", action="store_true", help="leave out rows with no decision instead of stopping")
     p.add_argument("--force", action="store_true")
+    p = sub.add_parser("score")
+    p.add_argument("project")
+    p.add_argument("--draft", help="the draft the notes should be newer than (default: the latest in drafts/)")
+    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("status")
+    p.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
     try:
-        return {"plan": cmd_plan, "run": cmd_run, "merge": cmd_merge, "feedback": cmd_feedback}[a.cmd](a)
+        return {"plan": cmd_plan, "run": cmd_run, "merge": cmd_merge, "feedback": cmd_feedback,
+                "score": cmd_score, "status": cmd_status}[a.cmd](a)
     except Stop as e:
         print(f"{PROG}: {e}", file=sys.stderr)
         return e.code

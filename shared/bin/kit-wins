@@ -6,6 +6,12 @@
   kit-wins mark [--dry-run]        record what the sources hold now as collected, adding nothing (after
                                    you rewrite the log by hand, so collect doesn't bring old lines back)
   kit-wins report --from D --to D  a summary grouped by theme (dates DD-Mmm-YYYY or YYYY-MM-DD)
+  kit-wins month [--month YYYY-MM] [--write] [--json]
+                                   one page on what Kit did in a month (last month by default), for leadership
+                                   updates and AI Wins: the work finished (the log, plus anything the sources
+                                   hold that collect hasn't added yet), highlights, Kit's scheduled runs and
+                                   what they cost (kit-cost's ledger), against the month before. --write saves
+                                   briefs/kit-month-YYYY-MM.md and a print-ready .html beside it
 
 Sources: QUEUE.md's Done section (Kit's own items, and the owner's items tagged [work]), finished
 sprint items, accepted ADRs (decisions/INDEX.md in the library), POC verdicts (poc/INDEX.md),
@@ -13,6 +19,11 @@ documents added to the library (LOG.md), and Kit's own release notes (briefs/kit
 Entries go to memory/accomplishments.md, one dated line each, never twice: what's been collected is
 also kept in memory/.accomplishments-seen.json, so editing or deleting a line by hand sticks. Work only: an owner's
 item without the [work] tag is skipped, and nothing under memory/personal/ is read.
+
+The monthly page lists Kit's work runs by kind (MONTH_REPORT_MODES in shared/morning/config, separated by spaces;
+by default morning, weekly, worklist, eod, review-loop, and the kit-run agents) and puts every other run (a trading
+run, an illustration batch, a run of your own) in one "other runs" line, so nothing personal is named. Costs are
+Claude Code's client-side estimates, not a bill, and the page says so.
 """
 import argparse
 import datetime as dt
@@ -205,13 +216,232 @@ def report(a, b):
     return "\n".join(out)
 
 
+# ---- the monthly page -------------------------------------------------------------------------------------------
+WORK_MODES = "morning weekly worklist eod review-loop kit-run:*"
+
+
+def _cost_tool():
+    import importlib.machinery
+    import importlib.util
+    path = pathlib.Path(__file__).resolve().parent / "kit-cost"
+    loader = importlib.machinery.SourceFileLoader("kit_cost_wins", str(path))
+    spec = importlib.util.spec_from_loader("kit_cost_wins", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def month_bounds(text):
+    if text:
+        m = re.fullmatch(r"(\d{4})-(\d{2})", text.strip())
+        if not m or not 1 <= int(m.group(2)) <= 12:
+            raise ValueError("--month takes YYYY-MM")
+        y, mo = int(m.group(1)), int(m.group(2))
+    else:
+        first = kd.today().replace(day=1) - dt.timedelta(days=1)
+        y, mo = first.year, first.month
+    start = dt.date(y, mo, 1)
+    end = (dt.date(y + (mo == 12), mo % 12 + 1, 1) - dt.timedelta(days=1))
+    return start, end
+
+
+def work_mode(mode, patterns):
+    import fnmatch
+    return any(fnmatch.fnmatchcase(mode or "", p) for p in patterns)
+
+
+def month_wins(a, b):
+    """The log's entries in the month, plus source items collect hasn't added yet (marked pending)."""
+    ents = in_range(existing(), a, b)
+    have = {key(e["text"]) for e in existing()} | load_seen()
+    for e in gather():
+        k = key(e["text"])
+        if k and k not in have and e["date"] and a <= e["date"] <= b:
+            have.add(k)
+            ents.append({"date": e["date"], "theme": theme(e["text"]), "text": e["text"], "src": e["src"],
+                         "pending": True})
+    ents.sort(key=lambda e: e["date"])
+    # Kit's own updates: one line for the month, not one per update.
+    rel = [e for e in ents if re.match(r"Kit updated\b", e["text"])]
+    if len(rel) > 1:
+        vers = [m.group(1) for e in rel for m in [re.search(r"to (\S+)", e["text"])] if m]
+        first, last = (vers[0], vers[-1]) if vers else ("", "")
+        keep = {"date": rel[-1]["date"], "theme": "Kit and automation", "src": "release",
+                "pending": any(e.get("pending") for e in rel),
+                "text": f"Kit updated {len(rel)} times" + (f", {first} to {last}" if first and first != last else
+                                                          f", to {last}" if last else "")}
+        ents = [e for e in ents if e not in rel] + [keep]
+        ents.sort(key=lambda e: e["date"])
+    return ents
+
+
+def month_data(a, b):
+    kc = _cost_tool()
+    ym = f"{a:%Y-%m}"
+    prev_a, _ = month_bounds(f"{(a - dt.timedelta(days=1)):%Y-%m}")
+    recs = [r for r in kc.entries() if kc.month_of(r) == ym]
+    prev = [r for r in kc.entries() if kc.month_of(r) == f"{prev_a:%Y-%m}"]
+    patterns = (re.search(r'^MONTH_REPORT_MODES="([^"]*)"', kd.read(kd.CONFIG), re.M) or [None, WORK_MODES])[1].split() \
+        or WORK_MODES.split()
+    kinds, other = {}, {"runs": 0, "spend": 0.0}
+    for r in recs:
+        m = r.get("mode", "?")
+        if m.startswith("kit-run:"):
+            m = "Kit's agents (kit-run)"
+            slot = kinds.setdefault(m, {"runs": 0, "spend": 0.0, "ok": 0}) if work_mode("kit-run:x", patterns) else other
+        else:
+            slot = kinds.setdefault(m, {"runs": 0, "spend": 0.0, "ok": 0}) if work_mode(m, patterns) else other
+        slot["runs"] += 1
+        slot["spend"] += kc.cost(r)
+        slot["unpriced"] = slot.get("unpriced", 0) + (r.get("cost_usd") is None)
+        if "ok" in slot and r.get("rc", 0) in (0, None):
+            slot["ok"] += 1
+    spend = sum(kc.cost(r) for r in recs)
+    pspend = sum(kc.cost(r) for r in prev)
+    wins = month_wins(a, b)
+    pwins = month_wins(prev_a, a - dt.timedelta(days=1))
+    by_theme = {}
+    for e in wins:
+        by_theme.setdefault(e["theme"], []).append(e)
+    return {"month": ym, "from": a.isoformat(), "to": b.isoformat(), "owner": kd.owner(),
+            "wins": [{"date": e["date"].isoformat(), "theme": e["theme"], "text": e["text"], "source": e["src"],
+                      "pending": bool(e.get("pending"))} for e in wins],
+            "wins_previous_month": len(pwins),
+            "themes": {t: len(v) for t, v in sorted(by_theme.items(), key=lambda kv: -len(kv[1]))},
+            "runs": len(recs), "runs_previous_month": len(prev), "spend_usd": round(spend, 2),
+            "spend_previous_month_usd": round(pspend, 2),
+            "per_run_usd": round(spend / len(recs), 2) if recs else None,
+            "work_runs": {m: {"runs": v["runs"], "spend_usd": round(v["spend"], 2), "succeeded": v["ok"],
+                              "unpriced": v.get("unpriced", 0)}
+                          for m, v in sorted(kinds.items(), key=lambda kv: -kv[1]["runs"])},
+            "other_runs": {"runs": other["runs"], "spend_usd": round(other["spend"], 2)}}
+
+
+def change(now, before):
+    if not before:
+        return "first month on record" if now else "none either month"
+    pct = round((now - before) / before * 100)
+    return f"{'+' if pct >= 0 else ''}{pct}% on the month before"
+
+
+HIGHLIGHT_ORDER = ["Decisions", "POCs and labs", "Design documents", "Delivery and meetings", "Kit and automation", "Other"]
+
+
+def month_markdown(d):
+    a = dt.date.fromisoformat(d["from"])
+    wins = d["wins"]
+    hl = sorted(wins, key=lambda w: (HIGHLIGHT_ORDER.index(w["theme"]) if w["theme"] in HIGHLIGHT_ORDER else 9,
+                                     w["date"]))[:6]
+    out = [f"# What Kit did in {a:%B %Y}", "",
+           f"For {d['owner']}'s leadership update and AI Wins. Generated {kd.fmt(kd.today())} by `kit-wins month`.", "",
+           "## At a glance", "",
+           f"- **{len(wins)} piece{'' if len(wins) == 1 else 's'} of work finished** "
+           f"({change(len(wins), d['wins_previous_month'])})",
+           f"- **{d['runs']} scheduled runs** by Kit ({change(d['runs'], d['runs_previous_month'])})",
+           f"- **${d['spend_usd']:,.2f} estimated model cost**"
+           + (f", about ${d['per_run_usd']:.2f} a run" if d["per_run_usd"] is not None else "")
+           + f" ({change(d['spend_usd'], d['spend_previous_month_usd'])})", ""]
+    out += ["## Highlights", ""]
+    out += [f"- {w['text']} ({kd.fmt(dt.date.fromisoformat(w['date']))})" for w in hl] or ["- Nothing recorded this month."]
+    out += [""]
+    if d["themes"]:
+        out += ["## Work by theme", "", "| Theme | Items | Examples |", "|---|---|---|"]
+        for t, n in d["themes"].items():
+            ex = "; ".join(w["text"] for w in wins if w["theme"] == t)[:220]
+            out.append(f"| {t} | {n} | {ex.replace('|', '/')} |")
+        out.append("")
+    out += ["## Kit's scheduled runs", "", "| Run | Runs | Succeeded | Estimated cost |", "|---|---|---|---|"]
+    for m, v in d["work_runs"].items():
+        cost = ("not priced" if v["unpriced"] == v["runs"] else f"${v['spend_usd']:,.2f}"
+                + (f" ({v['unpriced']} not priced)" if v["unpriced"] else ""))
+        out.append(f"| {m} | {v['runs']} | {v['succeeded']} | {cost} |")
+    if d["other_runs"]["runs"]:
+        out.append(f"| other runs | {d['other_runs']['runs']} |  | ${d['other_runs']['spend_usd']:,.2f} |")
+    if not d["runs"]:
+        out.append("| none recorded |  |  |  |")
+    pend = sum(1 for w in wins if w["pending"])
+    out += ["", "## Notes", "",
+            "- Costs are Claude Code's client-side estimates for Kit's scheduled runs, not a bill; interactive "
+            "sessions aren't in them.",
+            "- Work finished comes from Kit's accomplishments log (finished queue and sprint items tagged work, "
+            "accepted ADRs, POC verdicts, library additions, Kit releases)"
+            + (f"; {pend} item(s) aren't in the log yet (`kit-wins collect` adds them)." if pend else "."), ""]
+    return "\n".join(out)
+
+
+def month_html(md, title):
+    """A self-contained, print-ready page from the Markdown above (headings, bullets, bold, tables)."""
+    import html as H
+    body, table = [], None
+    for ln in md.splitlines():
+        if ln.startswith("|"):
+            cells = [c.strip() for c in ln.strip("|").split("|")]
+            if all(re.fullmatch(r":?-+:?", c) for c in cells if c):
+                continue
+            if table is None:
+                table = ["<table><thead><tr>" + "".join(f"<th>{H.escape(c)}</th>" for c in cells) + "</tr></thead><tbody>"]
+            else:
+                table.append("<tr>" + "".join(f"<td>{H.escape(c)}</td>" for c in cells) + "</tr>")
+            continue
+        if table is not None:
+            body.append("".join(table) + "</tbody></table>")
+            table = None
+        t = H.escape(ln)
+        t = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", t)
+        t = re.sub(r"`(.+?)`", r"<code>\1</code>", t)
+        if ln.startswith("# "):
+            body.append(f"<h1>{t[2:]}</h1>")
+        elif ln.startswith("## "):
+            body.append(f"<h2>{t[3:]}</h2>")
+        elif ln.startswith("- "):
+            body.append(f"<li>{t[2:]}</li>")
+        elif ln.strip():
+            body.append(f"<p>{t}</p>")
+    if table is not None:
+        body.append("".join(table) + "</tbody></table>")
+    html_body = re.sub(r"((?:<li>.*?</li>)+)", r"<ul>\1</ul>", "".join(body))
+    css = ("body{font:15px/1.45 system-ui,'Segoe UI',Arial,sans-serif;color:#15202B;max-width:52rem;margin:2rem auto;"
+           "padding:0 1rem}h1{font-size:1.7rem;margin:0 0 .3rem}h2{font-size:1.15rem;margin:1.3rem 0 .4rem;"
+           "border-bottom:2px solid #C1121F;padding-bottom:.15rem}table{border-collapse:collapse;width:100%;"
+           "font-size:.92rem}th,td{text-align:left;padding:.3rem .45rem;border-bottom:1px solid #C9D0D6;"
+           "vertical-align:top}ul{padding-left:1.2rem;margin:.3rem 0}p{margin:.3rem 0;color:#566573}"
+           "@media print{body{margin:0;font-size:11.5px}h2{break-after:avoid}}@page{margin:14mm}")
+    return (f'<!doctype html><html lang="en"><head><meta charset="utf-8"><title>{H.escape(title)}</title>'
+            f"<style>{css}</style></head><body>{html_body}</body></html>\n")
+
+
+def cmd_month(args):
+    try:
+        a, b = month_bounds(args.month)
+    except ValueError as ex:
+        sys.exit(f"kit-wins: {ex}")
+    d = month_data(a, b)
+    if args.json:
+        print(json.dumps(d, indent=2))
+        return 0
+    md = month_markdown(d)
+    if not args.write:
+        print(md)
+        return 0
+    out = kd.BRIEFS / f"kit-month-{d['month']}.md"
+    kd.write(out, md + "\n")
+    page = out.with_suffix(".html")
+    kd.write(page, month_html(md, f"What Kit did in {a:%B %Y}"))
+    print(f"kit-wins: wrote {out} and {page.name} (open the .html and print it to PDF for a one-pager)")
+    return 0
+
+
 def main(argv):
     ap = argparse.ArgumentParser(prog="kit-wins", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd")
     c = sub.add_parser("collect"); c.add_argument("--dry-run", action="store_true")
     m = sub.add_parser("mark"); m.add_argument("--dry-run", action="store_true")
     r = sub.add_parser("report"); r.add_argument("--from", dest="start", required=True); r.add_argument("--to", dest="end")
+    mo = sub.add_parser("month"); mo.add_argument("--month"); mo.add_argument("--write", action="store_true")
+    mo.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
+    if args.cmd == "month":
+        return cmd_month(args)
     if args.cmd == "collect":
         new = collect(args.dry_run)
         verb = "would add" if args.dry_run else "added"

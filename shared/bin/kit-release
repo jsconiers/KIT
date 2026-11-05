@@ -1,0 +1,259 @@
+#!/usr/bin/env python3
+"""kit-release: cut a Kit release from a clean clone in one step, with no hand edits.
+
+  kit-release VERSION [--date YYYY-MM-DD] [--dry-run] [--out DIR] [--no-zip] [--build-docs CMD]
+              [--trailer LINE ...]
+
+In one go, from the clone this tool sits in (or --repo DIR):
+  1. checks: a git clone on a branch, nothing uncommitted, VERSION newer than the current one (semantic versioning),
+     no tag vVERSION yet, and something under "## [Unreleased]" in CHANGELOG.md
+  2. bumps VERSION, dates the CHANGELOG heading ("## [Unreleased]" becomes "## [VERSION] - YYYY-MM-DD"), and
+     updates the "Describes | Kit ..." and "Date" rows of the documents in docs/ that have them
+  3. commits that as "Release VERSION", with the release's Unreleased lines summarised in the message
+  4. tags it vVERSION (annotated: "Kit VERSION")
+  5. builds the release zip the way INSTALL.md says, `git archive --format=zip --prefix=KIT-VERSION/`, into
+     DIR (default dist/ in the clone, which git ignores) as KIT-VERSION-<commit>.zip, with the commit in the zip
+     comment, checks it has one top-level folder with VERSION, kit/, shared/, and the installers, and
+  6. prints its SHA-256 and writes it beside the zip (KIT-VERSION-<commit>.zip.sha256), to publish with it
+
+--dry-run shows every change and builds nothing. It never pushes: push the commit and the tag yourself (git push
+--follow-tags). If a step after the edits fails, the edits are put back. The Word and PDF copies of docs/*.md
+aren't rebuilt here unless --build-docs gives a command that does it: it runs in the clone after the edits, and
+whatever it changes in docs/ goes in the release commit. Otherwise it says when they still describe the old
+version. --trailer adds a line to the end of the commit message (repeatable). Standard library and git only;
+macOS, Linux, and Windows.
+"""
+import argparse
+import datetime as dt
+import hashlib
+import pathlib
+import re
+import subprocess
+import sys
+import zipfile
+
+SEMVER = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
+DESCRIBES = re.compile(r"^(\|\s*Describes\s*\|\s*Kit\s+)(\S+)(\s*\|\s*)$", re.M)
+DOCDATE = re.compile(r"^(\|\s*Date\s*\|\s*)(\d{2}-[A-Z][a-z]{2}-\d{4})(\s*\|\s*)$", re.M)
+NEEDED = ("VERSION", "kit/", "shared/", "platform/mac/install.sh", "platform/windows/install.ps1")
+
+
+class Stop(Exception):
+    pass
+
+
+def git(repo, *args, check=True):
+    r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
+    if check and r.returncode != 0:
+        raise Stop(f"git {' '.join(args)} failed: {(r.stderr or r.stdout).strip()[:300]}")
+    return r.stdout.strip()
+
+
+def version_tuple(v):
+    m = SEMVER.match(v.strip())
+    if not m:
+        raise Stop(f"{v!r} isn't a version like 1.7.0")
+    return tuple(int(x) for x in m.groups())
+
+
+def unreleased(text):
+    """(start, end) of the Unreleased section's body, and its bullet lines."""
+    m = re.search(r"^## \[Unreleased\][ \t]*\n", text, re.M)
+    if not m:
+        raise Stop('nothing under ## [Unreleased] in CHANGELOG.md (there\'s no such heading): add what changed first')
+    nxt = re.search(r"^## \[", text[m.end():], re.M)
+    end = m.end() + nxt.start() if nxt else len(text)
+    body = text[m.end():end]
+    bullets = [ln[2:].strip() for ln in body.splitlines() if ln.startswith("- ")]
+    if not bullets:
+        raise Stop("nothing under ## [Unreleased] in CHANGELOG.md: add what changed first")
+    return m, body, bullets
+
+
+def summary(body):
+    """One short line per entry, by section, for the commit message."""
+    items, section = [], ""
+    for ln in body.splitlines():
+        if ln.startswith("### "):
+            section = ln[4:].strip()
+        elif ln.startswith("- "):
+            items.append([section, ln[2:].strip()])
+        elif ln.startswith("  ") and ln.strip() and items:
+            items[-1][1] += " " + ln.strip()           # a wrapped line of the same entry
+    out = []
+    for section, text in items:
+        first = re.split(r"(?<=[.;])\s", text, maxsplit=1)[0]
+        first = re.sub(r"\s*\(([^()]*\.(?:py|sh|md))[^()]*\)\s*$", "", first)
+        if len(first) > 110:
+            first = first[:107].rsplit(" ", 1)[0].rstrip(",;:") + "..."
+        out.append(f"- {section + ': ' if section else ''}{first}")
+    return out
+
+
+def plan(repo, version, date):
+    cur = (repo / "VERSION").read_text(encoding="utf-8").strip()
+    if version_tuple(version) <= version_tuple(cur):
+        raise Stop(f"{version} isn't newer than the current version {cur}")
+    log = (repo / "CHANGELOG.md").read_text(encoding="utf-8")
+    m, body, bullets = unreleased(log)
+    if re.search(rf"^## \[{re.escape(version)}\]", log, re.M):
+        raise Stop(f"CHANGELOG.md already has a {version} section")
+    edits = {"VERSION": version + "\n",
+             "CHANGELOG.md": log[:m.start()] + f"## [{version}] - {date:%Y-%m-%d}\n" + log[m.end():]}
+    for doc in sorted((repo / "docs").glob("*.md")):
+        text = doc.read_text(encoding="utf-8")
+        if not DESCRIBES.search(text):
+            continue
+        new = DESCRIBES.sub(lambda x: f"{x.group(1)}{version}{x.group(3)}", text, count=1)
+        new = DOCDATE.sub(lambda x: f"{x.group(1)}{date:%d-%b-%Y}{x.group(3)}", new, count=1)
+        if new != text:
+            edits[str(doc.relative_to(repo).as_posix())] = new
+    return cur, body, bullets, edits
+
+
+def check_zip(path, version, commit):
+    with zipfile.ZipFile(path) as z:
+        names = z.namelist()
+        comment = z.comment.decode("ascii", "replace").strip()
+    tops = {n.split("/", 1)[0] for n in names}
+    top = f"KIT-{version}"
+    problems = []
+    if tops != {top}:
+        problems.append(f"top-level folders {sorted(tops)}, not just {top}")
+    for need in NEEDED:
+        if not any(n == f"{top}/{need}" or n.startswith(f"{top}/{need}") for n in names):
+            problems.append(f"{need} is missing")
+    if comment.lower() != commit.lower():
+        problems.append(f"the zip comment is {comment!r}, not the commit")
+    with zipfile.ZipFile(path) as z:
+        if f"{top}/VERSION" in names and z.read(f"{top}/VERSION").decode().strip() != version:
+            problems.append("its VERSION file doesn't say " + version)
+    return problems
+
+
+def sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-release", description=__doc__.split("\n\n")[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
+    ap.add_argument("version")
+    ap.add_argument("--date", help="the release date (YYYY-MM-DD; default today)")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--out", help="where the zip goes (default dist/ in the clone)")
+    ap.add_argument("--no-zip", action="store_true", help="commit and tag only")
+    ap.add_argument("--repo", help="the clone (default: the one this tool is in)")
+    ap.add_argument("--trailer", action="append", default=[], help="a line for the end of the commit message")
+    ap.add_argument("--build-docs", help="a command that rebuilds docs/'s Word and PDF copies (run after the edits)")
+    a = ap.parse_args(argv)
+    try:
+        version = a.version.lstrip("v")
+        version_tuple(version)
+        date = dt.date.fromisoformat(a.date) if a.date else dt.date.today()
+        repo = pathlib.Path(a.repo).expanduser().resolve() if a.repo else pathlib.Path(__file__).resolve().parents[2]
+        if not (repo / ".git").exists():
+            raise Stop(f"{repo} isn't a git clone: run kit-release from your clone of Kit, not the installed copy")
+        for need in ("VERSION", "CHANGELOG.md", "kit", "shared"):
+            if not (repo / need).exists():
+                raise Stop(f"{repo} isn't Kit's repository ({need} is missing)")
+        branch = git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+        if branch == "HEAD":
+            raise Stop("not on a branch (detached HEAD): check out the branch to release from")
+        dirty = git(repo, "status", "--porcelain", "--untracked-files=no")
+        if dirty:
+            raise Stop("there are uncommitted changes; commit or stash them first:\n" + dirty[:600])
+        if git(repo, "tag", "--list", f"v{version}"):
+            raise Stop(f"tag v{version} already exists")
+        cur, body, bullets, edits = plan(repo, version, date)
+    except (Stop, ValueError, OSError) as ex:
+        print(f"kit-release: {ex}", file=sys.stderr)
+        return 1
+
+    lines = summary(body)
+    msg = (f"Release {version}\n\nVERSION {cur} -> {version}: {len(bullets)} change(s) from the changelog's Unreleased "
+           "section.\n" + "\n".join(lines) + "\n"
+           + ("\n" + "\n".join(a.trailer) + "\n" if a.trailer else ""))
+    out_dir = pathlib.Path(a.out).expanduser().resolve() if a.out else repo / "dist"
+    stale_docs = [p for p in sorted((repo / "docs").glob("*.md")) if p.with_suffix(".docx").exists()
+                  and str(p.relative_to(repo).as_posix()) in edits]
+    print(f"kit-release: {cur} -> {version} on {branch}, dated {date:%d-%b-%Y}")
+    for f in edits:
+        print(f"  edit {f}")
+    if a.dry_run:
+        print("\nCommit message:\n" + "\n".join("  " + ln for ln in msg.splitlines()))
+        print(f"\nThen: tag v{version}" + ("" if a.no_zip else f", and build {out_dir}/KIT-{version}-<commit>.zip"))
+        print("kit-release: dry run; nothing changed")
+        return 0
+
+    before = {f: (repo / f).read_bytes() for f in edits}
+    committed = False
+    try:
+        for f, text in edits.items():
+            (repo / f).write_bytes(text.encode("utf-8"))
+        if a.build_docs:
+            r = subprocess.run(a.build_docs, shell=True, cwd=str(repo), capture_output=True, text=True)
+            if r.returncode != 0:
+                raise Stop(f"--build-docs failed (exit {r.returncode}): {(r.stderr or r.stdout).strip()[-300:]}")
+            changed = [ln[3:] for ln in git(repo, "status", "--porcelain", "--", "docs").splitlines() if ln[3:]]
+            built = [c for c in changed if c not in edits]
+            git(repo, "add", "--", "docs")
+            stale_docs.clear()
+            print(f"  rebuilt {len(built)} file(s) in docs/")
+        git(repo, "add", "--", *edits)
+        git(repo, "commit", "-q", "-m", msg)
+        committed = True
+        commit = git(repo, "rev-parse", "HEAD")
+        git(repo, "tag", "-a", f"v{version}", "-m", f"Kit {version}")
+    except Stop as ex:
+        if not committed:
+            for f, data in before.items():
+                (repo / f).write_bytes(data)
+            git(repo, "reset", "-q", "--", *edits, check=False)
+            if a.build_docs:
+                git(repo, "reset", "-q", "--", "docs", check=False)
+                git(repo, "checkout", "--", "docs", check=False)
+            print(f"kit-release: {ex}\nkit-release: the edits were put back; nothing was committed", file=sys.stderr)
+        else:
+            print(f"kit-release: {ex}\nkit-release: the release commit is made but not tagged; tag it with "
+                  f"git tag -a v{version} -m \"Kit {version}\"", file=sys.stderr)
+        return 1
+    short = commit[:7]
+    print(f"kit-release: committed {short} and tagged v{version}")
+    if a.no_zip:
+        print("kit-release: no zip (--no-zip)")
+    else:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        zpath = out_dir / f"KIT-{version}-{short}.zip"
+        try:
+            git(repo, "archive", "--format=zip", f"--prefix=KIT-{version}/", "-o", str(zpath), f"v{version}^{{commit}}")
+        except Stop as ex:
+            print(f"kit-release: {ex}", file=sys.stderr)
+            return 1
+        with zipfile.ZipFile(zpath) as z:
+            has_comment = z.comment.decode("ascii", "replace").strip().lower() == commit.lower()
+        if not has_comment:                     # older git wrote no comment for a tag: write the commit, as INSTALL.md says
+            with zipfile.ZipFile(zpath, "a") as z:
+                z.comment = commit.encode("ascii")
+        problems = check_zip(zpath, version, commit)
+        if problems:
+            print("kit-release: the zip doesn't look right: " + "; ".join(problems), file=sys.stderr)
+            return 1
+        digest = sha256(zpath)
+        (out_dir / f"{zpath.name}.sha256").write_text(f"{digest}  {zpath.name}\n", encoding="utf-8")
+        print(f"kit-release: built {zpath}")
+        print(f"SHA-256: {digest}")
+        print(f"Check it like an adopter will: kit-update --zip {zpath} --sha256 {digest}")
+    if stale_docs:
+        print("kit-release: rebuild the Word and PDF copies of " + ", ".join(p.name for p in stale_docs)
+              + f" (they still describe the version before {version}), then commit them")
+    print(f"kit-release: nothing was pushed. When you're ready: git push --follow-tags")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -13,6 +13,10 @@
   kit-expiry renewed NAME [--to DATE]   renewed: the date moves on by its period (--every), or to DATE
   kit-expiry remove NAME
   kit-expiry --json [--live]       the list as JSON
+  kit-expiry tokens [--add] [--warn DAYS] [--lifetime 90d]
+                                   the credentials Kit's connectors name (connector-guard.json's credential_env,
+                                   plus kit-claude-token) and whether each is tracked; --add tracks the missing
+                                   ones as Keychain items (below)
   kit-expiry --help                this help
 
 Nothing goes over the network unless you add --live: without it, a "check" item shows the date its last
@@ -33,12 +37,27 @@ The list is ~/Claude/Agents/kit/expiry.json, which stays on this computer:
    ]}
 
 An item has a fixed "expires" date, a "check" that looks it up live ("cert": the HTTPS certificate on
-"host"; "domain": the registry's expiry date for "domain", over RDAP), or no date yet ("expires": null),
+"host"; "domain": the registry's expiry date for "domain", over RDAP; "keychain", below), or no date yet ("expires": null),
 which lists it as needing a date without counting it as a problem. A live lookup that fails falls back
 to the last date it found, and says so. "every" (1y, 2y, 6m, 90d) is how far `renewed` moves the date.
 "side": "work" marks a work item. Health items are Kit's own: those with a "check", those whose "kind"
 is token, login, key, domain, or certificate, and those with no "kind" (older lists). Every other
 kind is a renewal for the brief. KIT_DIR overrides the Kit folder (for tests). Cross-platform.
+
+Credential expiry ("check": "keychain"): a token's date comes from its Keychain entry's metadata, by entry
+name, never its value (`security find-generic-password -s ENTRY`, without -w, so nothing prompts):
+
+  {"name": "Jira token", "check": "keychain", "entry": "JIRA_PERSONAL_TOKEN", "lifetime": "90d",
+   "side": "work", "warn_days": 14, "renew": "a new personal access token in Jira, then store it again"}
+
+  1. the entry's comment, when it holds a date ("expires 2027-01-31"). Store a token with its date:
+       security add-generic-password -U -s JIRA_PERSONAL_TOKEN -a "$USER" -j "expires 2027-01-31" -w
+  2. else "lifetime" counted from when the entry was last changed (its modification date)
+  3. else the item's own "expires", set with kit-expiry set (Windows: Credential Manager keeps no comment or
+     date, so this is the only source there)
+It's read with no network, so the morning brief and the health check always have it. Unlike other health
+items, a token due inside its warning window also goes in the brief's Renewals, with a to-do, so it's renewed
+before Jira, Confluence, or PPM Express calls start failing.
 """
 import calendar
 import datetime as dt
@@ -51,6 +70,9 @@ import socket
 import ssl
 import subprocess
 import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import kit_secrets  # noqa: E402  (shared/kit_secrets.py: Keychain metadata by name)
 
 KIT = pathlib.Path(os.path.expanduser(os.environ.get("KIT_DIR", "~/Claude/Agents/kit")))
 LIST = KIT / "expiry.json"
@@ -158,10 +180,40 @@ def find(cfg, name):
     raise LookupError(f"{name!r} matches {len(hits)} items: " + "; ".join(i["name"] for i in hits))
 
 
+DATE_IN = re.compile(r"(\d{4}-\d{2}-\d{2}|\d{1,2}-[A-Za-z]{3}-\d{4}|\d{1,2}/\d{1,2}/\d{2,4})")
+
+
+def keychain_expiry(item):
+    """(date or None, note) for a "keychain" item, from its entry's metadata; no network, no secret read."""
+    entry = item.get("entry") or ""
+    meta = kit_secrets.metadata(entry)
+    if meta:
+        m = DATE_IN.search(meta.get("comment") or "")
+        if m:
+            try:
+                return parse_date(m.group(1)), "from its Keychain comment"
+            except ValueError:
+                pass
+        if item.get("lifetime") and meta.get("modified"):
+            return add_period(meta["modified"], item["lifetime"]), \
+                f"{item['lifetime']} from when it was stored ({meta['modified']:%d-%b-%Y})"
+    if item.get("expires"):
+        return dt.date.fromisoformat(item["expires"]), "set by hand"
+    if kit_secrets.STORE == "Keychain" and meta is None:
+        return None, f"no Keychain entry {entry}"
+    if kit_secrets.STORE == "Keychain":
+        return None, (f"no date: store {entry} with -j \"expires YYYY-MM-DD\", give the item a lifetime, "
+                      "or kit-expiry set")
+    return None, "no date: kit-expiry set NAME DATE (Credential Manager keeps none)"
+
+
 def resolve(item, cache):
     """(date or None, note) for one item."""
     key = item["name"]
     try:
+        if item.get("check") == "keychain":
+            d, note = keychain_expiry(item)
+            return d, ("" if d and note.startswith("from its") else note)
         if item.get("expires"):
             return dt.date.fromisoformat(item["expires"]), ""
         if item.get("check") == "cert":
@@ -183,7 +235,7 @@ def rows_for(cfg, today, live=True):
     cache = json.loads(CACHE.read_text(encoding="utf-8-sig")) if CACHE.exists() else {}
     rows = []
     for item in cfg.get("items", []):
-        if not live and item.get("check"):
+        if not live and item.get("check") and item.get("check") != "keychain":
             d = dt.date.fromisoformat(cache[item["name"]]) if item["name"] in cache else None
             note = "" if d else "not looked up yet: kit-expiry --live"
         else:
@@ -265,7 +317,7 @@ def cmd_brief(argv):
     changed = False
     for r in rows_for(cfg, dt.date.today(), live=False):
         item, d, left, state = r["item"], r["date"], r["left"], r["state"]
-        if is_health(item) or state not in ("EXPIRED", "SOON"):
+        if (is_health(item) and item.get("check") != "keychain") or state not in ("EXPIRED", "SOON"):
             continue
         tag = "[work] " if is_work(item) else ""
         word = "EXPIRED" if state == "EXPIRED" else "DUE"
@@ -335,7 +387,7 @@ def cmd_set(argv):
     date = parse_date(argv[-1])
     cfg = load()
     item = find(cfg, " ".join(argv[:-1]))
-    if item.get("check"):
+    if item.get("check") and item.get("check") != "keychain":
         raise ValueError(f"{item['name']} is looked up live; it has no date to set")
     item["expires"] = date.isoformat()
     item.pop("queued", None)
@@ -349,7 +401,10 @@ def cmd_renewed(argv):
     to = opt(argv, "--to")
     cfg = load()
     item = find(cfg, " ".join(argv))
-    if item.get("check"):
+    if item.get("check") == "keychain" and not to:
+        raise ValueError(f"{item['name']}'s date comes from its Keychain entry: store the new token with its "
+                         f"date (-j \"expires YYYY-MM-DD\"), or give --to DATE")
+    if item.get("check") and item.get("check") != "keychain":
         raise ValueError(f"{item['name']} is looked up live; nothing to mark")
     if to:
         new = parse_date(to)
@@ -389,8 +444,68 @@ def cmd_json(argv):
     return 0
 
 
+def credential_names():
+    """{entry: [servers]} for the credentials Kit's connectors name, plus kit-claude-token."""
+    out = {}
+    try:
+        cfg = json.loads((KIT / "memory/context/connector-guard.json").read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        cfg = {}
+    for server, names in ((cfg.get("credential_env") or {}) if isinstance(cfg, dict) else {}).items():
+        for n in (names if isinstance(names, list) else [names]):
+            if isinstance(n, str) and re.fullmatch(r"[A-Za-z0-9_.-]+", n):
+                out.setdefault(n, []).append(server)
+    out.setdefault("kit-claude-token", [])
+    return out
+
+
+def cmd_tokens(argv):
+    argv = list(argv)
+    warn = int(opt(argv, "--warn", "14"))
+    lifetime = opt(argv, "--lifetime")
+    if lifetime:
+        add_period(dt.date.today(), lifetime)   # validates
+    add = "--add" in argv
+    cfg = load()
+    tracked = {i.get("entry"): i for i in cfg.get("items", []) if i.get("check") == "keychain"}
+    names = credential_names()
+    added = []
+    for entry, servers in sorted(names.items()):
+        where = kit_secrets.where(entry) or "not stored"
+        item = tracked.get(entry)
+        if item:
+            d, note = keychain_expiry(item)
+            state = f"{d:%d-%b-%Y} ({days_text((d - dt.date.today()).days)})" if d else note
+            print(f"tracked   {entry:<28} {state}  [{item['name']}]")
+            continue
+        if entry == "kit-claude-token" and where == "not stored":
+            continue
+        print(f"untracked {entry:<28} {where}" + (f"  (used by {', '.join(servers)})" if servers else ""))
+        if add:
+            label = (f"{', '.join(servers)} token" if servers else "Claude token for scheduled runs")
+            new = {"name": f"{label} ({entry})", "kind": "token", "check": "keychain", "entry": entry,
+                   "warn_days": warn, "renew": (f"make a new token, then: security add-generic-password -U -s {entry} "
+                                                f"-a \"$USER\" -j \"expires YYYY-MM-DD\" -w")}
+            if entry == "kit-claude-token":
+                new["renew"] = ("claude setup-token, then: security add-generic-password -U -s kit-claude-token "
+                                "-a \"$USER\" -j \"expires YYYY-MM-DD\" -w")
+                new["lifetime"] = lifetime or "1y"
+            else:
+                new["side"] = "work"
+                if lifetime:
+                    new["lifetime"] = lifetime
+            cfg.setdefault("items", []).append(new)
+            added.append(new["name"])
+    if added:
+        save(cfg)
+        print(f"Tracking {len(added)} more: " + "; ".join(added))
+    elif add:
+        print("Nothing to add: every credential is tracked.")
+    return 0
+
+
 def main(argv):
-    cmds = {"brief": cmd_brief, "missing": cmd_missing, "add": cmd_add, "set": cmd_set,
+    cmds = {"tokens": cmd_tokens, "brief": cmd_brief, "missing": cmd_missing, "add": cmd_add, "set": cmd_set,
             "renewed": cmd_renewed, "remove": cmd_remove}
     if argv[:1] in (["--help"], ["-h"], ["help"]):
         print(__doc__)

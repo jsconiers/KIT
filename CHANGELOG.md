@@ -59,6 +59,56 @@ versions follow [semantic versioning](https://semver.org).
   alone unless `--reinstall` (tests/test_kit_update_zip.py, on Linux and Windows). `kit-version` shows
   when the install came from a zip.
 
+- `kit-release VERSION`, release cutting in one step from a clean clone: bumps VERSION, dates the CHANGELOG
+  heading and the docs' "Describes" and "Date" rows, commits "Release VERSION" with the changes summarised, tags
+  vVERSION, builds `dist/KIT-VERSION-<commit>.zip` with `git archive` (the commit in the zip comment, checked the
+  way `kit-update --zip` expects), and prints and saves its SHA-256. `--dry-run` changes nothing; it never pushes,
+  puts the edits back if the commit fails, and says when the Word and PDF copies of the docs need rebuilding
+  (tests/test_release.py).
+- `kit-wins month`, a one-page "what Kit did this month" for leadership updates and AI Wins: work finished (the
+  accomplishments log, plus source items `collect` hasn't added yet), highlights, work by theme, and Kit's
+  scheduled runs and estimated cost against the month before. Work run kinds are named (`MONTH_REPORT_MODES`);
+  every other run is one "other runs" line, so nothing personal shows. `--write` saves `briefs/kit-month-YYYY-MM.md`
+  and a print-ready HTML page; `--json` (tests/test_wins_month.py).
+- A health score badge on the dashboard: one number, 0 to 100, from connectors (the morning check), runs (7 days,
+  less open run alerts), audit (findings and open integrity alerts), and open setup questions (fields not set in
+  the setup files the agents name), 25 points each; the Health panel lists the parts and where points went, and
+  `doctor.py --score [--json]` explains it. An owner's dashboard template from before gets the badge anyway
+  (shared/kit_health.py, tests/test_health_score.py).
+- Credential expiry tracking: a `keychain` item in `expiry.json` takes its date from its Keychain entry's metadata,
+  by name only and never its value (the comment's date, as stored with `-j "expires YYYY-MM-DD"`, else a lifetime
+  from the entry's last change, else a date set by hand, which is the only source on Windows). `kit-expiry tokens
+  [--add]` lists the credentials connector-guard.json names and tracks the missing ones. A token inside its
+  warning window goes in the brief's Renewals with a to-do, so the brief warns before Jira, Confluence, or PPM
+  Express tokens lapse (`kit_secrets.metadata`, tests/test_expiry_tokens.py).
+- The review loop in one click: `kit-settings ui` has a Review loop section listing the library's projects with
+  their score and links to their notes, decisions, and feedback (opened read-only, Markdown inside that project
+  only). Start confirms the paid runs with their estimated cost, then runs `kit-review-loop run --yes` in the
+  background, one at a time, with its progress and the notes it saved; Merge writes the decisions file. The
+  dashboard's new Reviews panel shows each project's score and links each result (tests/test_review_ui.py).
+- IA and GDS readiness scoring: `kit-review-loop score PROJECT [--draft FILE] [--json]` gives one "ready for ARB"
+  score from the latest reviewer, red team, threat model, and standards notes (100, less 12 per open must fix, 4
+  per should fix, 1 per nit, and 15 per missing review; what the latest decisions file rejected is left out).
+  Ready needs all four notes, no must fix, notes newer than the latest draft, and `READINESS_THRESHOLD` (80);
+  `status` lists every project's (tests/test_review_loop.py).
+- `kit-trace PROJECT --xlsx [FILE]`: the traceability matrix as an Excel workbook for reviewers, IA requirements,
+  then GDS sections, then test cases and change steps, with gaps shaded, empty Reviewer status and Reviewer notes
+  columns, and sheets for the gaps, orphan test cases, IDs not in the IA, and a summary. Written by a new
+  standard-library writer, `shared/kit_xlsx.py`, so no Excel or openpyxl is needed (tests/test_trace_xlsx.py).
+- The ticket watcher: with `TICKET_WATCH="on"`, the morning brief has the gateway search the service-management
+  connector (`TICKET_SERVER`, `TICKET_TOOLS`, `TICKET_QUERY`) read-only for your own tickets, and `kit-tickets diff`
+  reports what changed since yesterday in a "Your tickets" section: new tickets, state and priority changes,
+  reassignments, updates, and tickets that left the search. Read-only tools are chosen with connector-guard's own
+  rules, as for the demand refresh; ticket text is cut to one line with addresses masked, and the short text gets
+  numbers only. Off by default; macOS and Windows (shared/morning/ticket_watch.py, prompt-tickets.md,
+  tests/test_tickets.py).
+- The long-session token watchdog, `kit-mcp-watch`: PostToolUse and PostToolUseFailure hooks on MCP calls (added to
+  `~/.claude/settings.json` by the installer, removed by the uninstaller) notice a connector whose session went
+  stale or whose sign-in lapsed (OneNote's long-session drop, say), log it, and tell Claude to stop retrying and
+  ask you to Reconnect or Authenticate in `/mcp`, once per server per session every 30 minutes. The brief lists
+  them under "Connector sessions"; `status` shows what it saw. It never blocks a call or reads a token, and it
+  suggests rather than reconnects, since only `/mcp` can (`MCP_WATCH`, tests/test_mcp_watch.py).
+
 ### Changed
 - The red team, threat modeler, and standards checker save a copy of each note, under the same file
   name, in the project's `reviews/` folder as well as their own (`red-team/`, `threat-model/`,

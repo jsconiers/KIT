@@ -23,6 +23,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import kit_template  # noqa: E402  (shared/kit_template.py)
 import kit_queue  # noqa: E402  (shared/kit_queue.py)
 import kit_settings  # noqa: E402  (shared/kit_settings.py: the Settings panel)
+import kit_health  # noqa: E402  (shared/kit_health.py: the health score badge)
 
 # strftime no-pad hour: glibc/BSD use %-I, the Windows CRT uses %#I.
 HOUR = "%#I" if os.name == "nt" else "%-I"
@@ -41,11 +42,11 @@ FALLBACK = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta http-equiv="refresh" content="300">
 <title>Kit</title><style>body{font:16px/1.5 system-ui,Arial,sans-serif;margin:1.5rem;max-width:70rem}
 .banner{background:#7a0000;color:#fff;padding:.6rem 1rem}section{margin-top:1.5rem}</style></head>
-<body><h1>Kit</h1><p><time datetime="$now_iso">$now_text</time> (built-in page: no template found)</p>
+<body><h1>Kit</h1>$health_badge<p><time datetime="$now_iso">$now_text</time> (built-in page: no template found)</p>
 $audit_banner<div>$hero</div>$lane_you $lane_kit $lane_wait
 <section><h2>Today</h2>$schedule</section><section><h2>Briefs</h2>$briefs</section>
-<section><h2>Health</h2><ul>$health_checks</ul><table><thead><tr><th></th>$runs_head</tr></thead><tbody>$runs_rows</tbody></table></section>
-<section><h2>Sprint</h2>$sprint</section><section><h2>Reliability</h2>$reliability</section><section><h2>Audit</h2>$audit</section><section><h2>Kit's staff</h2><ul>$staff</ul></section>
+<section><h2>Health</h2>$health_score<ul>$health_checks</ul><table><thead><tr><th></th>$runs_head</tr></thead><tbody>$runs_rows</tbody></table></section>
+<section><h2>Sprint</h2>$sprint</section><section><h2>Reviews</h2>$reviews</section><section><h2>Reliability</h2>$reliability</section><section><h2>Audit</h2>$audit</section><section><h2>Kit's staff</h2><ul>$staff</ul></section>
 <section id="settings"><h2>Settings</h2>$settings</section>
 </body></html>
 """
@@ -524,9 +525,62 @@ def sprint_panel():
             + burndown_svg(sp, total, hist) + f'<ul class="strips">{rows}</ul>')
 
 
+def health_score():
+    """(badge, Health panel lines, score dict): the one-number health score (shared/kit_health.py)."""
+    try:
+        res = kit_health.score(KIT, TODAY)
+        return kit_health.badge(res), kit_health.panel(res), res
+    except Exception as ex:  # noqa: BLE001  (the score must never stop the page)
+        return "", f'<p class="empty">Health score couldn\'t be worked out: {e(str(ex)[:120])}</p>', None
+
+
+def add_badge(page, badge):
+    """A template from before the health badge has no $health_badge: put it just after the page's first heading."""
+    i = page.find("</h1>")
+    return page[:i + 5] + badge + page[i + 5:] if i >= 0 and badge else page
+
+
+def reviews_panel():
+    """The Reviews panel: each project with review notes, its readiness for the review board, and links to the
+    notes and decisions (kit-review-loop status). Run the loop from kit-settings ui's Review loop section."""
+    import importlib.machinery, importlib.util
+    path = KIT / ".install/shared/bin/kit-review-loop"
+    if not path.exists():
+        path = pathlib.Path(__file__).resolve().parent / "bin/kit-review-loop"
+    if not path.exists():
+        return '<p class="empty">kit-review-loop isn\'t installed.</p>'
+    try:
+        loader = importlib.machinery.SourceFileLoader("kit_review_loop_dash", str(path))
+        spec = importlib.util.spec_from_loader("kit_review_loop_dash", loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        projects = mod.status_all(limit=8)
+    except Exception as ex:  # noqa: BLE001
+        return f'<p class="empty">Reviews couldn\'t be read: {e(str(ex)[:120])}</p>'
+    if not projects:
+        return ('<p class="empty">No review notes yet. Start a review loop from <code>kit-settings ui</code> '
+                '(Review loop), or run <code>kit-review-loop run PROJECT DRAFT</code>.</p>')
+    rows = ""
+    for p in projects:
+        sc = p["score"]
+        cls = "" if sc["verdict"] == "ready" else " soon" if sc["verdict"] == "almost" else " late"
+        links = " ".join(f'<a href="{e(pathlib.Path(n["path"]).as_uri())}">{e(n["label"])}</a>' for n in p["links"])
+        rows += (f'<li class="strip"><p class="strip-title">{e(p["project"])}</p><div class="meta">'
+                 f'<span class="tag{cls}">{e(sc["headline"])}</span>'
+                 f'<span class="added">last review {e(p["last"])}</span></div>'
+                 + (f'<ul class="detail"><li>{links}</li></ul>' if links else "") + "</li>")
+    return (f'<ul class="strips">{rows}</ul><p class="meta">Run the loop in one click from <code>kit-settings ui</code> '
+            '(Review loop); <code>kit-review-loop score PROJECT</code> explains a score.</p>')
+
+
 def add_settings(page, panel):
     """A template from before the Settings panel has no $settings: add the panel at the end of its main area."""
-    block = f'<section class="panel" id="settings" aria-labelledby="p-settings"><h2 id="p-settings">Settings</h2>{panel}</section>'
+    return add_panel(page, "settings", "Settings", panel)
+
+
+def add_panel(page, pid, title, panel):
+    """Add a panel at the end of the template's main area (for sections newer than the template)."""
+    block = f'<section class="panel" id="{pid}" aria-labelledby="p-{pid}"><h2 id="p-{pid}">{title}</h2>{panel}</section>'
     for mark in ("</main>", "</body>"):
         i = page.rfind(mark)
         if i >= 0:
@@ -550,6 +604,7 @@ def main(argv):
         f'<li class="check {c[0]}"><span class="light" aria-label="{c[0]}"></span>'
         f'<span class="cname">{e(c[1])}</span><span class="cdetail">{e(c[2])}</span></li>'
         for c in (bad + [c for c in checks if c[0] == "ok"]))
+    badge, score_html, _score = health_score()
     audit_banner, audit_html = audit()
     audit_banner = state_banners() + audit_banner
     grid = runs()
@@ -574,15 +629,28 @@ def main(argv):
         "schedule": schedule(), "briefs": brief_text(), "health_checks": health_html,
         "runs_head": head, "runs_rows": rows, "audit": audit_html, "staff": staff(),
         "sprint": sprint_panel(), "reliability": reliability_panel(),
+        "health_badge": badge, "health_score": score_html, "reviews": reviews_panel(),
     }
     tpl = kit_template.find("dashboard.html", template_arg, "KIT_DASHBOARD_TEMPLATE")
     text = tpl.read_text(encoding="utf-8") if tpl else FALLBACK
     settings = kit_settings.dashboard_panel(KIT)
     if re.search(r"\$\{?settings\b", text):
         values["settings"] = settings
+    # Sections added after a template was copied: put them in anyway, so an owner's copy still shows them.
+    late = {k: values.pop(k) for k in ("health_badge", "health_score", "reviews")
+            if not re.search(r"\$\{?" + k + r"\b", text)}
+    if "health_score" in late and _score:
+        values["health_checks"] = "".join(
+            f'<li class="check {"ok" if p["score"] >= p["max"] * 0.9 else "warn" if p["score"] >= p["max"] * 0.7 else "fail"}">'
+            f'<span class="light"></span><span class="cname">Health score: {e(p["name"])} {p["score"]:g}/{p["max"]:g}</span>'
+            f'<span class="cdetail">{e(p["detail"])}</span></li>' for p in _score["parts"]) + values["health_checks"]
     page = kit_template.render(text, values, str(tpl) if tpl else "built-in page")
     if "settings" not in values:
         page = add_settings(page, settings)
+    if "health_badge" in late:
+        page = add_badge(page, late["health_badge"])
+    if "reviews" in late:
+        page = add_panel(page, "reviews", "Reviews", late["reviews"])
     OUT.write_text(page)
     if "--open" in argv:
         if os.name == "nt":

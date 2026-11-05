@@ -56,7 +56,11 @@ For installing and configuring, see INSTALL.md; for how the pieces fit, see DESI
 | `kit-quality` | Python 3.8 | Same code | Recurring findings are spotted by hand |
 | `kit-refarch` | Python 3.8; a reference-architecture index in the library | Same code | Match by hand with kit-precedent |
 | `kit-sysprofile` | Python 3.8; the library root | Same code | Assemble profiles by hand |
-| `kit-trace` | Python 3.8; the project's IA (Markdown or .docx), plus its GDS, test plan, and change request when they exist | Same code | Trace requirements by hand in the template |
+| `kit-trace` | Python 3.8; the project's IA (Markdown or .docx), plus its GDS, test plan, and change request when they exist; `--xlsx` uses `shared/kit_xlsx.py` (standard library) | Same code | Trace requirements by hand in the template |
+| `kit-release` | Python 3.8; git; a clone of the repository | Same code | Bump VERSION, the changelog, and the docs by hand, then `git archive` and `shasum -a 256` (INSTALL.md) |
+| `kit-tickets`, `ticket_watch.py` | Python 3.8; the gateway agent and a service-management connector (MCP server) in connector-guard.json for the morning run | Same code | No "Your tickets" section; ask the gateway in a session |
+| `kit-mcp-watch` | Python 3.8; `kit-hook`; Claude Code hooks in `~/.claude/settings.json` (the installer adds them) | Same code (hooks run in Git Bash on Windows) | Stale connector sessions show up only as failing calls; reconnect with `/mcp` |
+| `kit_health.py` (`doctor.py --score`) | Python 3.8; kit-reliability | Same code | No health badge; read the Health panel's checks |
 | `kit-controls` | Python 3.8; `shared/data/nist-800-53r5.json` (NIST, public domain), `mitre-attack-enterprise.json` (MITRE ATT&CK, MITRE licence and notice), `attack-to-800-53.json` (CTID Mappings Explorer, Apache 2.0) | Same code | Look up controls in the published catalogs by hand |
 | `kit-exceptions` | Python 3.8; compliance.md's Exception register (or the default location) | Same code | Keep the register by hand from the template |
 | `kit-pbc` | Python 3.8; compliance.md's PBC tracker; kit-audit-export for gather | Same code | Track requests by hand from the template |
@@ -74,7 +78,7 @@ For installing and configuring, see INSTALL.md; for how the pieces fit, see DESI
 | `kit-viewpoints` | Python 3.8; kit-drawio; pdftotext for PDFs (optional) | Same code | Draw the viewpoints by hand |
 | `kit-sizing` | Python 3.8 | Same code | Size by hand from the template |
 | `kit-diagram-diff` | Python 3.8 | Same code | Compare diagrams by eye |
-| `kit-wins` | Python 3.8 | Same code | Wins collected by hand |
+| `kit-wins` | Python 3.8; kit-cost's ledger for `month` | Same code | Wins collected by hand |
 | `kit-oneonone` | Python 3.8 | Same code | Prep by hand |
 | `kit-meetprep` | Python 3.8; a calendar JSON command (kitmail calendar --json) | Same code; launchd template macOS only | No prep packs |
 | `kit-triage` | Python 3.8; kitmail inbox output | Same code | No triage suggestions |

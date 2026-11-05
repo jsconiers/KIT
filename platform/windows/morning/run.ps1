@@ -520,6 +520,14 @@ if ($Mode -eq "morning" -or $Mode -eq "weekly") {
             if ($hrc -ne 0 -or -not (Test-NonEmpty $out)) { Remove-Item -LiteralPath $out -Force -ErrorAction SilentlyContinue }
         }
     }
+    # Connector sessions (MCP_WATCH, default on): kit-mcp-watch brief lists connectors whose session went stale or
+    # whose sign-in lapsed in your Claude Code sessions in the last day, with how to reconnect. Nothing when all's well.
+    $kitWatch = Join-Path $binDir "kit-mcp-watch"
+    if ((Cfg "MCP_WATCH" "on") -ne "off" -and (Test-Path -LiteralPath $kitWatch)) {
+        $watchTxt = Join-Path $briefsDir "extra-mcp-watch.txt"
+        $wrc = Invoke-KitPy $kitWatch @("brief") 60 $watchTxt
+        if ($wrc -ne 0 -or -not (Test-NonEmpty $watchTxt)) { Remove-Item -LiteralPath $watchTxt -Force -ErrorAction SilentlyContinue }
+    }
     # PPM Express pulse (PPMX_PULSE="on"; off by default): on PPMX_PULSE_DAY's morning brief (1, Monday, by
     # default), kit-ppmx pulse adds what changed in PPM Express since last week: projects that turned At Risk
     # or Critical, key dates that slipped, are overdue, or come due, and what else changed. Read only, no
@@ -616,6 +624,34 @@ if ($Mode -eq "weekly" -and (Cfg "DEMAND_REFRESH" "off") -eq "on") {
     }
     Remove-Item -LiteralPath $demandOut -Force -ErrorAction SilentlyContinue
 }
+# Ticket watcher (TICKET_WATCH="on" in the config; off by default): the morning brief has the gateway search the
+# service-management connector (TICKET_SERVER) read-only, under its connector-guard hooks, for your own tickets
+# (TICKET_QUERY), and kit-tickets diff reports what changed since yesterday in a "Your tickets" section.
+# ticket_watch.py (no connector or model call) picks the read-only tools the way the demand refresh does.
+$ticketRules = @()
+$ticketPy = Join-Path $ShareDir "ticket_watch.py"
+if ($Mode -eq "morning" -and (Cfg "TICKET_WATCH" "off") -eq "on" -and $null -ne $pyc -and (Test-Path -LiteralPath $ticketPy)) {
+    Remove-Item -LiteralPath (Join-Path $KitHome "briefs\tickets-today.json") -Force -ErrorAction SilentlyContinue
+    $ticketOut = Join-Path $LogDir ".ticket-watch-$PID.txt"
+    # --key=value keeps an empty setting from being dropped as an argument.
+    $ticketLines = @(& $pyc.Exe @($pyc.Args + @($ticketPy,
+        "--server=$(Cfg 'TICKET_SERVER' '')", "--tools=$(Cfg 'TICKET_TOOLS' '')", "--query=$(Cfg 'TICKET_QUERY' '')",
+        "--max=$(Cfg 'TICKET_MAX' '40')", "--days=$(Cfg 'TICKET_DAYS' '14')", "--timeout=$Timeout",
+        "--cost-level=$CostLevel", "--owner=$OwnerName", "--home=$($env:USERPROFILE)", "--python=python",
+        "--prompt=$(Join-Path $ShareDir 'prompt-tickets.md')", "--out=$ticketOut")) 2>$null)
+    $first = if ($ticketLines.Count -gt 0) { "$($ticketLines[0])".Trim() } else { "skip (ticket_watch.py failed)" }
+    if ($first -eq "on") {
+        $ticketRules = @($ticketLines | Select-Object -Skip 1 | ForEach-Object { "$_".Trim() } | Where-Object { $_ -ne "" })
+        Write-Log "== $(Get-Date) morning: ticket watcher on ($(Cfg 'TICKET_SERVER' ''), $($ticketRules.Count) allowed-tool rules added)"
+    } else {
+        Write-Log "== $(Get-Date) morning: ticket watcher $first"
+    }
+    if (Test-Path -LiteralPath $ticketOut) {
+        $ticketText = "$(Get-Content -LiteralPath $ticketOut -Raw)".TrimEnd()
+        if ($ticketText -ne "") { $promptText += "`n`n" + $ticketText }
+    }
+    Remove-Item -LiteralPath $ticketOut -Force -ErrorAction SilentlyContinue
+}
 # Monthly regulatory watch (REG_WATCH="on" in the config; off by default): on the first weekly review
 # of each month (first Monday; REG_WATCH_WHEN="every-run" for every weekly review), the researcher
 # writes a cited brief on last month's public changes to the regimes in compliance.md's "Regulatory
@@ -663,6 +699,7 @@ if ($Mode -eq "weekly") {
     # Any other run's extra tools: ALLOW_TOOLS_<MODE> (hyphens become underscores), same format.
     $modeTools = Cfg ("ALLOW_TOOLS_" + ($Mode.ToUpper() -replace '-', '_')) ""
     $allowed += @($modeTools -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
+    foreach ($r in @($ticketRules)) { if ($allowed -notcontains $r) { $allowed += $r } }
 }
 # A rule written with ~/ doesn't match a command the run spells with the full home path, so each
 # Bash rule with ~/ also gets a twin with the home folder spelled out (forward slashes).

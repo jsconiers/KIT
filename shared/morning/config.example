@@ -81,6 +81,24 @@ DEMAND_TOOLS=""
 DEMAND_REGISTER_DIR=""
 DEMAND_REFRESH_MAX="25"
 DEMAND_REFRESH_MIN_LEFT="10"
+# Ticket watcher (TICKET_WATCH="on"): the weekday morning brief has the gateway search your service-management
+# system read-only for your own tickets and says what changed since yesterday (new, state, priority, reassigned,
+# updated, gone), in a "Your tickets" section. TICKET_SERVER is the connector (MCP server) name, which must also be
+# in connector-guard.json's allowed_servers; TICKET_TOOLS lists its read-only search tools as full names separated by
+# semicolons (empty: the server's allow_tools entries). TICKET_QUERY says whose tickets, in words the gateway passes
+# on (empty: where you're the caller, the requester, or the assignee). TICKET_MAX caps the tickets checked and
+# TICKET_DAYS how far back closed ones count. kit-tickets show lists the last check. Off until a connector is set up.
+TICKET_WATCH="off"
+TICKET_SERVER=""
+TICKET_TOOLS=""
+TICKET_QUERY=""
+TICKET_MAX="40"
+TICKET_DAYS="14"
+# The long-session token watchdog (MCP_WATCH, on by default): hooks on your Claude Code sessions' MCP calls notice a
+# connector whose session went stale or whose sign-in lapsed, ask you to reconnect it (/mcp), and the brief lists
+# them. MCP_WATCH="off" makes the hooks do nothing. A session open MCP_WATCH_LONG_HOURS or more is called long.
+MCP_WATCH="on"
+MCP_WATCH_LONG_HOURS="8"
 # Monthly regulatory watch: on the first weekly review of each month (the first Monday), the
 # researcher writes a brief on last month's public changes to the regimes and topics in
 # compliance.md's "Regulatory watch" field (for example "SEC Reg SCI, CFTC, DORA, NYDFS 500, NIST"),

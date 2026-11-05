@@ -7,6 +7,8 @@
 #                   (EOD_MODEL="on" uses Claude and prompt-eod.md instead; EOD="off" skips it)
 # With DEMAND_REFRESH="on", the weekly review also has the demand tracker re-check the demands in
 # its register (demand_refresh.py, prompt-demand-refresh.md); off by default.
+# With TICKET_WATCH="on", the morning brief also has the gateway check your service-management tickets and
+# reports what changed (ticket_watch.py, prompt-tickets.md, kit-tickets); off by default.
 # With REG_WATCH="on", the first weekly review of each month also has the researcher write a
 # monthly regulatory watch (reg_watch.py, prompt-reg-watch.md); off by default.
 # With ARCH_DIGEST="on", the first weekly review of each month also has kit-digest draft last month's
@@ -246,6 +248,14 @@ if [ "$MODE" = "morning" ] || [ "$MODE" = "weekly" ]; then
     perl -e 'alarm shift; exec @ARGV' 60 "$hook" "$MODE" > "$out" 2>> "$LOG" || rm -f "$out"
     [ -s "$out" ] || rm -f "$out"
   done
+  # Connector sessions (MCP_WATCH, default on): kit-mcp-watch brief lists connectors whose session went stale or
+  # whose sign-in lapsed in your Claude Code sessions in the last day (its hooks log them), with how to reconnect.
+  # Nothing when all's well. No model or connector call.
+  if [ "${MCP_WATCH:-on}" != "off" ] && [ -f "$KIT/.install/shared/bin/kit-mcp-watch" ]; then
+    python3 "$KIT/.install/shared/bin/kit-mcp-watch" brief > briefs/extra-mcp-watch.txt 2>> "$LOG" \
+      || rm -f briefs/extra-mcp-watch.txt
+    [ -s briefs/extra-mcp-watch.txt ] || rm -f briefs/extra-mcp-watch.txt
+  fi
   # PPM Express pulse (PPMX_PULSE="on"; off by default): on PPMX_PULSE_DAY's morning brief (1, Monday, by
   # default), kit-ppmx pulse adds what changed in PPM Express since last week: projects that turned At Risk
   # or Critical, key dates that slipped, are overdue, or come due, and what else changed. Read only, no
@@ -326,6 +336,29 @@ if [ "$MODE" = "weekly" ] && [ "${DEMAND_REFRESH:-off}" = "on" ]; then
   fi
   rm -f "$DEMAND_OUT"
 fi
+# Ticket watcher (TICKET_WATCH="on" in the config; off by default): the morning brief has the gateway search the
+# service-management connector (TICKET_SERVER) read-only, under its connector-guard hooks, for your own tickets
+# (TICKET_QUERY), and kit-tickets diff reports what changed since yesterday in a "Your tickets" section.
+# ticket_watch.py (no connector or model call) picks the read-only tools the way the demand refresh does and gives
+# the prompt text plus the extra allowed tools. It's skipped, with a line in the brief, at the budget's stop level or
+# if the settings are incomplete.
+TICKET_RULES=()
+if [ "$MODE" = "morning" ] && [ "${TICKET_WATCH:-off}" = "on" ] && [ -f "$SHAREDIR/ticket_watch.py" ]; then
+  rm -f "$KIT/briefs/tickets-today.json"
+  TICKET_OUT="$LOGDIR/.ticket-watch-$$.txt"
+  TICKET_LINES=("${(@f)$(python3 "$SHAREDIR/ticket_watch.py" --server "${TICKET_SERVER:-}" \
+      --tools "${TICKET_TOOLS:-}" --query "${TICKET_QUERY:-}" --max "${TICKET_MAX:-40}" --days "${TICKET_DAYS:-14}" \
+      --timeout "$TIMEOUT" --cost-level "$COST_LEVEL" --owner "${OWNER_NAME:-the owner}" --home "$HOME" \
+      --prompt "$SHAREDIR/prompt-tickets.md" --out "$TICKET_OUT" 2>> "$LOG")}")
+  if [ "${TICKET_LINES[1]:-}" = "on" ]; then
+    TICKET_RULES=("${(@)TICKET_LINES[2,-1]}")
+    echo "== $(date) morning: ticket watcher on (${TICKET_SERVER}, ${#TICKET_RULES} allowed-tool rules added)" >> "$LOG"
+  else
+    echo "== $(date) morning: ticket watcher ${TICKET_LINES[1]:-skip (ticket_watch.py failed)}" >> "$LOG"
+  fi
+  [ -s "$TICKET_OUT" ] && PROMPT_TEXT+=$'\n\n'"$(cat "$TICKET_OUT")"
+  rm -f "$TICKET_OUT"
+fi
 # Monthly regulatory watch (REG_WATCH="on" in the config; off by default): on the first weekly review
 # of each month (first Monday; REG_WATCH_WHEN="every-run" for every weekly review), the researcher
 # writes a cited brief on last month's public changes to the regimes in compliance.md's "Regulatory
@@ -365,6 +398,7 @@ else
   # Any other run's extra tools: ALLOW_TOOLS_<MODE> (hyphens become underscores), same format.
   MODE_TOOLS_VAR="ALLOW_TOOLS_${(U)MODE//-/_}"
   for r in "${(@s:;:)${(P)MODE_TOOLS_VAR:-}}"; do r="${r## }"; r="${r%% }"; [ -n "$r" ] && ALLOWED+=("$r"); done
+  for r in "${TICKET_RULES[@]}"; do [ -n "$r" ] && ! (( ${ALLOWED[(Ie)$r]} )) && ALLOWED+=("$r"); done
 fi
 # A rule written with ~/ doesn't match a command the run spells with the full home path, so each
 # Bash rule with ~/ also gets a twin with $HOME spelled out.

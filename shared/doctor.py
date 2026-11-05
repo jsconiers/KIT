@@ -8,6 +8,9 @@
                                      agent readiness: no known limit, limits, blocked, and why by cause
                                      (the source for readiness figures in documents; KIT_DIR overrides
                                      the Kit folder). Read-only.
+  python3 ~/Claude/Agents/kit/.install/shared/doctor.py --score [--json]
+                                     the one-number health score on the dashboard's badge (0 to 100:
+                                     connectors, runs, audit, setup) and where it lost points. Read-only.
 
 Exits 1 when anything fails. Warnings don't fail the check.
 """
@@ -1118,6 +1121,12 @@ def check_readiness():
 def main(argv):
     if "--fix-agents" in argv:
         fix_agents()
+        return 0
+    if "--score" in argv:
+        sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+        import kit_health
+        res = kit_health.score(os.environ.get("KIT_DIR") or KIT)
+        print(json.dumps(res, indent=1) if "--json" in argv else kit_health.render(res))
         return 0
     if "--readiness" in argv:
         r = readiness()

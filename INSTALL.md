@@ -417,6 +417,11 @@ endpoints, Claude Code's permission rules, and every credential. Undo a change f
 | `PREREAD_MODEL`, `PREREAD_TIMEOUT` | opus, 900 s | `kit-preread`'s model and time limit |
 | `REHEARSE_MODEL`, `REHEARSE_TIMEOUT` | opus, 900 s | `kit-rehearse`'s model and time limit |
 | `REVIEW_LOOP_MODEL`, `REVIEW_LOOP_TIMEOUT` | each agent's own, 1800 s | `kit-review-loop run`'s model (empty: the agent's) and time limit per agent run |
+| `READINESS_THRESHOLD` | 80 | The score a project needs, with all four review notes and no must fix, to read "Ready for ARB" (`kit-review-loop score`) |
+| `MONTH_REPORT_MODES` | morning weekly worklist eod review-loop kit-run:* | The run kinds `kit-wins month` lists by name; every other run is one "other runs" line |
+| `TICKET_WATCH`, `TICKET_SERVER`, `TICKET_TOOLS`, `TICKET_QUERY` | off, empty | The morning ticket watcher: the gateway searches this connector with these read-only tools for your tickets (empty query: where you're the caller, requester, or assignee); `kit-tickets diff` reports what changed |
+| `TICKET_MAX`, `TICKET_DAYS` | 40, 14 | Most tickets the watcher checks, and how many days back a closed one still counts |
+| `MCP_WATCH`, `MCP_WATCH_LONG_HOURS` | on, 8 | The long-session token watchdog's hooks (`kit-mcp-watch`), and how many hours makes a session "long" in its advice |
 | `TEAMMAP_COVERAGE` | empty | Another coverage file for `kit-teammap` (empty: `briefs/team/coverage.json`) |
 | `TEXTBACK` | off | macOS only: answer texts you send yourself that start with "Kit" |
 | `TEXTBACK_ASK` | on | Let texted questions go to Claude (read-only, Kit's folder only); "off" allows commands only |

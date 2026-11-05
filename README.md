@@ -121,7 +121,7 @@ The installer links these into `~/.local/bin` (all in `shared/bin/`):
 | `kit-commitments` | Proposes to-dos from promises in your sent mail or minutes; you confirm |
 | `kit-holds` | Draft calendar holds as .ics files you open and save; Kit never writes to the calendar |
 | `kit-oneonone` | One-page prep for your 1:1 with your manager (by role); `--done` records the date |
-| `kit-wins` | Accomplishments log for reviews and 1:1s: collect, this month, report by theme; `mark` after editing the log by hand |
+| `kit-wins` | Accomplishments log for reviews and 1:1s: collect, this month, report by theme; `mark` after editing the log by hand; `month` is the one-page "what Kit did this month" for leadership updates and AI Wins (work finished, highlights, runs and estimated cost against the month before; `--write` saves Markdown and a print-ready page) |
 | `kit-feedback` | A private log of feedback on the people you lead (praise, coaching, goals): 1:1 prep, review notes, and who's had no note lately; never shared or texted |
 | `kit-meetload` | Meeting load audit: hours and share of working hours, recurring meetings' weekly cost, back-to-back runs, focus time left, after-hours meetings, double bookings, suggestions; `--holds` drafts focus time; reads the calendar, a JSON file, or an .ics export |
 | `kit-dates` | Important dates (birthdays, anniversaries, work anniversaries), with a to-do and a drafted card or note when one comes up |
@@ -138,14 +138,14 @@ The installer links these into `~/.local/bin` (all in `shared/bin/`):
 | `kit-refarch` | Suggests which published reference architectures fit a demand, ranked, with why |
 | `kit-precedent` | Ranked search of the library's indexes and registers for precedent |
 | `kit-sysprofile` | One-page profile of a system from the library's records, every line cited |
-| `kit-trace` | Requirement-to-evidence matrix: IA requirement to GDS section, test case, change step, and POC verdict, with gaps flagged |
+| `kit-trace` | Requirement-to-evidence matrix: IA requirement to GDS section, test case, change step, and POC verdict, with gaps flagged; `--xlsx` writes it as an Excel workbook for reviewers (gaps shaded, Reviewer status and notes columns, gap, orphan, and summary sheets), with no Excel or add-ins needed |
 | `kit-csf` | Coverage of a NIST CSF 2.0 mapping per Function, with gaps, blanks, and ID checks; `--portfolio` across projects |
 | `kit-sizing` | Rough-order compute, storage, and network sizing, every assumption shown |
 | `kit-diagram-diff` | What changed between two versions of a draw.io or Visio diagram |
 | `kit-diaglint` | Checks draw.io and Visio diagrams against your team's diagramming standard (a JSON rules file): palette, fonts, title block, legend, line types, connectors, shapes, view labels |
 | `kit-onepager` | One-page executive summary of an IA or GDS (Markdown, .docx, or PDF), every line cited, "not stated" where the document is silent; Markdown, JSON, or Word |
 | `kit-preread` | Before a design review: Kit's red team reads the document (Word, PowerPoint, Excel, PDF) in a closed run and gives the findings that matter most, what it doesn't say, and five questions to ask, each tied to a finding; Claude Code asks before it runs; never texted |
-| `kit-review-loop` | The review loop for a draft IA or GDS: `plan` shows the steps, agent commands, and cost; `run` runs the reviewer, then the red team, threat modeler, and standards checker side by side, unattended, and reports the cost (Claude Code asks first); `merge` puts every finding in one table ranked must fix, should fix, nit, for your accept, change, or reject; `feedback` turns your decisions into the writer's `feedback-v<next>.md` |
+| `kit-review-loop` | The review loop for a draft IA or GDS: `plan` shows the steps, agent commands, and cost; `run` runs the reviewer, then the red team, threat modeler, and standards checker side by side, unattended, and reports the cost (Claude Code asks first); `merge` puts every finding in one table ranked must fix, should fix, nit, for your accept, change, or reject; `feedback` turns your decisions into the writer's `feedback-v<next>.md`; `score` gives one "ready for ARB" score from the latest reviewer, red team, threat model, and standards notes, and `status` lists every project's. One click in `kit-settings ui` (Review loop) runs it, and the dashboard's Reviews panel links each result |
 | `kit-rehearse` | Before your own design goes to a review board: the ten hardest questions the board will ask, where the document answers each (or that it doesn't) with the points of a strong answer, a two-minute talk track, and the gaps to close; a closed run like kit-preread; Claude Code asks before it runs; never texted |
 | `kit-decisions` | Drafts proposed ADRs from architectural decisions in meeting minutes, with the classifying rule shown; never accepts anything |
 | `kit-viewpoints` | DoDAF-style viewpoint drafts (OV-1, SV-1, SV-4, DIV-2) from a GDS, every element cited, with a draw.io file per view in the team style |
@@ -199,10 +199,14 @@ The installer links these into `~/.local/bin` (all in `shared/bin/`):
 | `kit-wrap` | The end-of-day wrap from Kit's files with no model call: what got done, what moves to the next working day, and that day's first meeting and what it needs (related to-dos, pending actions, a pre-read, where it is); hooks in `.install/wrap.d/` add your own sections |
 | `kit-reliability` | How reliably the scheduled runs work: success rate, duration, cost, and alerts, by run type |
 | `kit-cost` | What scheduled runs cost, by run and model, against an optional monthly budget |
-| `kit-expiry` | Everything that expires (tokens, logins, domains, certificates), soonest first, from `expiry.json`; the health check warns before each is due |
+| `kit-expiry` | Everything that expires (tokens, logins, domains, certificates), soonest first, from `expiry.json`; the health check warns before each is due. Connector tokens' dates come from their Keychain entries' metadata, by name only (`tokens --add` tracks every credential the connectors name), and the brief warns before Jira, Confluence, or PPM Express tokens lapse |
+| `kit-tickets` | The ticket watcher: with `TICKET_WATCH="on"`, the morning brief has the gateway search your service-management tickets read-only, and `kit-tickets diff` reports what changed since yesterday (new, state, priority, reassigned, updated, gone); `show` lists the last check |
+| `kit-mcp-watch` | The long-session token watchdog: hooks on your Claude Code sessions' MCP calls spot a connector whose session went stale or whose sign-in lapsed, tell Claude to stop retrying and ask you to reconnect (`/mcp`), and the brief lists them; `status` shows what it saw. It never blocks a call or reads a token |
+| `doctor.py --score` | The health score on the dashboard's badge (0 to 100: connectors, runs, audit, open setup questions) and where it lost points |
 | `kit-metrics` | One-page metrics view: spend, runs, queue trend, work lists, sprints, health |
 | `kit-update` | Shows what's new on GitHub; `--apply` moves your clone and reinstalls, or just reinstalls when the clone is current but the install isn't; `--reinstall` reinstalls anyway. `--zip FILE` checks a release zip (for installs with no clone) and shows what it would change; `--zip FILE --apply` installs it and keeps it for rollback |
 | `kit-version` | Installed version and commit, and whether GitHub is ahead |
+| `kit-release` | For maintainers, from a clone: bumps VERSION, dates the CHANGELOG heading and the docs' version rows, commits, tags, builds the release zip, and prints its SHA-256 in one step; never pushes |
 
 Also in `shared/bin/`, called by Kit or the scheduled runs rather than by hand:
 `connector-guard` (the read-only hook and audit log, with each result's size and stated total), `kit-hook` (runs

@@ -57,7 +57,7 @@ flowchart TB
 | Layer | Folder | Holds |
 |---|---|---|
 | Brain | `kit/` | `KIT.md` (who Kit is and its rules), starter `QUEUE.md` and `STATUS.md`, `agents/`, `memory/` (index, glossary, setup files in `memory/context/`), `lessons/`, `preferences/`, `templates/` (45 templates), `skills/`, `models.json`. No platform code. |
-| Shared | `shared/` | Cross-platform Python: the installer logic (`kit_setup.py`), health check (`doctor.py`), dashboards, delivery (`deliver.py`), transports, the to-do sync core, model routing, the PPM Express server (`ppmx/`), record schemas (`records/`), SQL scripts (`sql/`), scheduled-run prompts and `config.example` (`morning/`), and 73 tools in `shared/bin/`. |
+| Shared | `shared/` | Cross-platform Python: the installer logic (`kit_setup.py`), health check (`doctor.py`), dashboards, delivery (`deliver.py`), transports, the to-do sync core, model routing, the PPM Express server (`ppmx/`), record schemas (`records/`), SQL scripts (`sql/`), scheduled-run prompts and `config.example` (`morning/`), and 79 tools in `shared/bin/`. |
 | Platform | `platform/mac/`, `platform/windows/` | Installers and uninstallers, the scheduled-run runner (`run.sh`, `run.ps1`), job templates or task registration, preflight, and the native adapters: mail, calendar, reminders, and on macOS the library and texting helpers. |
 | Tests | `tests/` | Suites per tool (`test_*.sh`, `test_*.py`) and agent eval cases (`tests/evals/`). |
 
@@ -130,10 +130,10 @@ The tools in `shared/bin/` are standard-library Python with a usage docstring, l
 |---|---|---|
 | Queue and day | `todo`, `kit-queue`, `kit-meetprep`, `kit-triage`, `kit-awaiting`, `kit-holds`, `kit-wrap`, `kit-dates`, `kit-touch`, `kit-feedback`, `kit-meetload`, `kit-expiry`, `kit-letter`, `kit-library` | None |
 | Architecture | `kit-refarch`, `kit-precedent`, `kit-sysprofile`, `kit-trace`, `kit-csf`, `kit-sizing`, `kit-diagram-diff`, `kit-diaglint`, `kit-onepager`, `kit-decisions`, `kit-viewpoints`, `kit-coverage`, `kit-controls`, `kit-lifecycle`, `kit-roadmap`, `kit-vendors`, `kit-digest` | None |
-| Closed reviews | `kit-preread`, `kit-rehearse`, `kit-review-loop` | One closed Claude run each, asked first; `kit-review-loop run` is four agent runs (reviewer, red team, threat modeler, standards checker), asked first, and its `plan`, `merge`, and `feedback` make none |
+| Closed reviews | `kit-preread`, `kit-rehearse`, `kit-review-loop` | One closed Claude run each, asked first; `kit-review-loop run` is four agent runs (reviewer, red team, threat modeler, standards checker), asked first (also from `kit-settings ui`'s Review loop section, with the cost shown), and its `plan`, `merge`, `feedback`, `score` (ready for ARB), and `status` make none |
 | Team | `kit-publish`, `kit-team`, `kit-teammap`, `kit-plugin` | None |
 | Models | `kit-models`, `kit-delegate`, `kit-run`, `kit-evals` | Only `kit-delegate`, `kit-run`, and `kit-evals --live` |
-| Safety and operations | `connector-guard`, `kit-audit`, `kit-pause`, `kit-connect`, `kit-ppmx`, `kit-mcp-env`, `kit-backup`, `kit-audit-export`, `kit-retention`, `kit-alerts`, `kit-reliability`, `kit-cost`, `kit-update`, `kit-version` | Only `kit-connect test --read` (one guarded read per server) |
+| Safety and operations | `connector-guard`, `kit-audit`, `kit-pause`, `kit-connect`, `kit-ppmx`, `kit-mcp-env`, `kit-backup`, `kit-audit-export`, `kit-retention`, `kit-alerts`, `kit-reliability`, `kit-cost`, `kit-update`, `kit-version`, `kit-release`, `kit-mcp-watch`, `kit-tickets` | Only `kit-connect test --read` (one guarded read per server); the ticket watcher's search is the morning run's, through the gateway |
 
 Most tools read local files and write only into `briefs/` or the library, and only with `--write` where
 the output is a register. That keeps them cheap, predictable, and testable without a model.

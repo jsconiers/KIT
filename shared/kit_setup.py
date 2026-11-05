@@ -76,8 +76,13 @@ ALLOW = [f"Read({K}/**)", f"Edit({K}/memory/**)", f"Edit({K}/QUEUE.md)", f"Edit(
          # The team coverage map and the monthly architecture digest: they read Kit's registers (and PPM Express,
          # read only) and write only Kit's own files (the coverage file, briefs/teammap-*, briefs/digest-*).
          "Bash(kit-teammap)", "Bash(kit-teammap *)", "Bash(kit-digest)", "Bash(kit-digest *)",
-         # The review loop's plan only reads (it prints the steps, the agent commands, and the cost).
-         "Bash(kit-review-loop plan *)",
+         # The review loop's plan only reads (it prints the steps, the agent commands, and the cost), and so do its
+         # readiness score and status.
+         "Bash(kit-review-loop plan *)", "Bash(kit-review-loop score *)", "Bash(kit-review-loop status)",
+         "Bash(kit-review-loop status *)",
+         # The MCP watchdog's report and the ticket watcher's last check only read Kit's own logs.
+         "Bash(kit-mcp-watch status)", "Bash(kit-mcp-watch status *)", "Bash(kit-tickets show)",
+         "Bash(kit-tickets show *)",
          # The vendor evaluation desk's reading commands. The rest change an evaluation in the library or write a
          # file you name, so they ask.
          "Bash(kit-vendors)", "Bash(kit-vendors list)", "Bash(kit-vendors list *)", "Bash(kit-vendors due)",
@@ -124,6 +129,61 @@ ASK = [
     "mcp__ppmx__create_idea", "mcp__ppmx__update_idea", "mcp__ppmx__set_idea_stage",
     "mcp__ppmx__create_record", "mcp__ppmx__update_record",
 ]
+
+# Claude Code hooks Kit adds to settings.json: the long-session token watchdog (kit-mcp-watch) on every MCP call's
+# result and failure. They only log and advise; they never block a call (kit-hook exits 1 at worst, which Claude
+# Code treats as a non-blocking error). Removed again by deactivate, by their exact command.
+WATCH = '/bin/sh "$HOME/Claude/Agents/kit/.install/shared/bin/kit-hook" kit-mcp-watch {event} || exit 1'
+HOOKS = [("PostToolUse", "mcp__.*", WATCH.format(event="post")),
+         ("PostToolUseFailure", "mcp__.*", WATCH.format(event="fail"))]
+
+
+def add_hooks(data, s):
+    """Add Kit's hooks to settings.json's "hooks", recording each in the manifest. A "hooks" value that isn't the
+    shape Claude Code uses is left alone, with a note."""
+    hooks = data.get("hooks")
+    if hooks is None:
+        hooks = data["hooks"] = {}
+        s["created_hooks"] = True
+    if not isinstance(hooks, dict):
+        print('note: "hooks" in settings.json isn\'t an object, so the MCP watchdog hooks weren\'t added.')
+        return
+    added = s.setdefault("added_hooks", [])
+    for event, matcher, cmd in HOOKS:
+        groups = hooks.setdefault(event, [])
+        if not isinstance(groups, list):
+            print(f'note: "hooks.{event}" in settings.json isn\'t a list, so the MCP watchdog hook wasn\'t added there.')
+            continue
+        have = any(isinstance(g, dict) and any(isinstance(h, dict) and h.get("command") == cmd
+                                               for h in (g.get("hooks") or [])) for g in groups)
+        if not have:
+            groups.append({"matcher": matcher, "hooks": [{"type": "command", "command": cmd, "timeout": 10}]})
+        if [event, cmd] not in added:
+            added.append([event, cmd])
+
+
+def remove_hooks(data, s):
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        return
+    for event, cmd in [tuple(x) for x in (s.get("added_hooks") or [])] or [(e, c) for e, _, c in HOOKS]:
+        groups = hooks.get(event)
+        if not isinstance(groups, list):
+            continue
+        keep = []
+        for g in groups:
+            if isinstance(g, dict) and isinstance(g.get("hooks"), list):
+                g["hooks"] = [h for h in g["hooks"] if not (isinstance(h, dict) and h.get("command") == cmd)]
+                if not g["hooks"]:
+                    continue
+            keep.append(g)
+        if keep:
+            hooks[event] = keep
+        else:
+            hooks.pop(event, None)
+    if not hooks and s.get("created_hooks"):
+        data.pop("hooks", None)
+
 
 # Allow rules earlier versions added that now ask instead. Activate takes them out again, but only
 # where the install record shows Kit added them (an owner's own rule of the same text stays).
@@ -601,6 +661,7 @@ def cmd_activate(args):
                 perms[key].append(item)
                 if item not in s["added"][key]:
                     s["added"][key].append(item)
+    add_hooks(data, s)
     auto = s["auto_memory"]
     if auto.get("changed"):   # an earlier version of this installer turned auto memory off: undo that
         if data.get("autoMemoryEnabled") is False:
@@ -656,6 +717,7 @@ def cmd_deactivate(args):
                         del perms[key]
             if not perms and s["created_permissions"]:
                 del data["permissions"]
+        remove_hooks(data, s)
         auto = s["auto_memory"]
         if auto["changed"] and data.get("autoMemoryEnabled") is False:   # untouched since install
             if auto["previous"] == "absent":

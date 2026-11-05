@@ -4,7 +4,9 @@
 #                    connector guard's fail-closed launch (kit-hook), the credential lookup doctor and
 #                    kit-connect share, kit-mcp-env (MCP servers' tokens from the Keychain), kit-update
 #                    (reinstall, landed patches, release zips), the end-of-day wrap and review rehearsal tests, the vendor desk,
-#                    team coverage map, and architecture digest tests, and the letter builder test.
+#                    team coverage map, and architecture digest tests, the letter builder test, and the 1.7.0
+#                    sprint's tests (health score, review loop page, monthly report, traceability workbook,
+#                    token expiry, ticket watcher, MCP watchdog, kit-release).
 #                    See .github/scripts/checks.py.
 #   windows-install: the Windows installer, run for real on GitHub's Windows runners under Windows
 #                    PowerShell 5.1 and PowerShell 7: install, reinstall, and the repair of an install
@@ -54,8 +56,20 @@ jobs:
         run: |
           python3 tests/test_setup_paths.py
           python3 tests/test_mcp_launch.py
-      - name: kit-review-loop tests (merge and feedback offline, run with a fake claude)
+      - name: kit-review-loop tests (merge, feedback, and the readiness score offline, run with a fake claude)
         run: python3 tests/test_review_loop.py
+      - name: Review loop page, dashboard Reviews panel, and health badge tests
+        run: |
+          python3 tests/test_review_ui.py
+          python3 tests/test_health_score.py
+      - name: Sprint tools tests (monthly report, traceability workbook, token expiry, ticket watcher, MCP watchdog, release)
+        run: |
+          python3 tests/test_wins_month.py
+          python3 tests/test_trace_xlsx.py
+          python3 tests/test_expiry_tokens.py
+          python3 tests/test_tickets.py
+          python3 tests/test_mcp_watch.py
+          python3 tests/test_release.py
       - name: kit-update tests (reinstall when the install lags; landed patches with rebuilt documents)
         run: python3 tests/test_kit_update.py
       - name: kit-update zip tests (release zips checked as untrusted, installed, kept, pruned)

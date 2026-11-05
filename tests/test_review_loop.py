@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 TOOL = REPO / "shared/bin/kit-review-loop"
@@ -279,6 +280,60 @@ rc, out, err = run("feedback", "payments-hub", "--partial", "--version", "v1.0")
 ok(rc == 0 and (PROJ / "feedback-v1.0.md").is_file(), "feedback --version: the version given", out + err)
 rc, out, err = run("feedback", "payments-hub", "--decisions", "nope.md")
 ok(rc == 1 and "no such decisions file" in err, "feedback --decisions: a file that isn't there", err)
+
+# ---- score and status ----------------------------------------------------------------------------------------
+before = snapshot()
+rc, out, err = run("score", "payments-hub", "--json")
+sc = json.loads(out) if rc == 0 else {}
+ok(rc == 0 and snapshot() == before, "score runs and writes nothing", err)
+ok(sc.get("open") == {"must fix": 3, "should fix": 1, "nit": 0} and sc.get("rejected_left_out") == 7,
+   "score: findings the latest decisions rejected are left out; accepted and undecided ones stay open", sc.get("open"))
+ok(sc.get("score") == 60 and sc.get("verdict") == "not ready" and "3 must fix" in sc.get("headline", ""),
+   "score: 100 less 12 per must fix and 4 per should fix; any must fix is not ready", sc.get("headline"))
+ok(set(sc.get("notes", {})) == {"reviewer", "red team", "threat model", "standards"} and not sc.get("missing"),
+   "score: reads the latest note of each of the four kinds", sc.get("notes"))
+rc, out, err = run("score", "payments-hub")
+ok(rc == 0 and "payments-hub: Not ready: 60/100" in out and "Must fix:" in out and "RT-01" in out,
+   "score: the text names the verdict and the must-fix findings", out)
+nxt = PROJ / "drafts/Payments hub IA v0.3.md"
+nxt.write_text("# v0.3\n", encoding="utf-8")
+os.utime(nxt, (time.time() + 60, time.time() + 60))
+sc = json.loads(run("score", "payments-hub", "--json")[1])
+ok(len(sc["stale"]) == 4 and sc["draft"].endswith("v0.3.md"), "score: notes older than the latest draft are stale",
+   sc["stale"])
+nxt.unlink()
+other = LIB / "artifacts/ledger-sync"
+(other / "reviews").mkdir(parents=True)
+(other / "reviews/ledger-sync-review-v1.md").write_text(
+    "# Review\nDate: 01-Nov-2026\n\n## Findings\n\n| ID | Severity | Category | Template | Section | Finding | Fix |\n"
+    "|---|---|---|---|---|---|---|\n| F-01 | minor | style | GDS | 2 | Wordy. | Trim. |\n", encoding="utf-8")
+sc = json.loads(run("score", "ledger-sync", "--json")[1])
+ok(sc["score"] == 100 - 1 - 3 * 15 and sc["verdict"] == "not ready" and len(sc["missing"]) == 3,
+   "score: each review with no note costs 15 and blocks ready", sc)
+for name, body in (("red-team", "| ID | Area | Failure scenario | Consequence | Evidence | Mitigation |\n|---|---|---|---|---|---|\n"
+                                 "| RT-01 | Ops | x | low | GDS 2 | y |\n"),
+                   ("threat-model", "| ID | STRIDE | Threat | Flow or element | Risk | Mitigation | Gap |\n"
+                                    "|---|---|---|---|---|---|---|\n| T-01 | S | x | api | low | y | none |\n"),
+                   ("standards", "| ID | Standard | Clause | Result | Evidence (draft) |\n|---|---|---|---|---|\n"
+                                 "| S-1 | Logging | 2.1 | Conforms | GDS 3 |\n")):
+    (other / f"reviews/ledger-sync-{name}-v1.md").write_text(f"# {name}\nDate: 01-Nov-2026\n\n{body}", encoding="utf-8")
+sc = json.loads(run("score", "ledger-sync", "--json")[1])
+ok(sc["score"] == 98 and sc["verdict"] == "ready" and sc["headline"] == "Ready for ARB: 98/100",
+   "score: all four notes, no must fix (two nits), at or over the threshold: ready for ARB", sc)
+(KIT / ".install/shared/morning/config").write_text('OWNER_NAME="Alex"\nREADINESS_THRESHOLD="99"\n', encoding="utf-8")
+sc = json.loads(run("score", "ledger-sync", "--json")[1])
+ok(sc["verdict"] == "almost" and sc["threshold"] == 99, "score: READINESS_THRESHOLD sets the bar; under it is almost", sc)
+(KIT / ".install/shared/morning/config").write_text('OWNER_NAME="Alex"\n', encoding="utf-8")
+rc, out, err = run("status", "--json")
+st = json.loads(out) if rc == 0 else []
+ok([x["project"] for x in st] == ["payments-hub", "ledger-sync"] or [x["project"] for x in st] == ["ledger-sync", "payments-hub"],
+   "status: every project with review notes", out + err)
+ph = [x for x in st if x["project"] == "payments-hub"][0] if st else {}
+ok({l["label"] for l in ph.get("links", [])} >= {"reviewer", "red team", "threat model", "standards", "decisions"},
+   "status: links each note and the decisions file", ph.get("links"))
+rc, out, err = run("status")
+ok(rc == 0 and "ledger-sync: Ready for ARB: 98/100" in out, "status: one line per project", out)
+shutil.rmtree(other)
 
 # ---- run, with a fake claude -------------------------------------------------------------------------------
 FAKE = TMP / "fake_claude.py"

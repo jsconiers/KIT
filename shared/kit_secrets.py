@@ -21,7 +21,9 @@ stored(), which look a name up without reading any value: the environment variab
 Keychain (`security find-generic-password -s NAME`, without -w) or Credential Manager (`cmdkey /list`,
 which lists names only).
 """
+import datetime as dt
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -139,6 +141,49 @@ def stored(name, path=None):
     r = tool and _run([tool, "/list"])
     want = f"legacygeneric:target={name}".lower()     # how cmdkey lists a generic credential
     return bool(r) and r.returncode == 0 and any(ln.strip().lower().endswith(want) for ln in r.stdout.splitlines())
+
+
+def _attr(text, key):
+    """One attribute's value from `security find-generic-password` output: a quoted string, a hex blob
+    (0x...), or a timedate ("20261030120000Z\\000"). None when it isn't there or is <NULL>."""
+    m = re.search(rf'^\s*"{key}"<[^>]*>=(.*)$', text, re.M)
+    if not m:
+        return None
+    raw = m.group(1).strip()
+    if raw == "<NULL>":
+        return None
+    q = re.search(r'"(.*)"\s*$', raw)
+    if q:
+        return q.group(1).replace("\\000", "").strip()
+    h = re.match(r"0x([0-9A-Fa-f]+)", raw)
+    if h:
+        try:
+            return bytes.fromhex(h.group(1)).decode("utf-8", "replace").rstrip("\x00").strip()
+        except ValueError:
+            return None
+    return raw
+
+
+def metadata(name, path=None):
+    """A Keychain entry's metadata, by name, never its value: {"comment", "created", "modified"}
+    (dates as datetime.date), or None when there's no such entry or no Keychain. `security
+    find-generic-password -s NAME` without -w prints attributes only, so the Keychain doesn't prompt.
+    Credential Manager keeps no comment or date that cmdkey shows, so on Windows this is None."""
+    if not name or STORE != "Keychain":
+        return None
+    tool = shutil.which("security", path=path)
+    r = tool and _run([tool, "find-generic-password", "-s", name])
+    if not r or r.returncode != 0:
+        return None
+    out = {"comment": _attr(r.stdout, "icmt")}
+    for key, field in (("created", "cdat"), ("modified", "mdat")):
+        v = _attr(r.stdout, field) or ""
+        m = re.match(r"(\d{4})(\d{2})(\d{2})", v)
+        try:
+            out[key] = dt.date(int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None
+        except ValueError:
+            out[key] = None
+    return out
 
 
 def where(name, env=None):

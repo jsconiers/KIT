@@ -1,0 +1,274 @@
+#!/usr/bin/env python3
+"""kit-mcp-watch: the long-session token watchdog. It spots an MCP connector whose session has gone stale or whose
+sign-in has lapsed (a long Claude Code session's OneNote, Jira, or Confluence connection, say) and says how to
+reconnect, instead of letting calls fail one after another.
+
+  kit-mcp-watch status [--hours 24] [--json]   what it saw: each server's stale-session and sign-in failures
+  kit-mcp-watch brief [--hours 24]             the brief's "Connector sessions" section (nothing when all's well)
+  kit-mcp-watch post | fail                    the Claude Code hooks (PostToolUse and PostToolUseFailure on mcp__
+                                               tools), installed in ~/.claude/settings.json by Kit's installer
+
+As a hook it reads the event Claude Code passes on stdin. A failed MCP call (fail), or a result that's plainly an
+error (post: a short result flagged isError, or one that's nothing but an error message), is sorted into:
+  stale     the connection or its session is gone: "session not found", "not connected", "connection closed",
+            "transport closed", "socket hang up", ECONNRESET, a -32000 error
+  sign-in   the token or sign-in lapsed: 401, "unauthorized", "token expired", "invalid_token", "invalid_grant",
+            "authentication required", "please re-authenticate"
+Anything else is left alone. For a stale session or a lapsed sign-in it records the server, tool, kind, a short
+summary with anything credential-like removed, and how long the session has been open (by a hash of its id) in
+.install/logs/mcp-watch.jsonl, and tells Claude, through the hook's additionalContext, to stop retrying and ask
+you to reconnect: /mcp, pick the server, Reconnect (or Authenticate for a sign-in). It says so once per server per
+session every 30 minutes. It never blocks a call, never retries one, and never reads or stores a token.
+
+Why it suggests rather than reconnects: Claude Code reconnects an MCP server only from its own /mcp menu, and a
+sign-in needs you in the browser. A stdio server started by kit-mcp-env reads its token at start, so a reconnect
+picks up a token you've just stored. Scheduled runs start fresh sessions, so they don't go stale this way.
+
+Settings (shared/morning/config): MCP_WATCH ("on"; "off" makes the hooks do nothing), MCP_WATCH_LONG_HOURS
+(8: a session open this long is called long in the advice). KIT_DIR overrides the Kit folder (for tests).
+"""
+import datetime as dt
+import hashlib
+import json
+import os
+import pathlib
+import re
+import sys
+
+KIT = pathlib.Path(os.path.expanduser(os.environ.get("KIT_DIR", "~/Claude/Agents/kit")))
+LOG = KIT / ".install/logs/mcp-watch.jsonl"
+STATE = KIT / ".install/cache/mcp-watch-state.json"
+CONFIG = KIT / ".install/shared/morning/config"
+QUIET_MIN = 30
+KEEP_DAYS = 30
+
+STALE = re.compile(r"session (?:not found|expired|terminated|is closed|closed)|no (?:such|valid) session|"
+                   r"not connected|connection (?:closed|reset|refused|lost)|transport (?:closed|is closed|error)|"
+                   r"socket hang up|econnreset|epipe|broken pipe|server disconnected|-32000\b|mcp server .*?(?:not "
+                   r"running|disconnected|crashed)|stream (?:closed|ended)|reconnect", re.I)
+AUTH = re.compile(r"\b401\b|unauthori[sz]ed|token (?:has )?expired|expired token|invalid[_ ]token|invalid_grant|"
+                  r"authentication (?:required|failed)|re-?authenticate|login required|sign[- ]in required|"
+                  r"refresh token|access token .*?(?:expired|invalid)|needs auth", re.I)
+BEARER = re.compile(r"(?i)\b(bearer|basic|token)\s+[A-Za-z0-9._~+/=-]{8,}")
+SECRETISH = re.compile(r"(?i)(token|key|secret|password|authorization|cookie)([\"']?\s*[:=]\s*[\"']?)"
+                       r"(?!\[hidden\])[^\s\"',}]{6,}")
+JWT = re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
+
+
+def setting(key, default):
+    if os.environ.get(key):
+        return os.environ[key]
+    try:
+        m = re.search(rf'^{key}="?([^"\n]*)"?\s*$', CONFIG.read_text(errors="ignore"), re.M)
+    except OSError:
+        m = None
+    return m.group(1).strip() if m and m.group(1).strip() else default
+
+
+def now():
+    return dt.datetime.fromisoformat(os.environ["KIT_NOW"]) if os.environ.get("KIT_NOW") else dt.datetime.now()
+
+
+def scrub(text, n=140):
+    s = JWT.sub("[hidden]", str(text))
+    s = BEARER.sub(lambda m: m.group(1) + " [hidden]", s)
+    s = SECRETISH.sub(lambda m: m.group(1) + m.group(2) + "[hidden]", s)
+    s = re.sub(r"[\x00-\x1f\x7f]+", " ", s)
+    s = re.sub(r"\S+@\S+\.\w+", "[address]", s)
+    s = " ".join(s.split())
+    return s if len(s) <= n else s[:n - 1] + "…"
+
+
+def flatten(v, limit=4000):
+    if isinstance(v, str):
+        return v[:limit]
+    try:
+        return json.dumps(v, ensure_ascii=False)[:limit]
+    except (TypeError, ValueError):
+        return str(v)[:limit]
+
+
+def classify(event, payload):
+    """(kind, summary) or (None, None)."""
+    if event == "fail":
+        text = flatten(payload.get("error") or payload.get("tool_response") or "")
+    else:
+        resp = payload.get("tool_response")
+        is_err = isinstance(resp, dict) and (resp.get("isError") or resp.get("is_error"))
+        text = flatten(resp)
+        if not is_err and not (len(text) < 600 and re.search(r"\berror\b|\bfailed\b", text, re.I)):
+            return None, None              # a normal result: its contents are never inspected further
+    if AUTH.search(text):
+        return "sign-in", scrub(text)
+    if STALE.search(text):
+        return "stale", scrub(text)
+    return None, None
+
+
+def split_tool(name):
+    m = re.match(r"^mcp__(.+?)__(.+)$", name or "")
+    return (m.group(1), m.group(2)) if m else (None, None)
+
+
+def load_state():
+    try:
+        st = json.loads(STATE.read_text(encoding="utf-8-sig"))
+        return st if isinstance(st, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(st):
+    cutoff = (now() - dt.timedelta(days=7)).isoformat()
+    st["sessions"] = {k: v for k, v in (st.get("sessions") or {}).items() if v >= cutoff}
+    st["said"] = {k: v for k, v in (st.get("said") or {}).items() if v >= cutoff}
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = STATE.with_name(STATE.name + ".tmp")
+    tmp.write_text(json.dumps(st, indent=0) + "\n", encoding="utf-8")
+    os.replace(tmp, STATE)
+
+
+def hook(event):
+    try:
+        payload = json.loads(sys.stdin.read() or "{}")
+    except ValueError:
+        return 0
+    if not isinstance(payload, dict) or setting("MCP_WATCH", "on") == "off":
+        return 0
+    server, tool = split_tool(payload.get("tool_name"))
+    sid = hashlib.sha256(str(payload.get("session_id") or "none").encode()).hexdigest()[:10]
+    st = load_state()
+    t = now()
+    first = (st.setdefault("sessions", {})).setdefault(sid, t.isoformat(timespec="seconds"))
+    if not server:
+        save_state(st)
+        return 0
+    kind, summary = classify(event, payload)
+    if not kind:
+        save_state(st)
+        return 0
+    age_h = max(0.0, (t - dt.datetime.fromisoformat(first)).total_seconds() / 3600)
+    rec = {"time": t.isoformat(timespec="seconds"), "session": sid, "server": server, "tool": tool, "kind": kind,
+           "event": event, "session_hours": round(age_h, 1), "summary": summary}
+    LOG.parent.mkdir(parents=True, exist_ok=True)
+    with open(LOG, "a", encoding="utf-8") as f:
+        f.write(json.dumps(rec) + "\n")
+    key = f"{sid}|{server}"
+    last = (st.setdefault("said", {})).get(key)
+    quiet = last and (t - dt.datetime.fromisoformat(last)) < dt.timedelta(minutes=QUIET_MIN)
+    if not quiet:
+        st["said"][key] = t.isoformat(timespec="seconds")
+    save_state(st)
+    if quiet:
+        return 0
+    long_h = float(setting("MCP_WATCH_LONG_HOURS", "8") or 8)
+    age = (f"This Claude Code session has been open about {age_h:.0f} hours, long enough for the connection to go "
+           "stale. " if age_h >= long_h else "")
+    if kind == "sign-in":
+        what = f"The {server} connector's sign-in looks expired ({summary})."
+        how = (f"Ask the owner to run /mcp, pick {server}, and choose Authenticate (or Reconnect); if its token is "
+               "stored for kit-mcp-env, store a fresh one first, then Reconnect.")
+    else:
+        what = f"The {server} connector's session looks stale ({summary})."
+        how = f"Ask the owner to run /mcp, pick {server}, and choose Reconnect."
+    msg = (f"Kit's MCP watchdog: {what} {age}Don't keep retrying {server} calls. {how} Then retry once. "
+           "Everything else can carry on.")
+    hook_event = "PostToolUseFailure" if event == "fail" else "PostToolUse"
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": hook_event, "additionalContext": msg}}))
+    return 0
+
+
+def records(hours):
+    since = now() - dt.timedelta(hours=hours)
+    out = []
+    try:
+        lines = LOG.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return out
+    for ln in lines:
+        try:
+            r = json.loads(ln)
+            if dt.datetime.fromisoformat(r["time"]) >= since:
+                out.append(r)
+        except (ValueError, KeyError, TypeError):
+            continue
+    return out
+
+
+def summarise(recs):
+    by = {}
+    for r in recs:
+        s = by.setdefault(r.get("server", "?"), {"stale": 0, "sign-in": 0, "last": "", "last_kind": "",
+                                                  "sessions": set(), "longest_hours": 0})
+        s[r.get("kind", "stale")] = s.get(r.get("kind", "stale"), 0) + 1
+        s["sessions"].add(r.get("session"))
+        s["longest_hours"] = max(s["longest_hours"], r.get("session_hours") or 0)
+        if r.get("time", "") >= s["last"]:
+            s["last"], s["last_kind"] = r.get("time", ""), r.get("kind", "")
+    for s in by.values():
+        s["sessions"] = len(s["sessions"])
+    return by
+
+
+def prune():
+    try:
+        lines = LOG.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return
+    cutoff = (now() - dt.timedelta(days=KEEP_DAYS)).isoformat()
+    keep = [ln for ln in lines if (re.search(r'"time": "([^"]+)"', ln) or [None, ""])[1] >= cutoff]
+    if len(keep) != len(lines):
+        tmp = LOG.with_name(LOG.name + ".tmp")
+        tmp.write_text("\n".join(keep) + ("\n" if keep else ""), encoding="utf-8")
+        os.replace(tmp, LOG)
+
+
+def main(argv):
+    if argv[:1] in (["post"], ["fail"]):
+        try:
+            return hook(argv[0])
+        except Exception as ex:  # noqa: BLE001  (a watchdog must never get in the way of a call)
+            print(f"kit-mcp-watch: {ex}", file=sys.stderr)
+            return 0
+    hours = 24
+    if "--hours" in argv:
+        i = argv.index("--hours")
+        try:
+            hours = max(1, int(argv[i + 1]))
+        except (IndexError, ValueError):
+            print("kit-mcp-watch: --hours takes a whole number", file=sys.stderr)
+            return 2
+    cmd = argv[0] if argv and not argv[0].startswith("-") else "status"
+    by = summarise(records(hours))
+    if cmd == "brief":
+        prune()
+        if not by:
+            return 0
+        print("Connector sessions")
+        for server, s in sorted(by.items()):
+            kinds = ", ".join(f"{s[k]} {'stale-session' if k == 'stale' else 'sign-in'} failure{'s' if s[k] != 1 else ''}"
+                              for k in ("stale", "sign-in") if s[k])
+            when = dt.datetime.fromisoformat(s["last"]).strftime("%a %H:%M")
+            fix = "Authenticate" if s["last_kind"] == "sign-in" else "Reconnect"
+            print(f"{server}: {kinds} in the last {hours} hours (last {when}"
+                  + (f", in a session open {s['longest_hours']:.0f} hours" if s["longest_hours"] >= 1 else "")
+                  + f"). If it's still failing: /mcp, pick {server}, {fix}.")
+        print("Text: Connectors: reconnect " + ", ".join(sorted(by)))
+        return 0
+    if cmd != "status":
+        print(__doc__.split("\n\n")[1])
+        return 2
+    if "--json" in argv:
+        print(json.dumps({"hours": hours, "servers": by}, indent=2))
+        return 0
+    if not by:
+        print(f"kit-mcp-watch: no stale sessions or lapsed sign-ins in the last {hours} hours")
+        return 0
+    for server, s in sorted(by.items()):
+        print(f"{server}: {s['stale']} stale-session, {s['sign-in']} sign-in failure(s) in {s['sessions']} session(s); "
+              f"last {s['last']} ({s['last_kind']})")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
