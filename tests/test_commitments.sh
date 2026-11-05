@@ -2,6 +2,9 @@
 # Tests kit-commitments: promises found in your own text (fixtures only, no real mail), proposals
 # written to briefs/pending-commitments.md, dedupe against QUEUE.md, and never touching the queue.
 #   bash tests/test_commitments.sh
+# File mode as octal digits, the same with BSD or GNU tools first on the PATH (Homebrew's coreutils
+# put GNU stat ahead of macOS's, where `stat -f` means something else).
+mode() { python3 -c 'import os,sys; print(format(os.stat(sys.argv[1]).st_mode & 0o777, "o"))' "$1"; }
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 S="$(mktemp -d)"; trap 'rm -rf "$S"' EXIT
@@ -59,7 +62,7 @@ grep -qi "let me know\|be out" "$P" && bad "non-commitments captured" || ok "'le
 grep -qi "firewall" "$P" && bad "duplicate of a queue item proposed" || ok "a promise already in QUEUE.md isn't proposed again"
 grep -q "alex@example.com\|Alex Example\|bob@" "$P" && bad "names or addresses leaked" || ok "no names or addresses in the proposals"
 cmp -s "$S/queue-before.md" "$KIT_DIR/QUEUE.md" && ok "QUEUE.md is never changed by scan" || bad "queue changed"
-[ "$(stat -f %Lp "$P" 2>/dev/null || stat -c %a "$P")" = "600" ] && ok "pending file is owner-only" || bad "pending perms"
+[ "$(mode "$P")" = "600" ] && ok "pending file is owner-only" || bad "pending perms"
 
 n1=$(grep -c "^| C" "$P")
 $KC scan --source mail --file "$S/mail.txt" >/dev/null

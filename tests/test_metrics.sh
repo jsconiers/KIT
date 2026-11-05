@@ -1,6 +1,9 @@
 #!/bin/bash
 # Tests kit-metrics against a fake Kit folder. Nothing real is touched.
 #   bash tests/test_metrics.sh
+# File mode as octal digits, the same with BSD or GNU tools first on the PATH (Homebrew's coreutils
+# put GNU stat ahead of macOS's, where `stat -f` means something else).
+mode() { python3 -c 'import os,sys; print(format(os.stat(sys.argv[1]).st_mode & 0o777, "o"))' "$1"; }
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 S="$(mktemp -d)"; trap 'rm -rf "$S"' EXIT
@@ -47,7 +50,7 @@ py() { python3 -c "import json,sys;d=json.loads(sys.argv[1]);print($1)" "$J"; }
 [ "$(py "d['sprints'][0]['points_left_last']")" = "7" ] && ok "sprints: points left from history" || bad "sprints"
 [ "$(py "d['health']['audit']['warning']")" = "1" ] && [ "$(py "len(d['health']['warnings'])")" = "1" ] && ok "health and audit read" || bad "health"
 python3 "$HERE/shared/bin/kit-metrics" >/dev/null && [ -f "$K/metrics.html" ] && grep -q "Kit metrics" "$K/metrics.html" && ok "page written to the Kit folder" || bad "page"
-[ "$(stat -f %Lp "$K/metrics.html" 2>/dev/null || stat -c %a "$K/metrics.html")" = "600" ] && ok "page is owner-only" || bad "perms"
+[ "$(mode "$K/metrics.html")" = "600" ] && ok "page is owner-only" || bad "perms"
 rm -rf "$K/.install" "$K/briefs" "$K/QUEUE.md"
 python3 "$HERE/shared/bin/kit-metrics" --out "$S/empty.html" >/dev/null && grep -q "No data yet" "$S/empty.html" && ok "empty Kit: page still renders" || bad "empty"
 echo "kit-metrics tests: $pass passed, $fail failed"

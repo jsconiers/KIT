@@ -2,6 +2,9 @@
 # Tests kit-cost and the budget guard in run.sh. Everything runs in a throwaway folder with a fake
 # Kit and a fake claude; nothing real is touched, and no launchd job is loaded or unloaded.
 #   bash tests/test_cost.sh
+# File mode as octal digits, the same with BSD or GNU tools first on the PATH (Homebrew's coreutils
+# put GNU stat ahead of macOS's, where `stat -f` means something else).
+mode() { python3 -c 'import os,sys; print(format(os.stat(sys.argv[1]).st_mode & 0o777, "o"))' "$1"; }
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$HERE/shared/bin"
@@ -35,7 +38,7 @@ assert rec["cost_usd"] == 1.25 and rec["mode"] == "morning" and rec["input_token
 assert rec["output_tokens"] == 500 and rec["cache_read_tokens"] == 20000 and rec["cache_write_tokens"] == 3000
 assert rec["duration_ms"] == 61000 and rec["turns"] == 7 and rec["rc"] == 0
 EOF
-[ "$(stat -f %Lp "$LEDGER" 2>/dev/null || stat -c %a "$LEDGER")" = "600" ] && ok "record: ledger is owner-only" || bad "ledger perms"
+[ "$(mode "$LEDGER")" = "600" ] && ok "record: ledger is owner-only" || bad "ledger perms"
 echo "not json at all" > "$S/garbage.json"
 n0=$(wc -l < "$LEDGER")
 python3 "$BIN/kit-cost" record --mode weekly --rc 1 --json-file "$S/garbage.json" --log "$S/t.log"; rc=$?

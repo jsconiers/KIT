@@ -1,6 +1,9 @@
 #!/bin/bash
 # Tests kit-audit-export with a fake Kit and HOME. Nothing real is read or written.
 #   bash tests/test_audit_export.sh
+# File mode as octal digits, the same with BSD or GNU tools first on the PATH (Homebrew's coreutils
+# put GNU stat ahead of macOS's, where `stat -f` means something else).
+mode() { python3 -c 'import os,sys; print(format(os.stat(sys.argv[1]).st_mode & 0o777, "o"))' "$1"; }
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$HERE/shared/bin"
@@ -65,7 +68,7 @@ assert m["files"] and all(hashlib.sha256((pack / f).read_bytes()).hexdigest() ==
 PY
 [ -f "$S/pack.zip" ] && python3 -c "import zipfile,sys;sys.exit(0 if zipfile.ZipFile('$S/pack.zip').testzip() is None else 1)" \
   && ok "zip written and valid" || bad "zip"
-[ "$(stat -f %Lp "$OUT/README.md")" = 600 ] && ok "pack files owner-only" || bad "perms on pack"
+[ "$(mode "$OUT/README.md")" = 600 ] && ok "pack files owner-only" || bad "perms on pack"
 python3 "$BIN/kit-audit-export" --out "$OUT" >/dev/null 2>&1 && bad "overwrote an existing pack" || ok "refuses an existing folder"
 python3 "$BIN/kit-audit-export" --out "$K/inside" >/dev/null 2>&1 && bad "pack inside Kit" || ok "refuses a pack inside Kit's folder"
 

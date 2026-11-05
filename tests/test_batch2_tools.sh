@@ -3,6 +3,9 @@
 # dashboard.py. Everything runs in a throwaway folder with a fake Kit; nothing real is touched, and
 # no launchd job is loaded or unloaded.
 #   bash tests/test_batch2_tools.sh
+# File mode as octal digits, the same with BSD or GNU tools first on the PATH (Homebrew's coreutils
+# put GNU stat ahead of macOS's, where `stat -f` means something else).
+mode() { python3 -c 'import os,sys; print(format(os.stat(sys.argv[1]).st_mode & 0o777, "o"))' "$1"; }
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$HERE/shared/bin"
@@ -87,7 +90,7 @@ K="$KIT_DIR"; export BACKUP_DIR="$S/backups" BACKUP_KEEP=2
 echo "uncommitted edit" >> "$K/QUEUE.md"; mkdir -p "$K/.install/logs"; echo noisy > "$K/.install/logs/x.log"
 HOME="$S" python3 "$BIN/kit-backup" | grep -q "MB), checked$" && ok "backup: made and checked" || bad "backup make"
 A=$(ls "$S/backups"/kit-backup-*.tar.gz | head -1)
-[ "$(stat -f %Lp "$A")" = 600 ] && [ "$(stat -f %Lp "$S/backups")" = 700 ] && ok "backup: owner-only permissions" || bad "backup perms"
+[ "$(mode "$A")" = 600 ] && [ "$(mode "$S/backups")" = 700 ] && ok "backup: owner-only permissions" || bad "backup perms"
 tar -tzf "$A" | grep -q "files/.install/logs" && bad "backup: logs excluded" || ok "backup: logs excluded"
 HOME="$S" python3 "$BIN/kit-backup" restore "$A" --to "$S/restored" >/dev/null
 diff -q "$K/QUEUE.md" "$S/restored/QUEUE.md" >/dev/null && [ -f "$S/restored/memory/people/a.md" ] \

@@ -3,6 +3,9 @@
 # fake Kit; the passphrase is a plain test phrase from an environment variable. A wrapper around the
 # real openssl records its command lines, so the test can check the passphrase never appears there.
 #   bash tests/test_backup_encrypt.sh
+# File mode as octal digits, the same with BSD or GNU tools first on the PATH (Homebrew's coreutils
+# put GNU stat ahead of macOS's, where `stat -f` means something else).
+mode() { python3 -c 'import os,sys; print(format(os.stat(sys.argv[1]).st_mode & 0o777, "o"))' "$1"; }
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$HERE/shared/bin"
@@ -36,7 +39,7 @@ A=$(ls "$HOME/bk"/kit-backup-*.tar.gz.enc 2>/dev/null | head -1)
 ls "$HOME/bk"/*.tar.gz 2>/dev/null | grep -q . && bad "plain .tar.gz left behind" || ok "no plain archive left behind"
 head -c 8 "$A" | grep -q "KITBAK1" && ok "file starts with the Kit header" || bad "header missing"
 tar -tzf "$A" >/dev/null 2>&1 && bad "encrypted file opens as a plain tar" || ok "contents unreadable without decrypting"
-[ "$(stat -f %Lp "$A")" = 600 ] && ok "owner-only permissions" || bad "perms"
+[ "$(mode "$A")" = 600 ] && ok "owner-only permissions" || bad "perms"
 BK verify "$A" | grep -q "checks out" && ok "verify with the right passphrase" || bad "verify"
 BK restore "$A" --to "$S/restored" >/dev/null 2>&1
 diff -q "$KIT_DIR/QUEUE.md" "$S/restored/QUEUE.md" >/dev/null && [ -f "$S/restored/memory/a.md" ] \
