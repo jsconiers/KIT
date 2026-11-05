@@ -32,8 +32,8 @@ def ok(cond, name, detail=""):
 
 TMP = pathlib.Path(tempfile.mkdtemp(prefix="kit-release-"))
 R = TMP / "KIT"
-ENV = dict(os.environ, GIT_AUTHOR_NAME="Test", GIT_AUTHOR_EMAIL="t@example.invalid", GIT_COMMITTER_NAME="Test",
-           GIT_COMMITTER_EMAIL="t@example.invalid", PYTHONDONTWRITEBYTECODE="1", GIT_CONFIG_NOSYSTEM="1",
+ENV = dict(os.environ, GIT_AUTHOR_NAME="Test", GIT_AUTHOR_EMAIL="kit-test", GIT_COMMITTER_NAME="Test",
+           GIT_COMMITTER_EMAIL="kit-test", PYTHONDONTWRITEBYTECODE="1", GIT_CONFIG_NOSYSTEM="1",
            HOME=str(TMP))
 
 
@@ -111,7 +111,7 @@ r = sh(sys.executable, str(inst / "kit-release"), "1.7.0", cwd=TMP)
 ok(r.returncode == 1 and "isn't a git clone" in r.stderr, "refused: the installed copy isn't a clone", r.stderr)
 
 # ---- the real thing ---------------------------------------------------------------------------------------------
-rc, out, err = rel("1.7.0", "--date", "2026-11-14", "--trailer", "Co-Authored-By: Someone <x@example.invalid>")
+rc, out, err = rel("1.7.0", "--date", "2026-11-14", "--trailer", "Co-Authored-By: Someone Else")
 ok(rc == 0, "it releases", out + err)
 ok((R / "VERSION").read_text() == "1.7.0\n", "VERSION is bumped")
 log = (R / "CHANGELOG.md").read_text()
@@ -121,7 +121,7 @@ g = (R / "docs/GUIDE.md").read_text()
 ok("| Describes | Kit 1.7.0 |" in g and "| Date | 14-Nov-2026 |" in g, "the docs' version and date rows", g)
 msg = sh("git", "log", "-1", "--format=%B").stdout
 ok(msg.startswith("Release 1.7.0\n") and "VERSION 1.6.3 -> 1.7.0: 3 change(s)" in msg
-   and "- Fixed: kit-wins month counts unpriced runs." in msg and msg.rstrip().endswith("<x@example.invalid>"),
+   and "- Fixed: kit-wins month counts unpriced runs." in msg and msg.rstrip().endswith("Co-Authored-By: Someone Else"),
    "the commit message, with the trailer last", msg)
 ok(sh("git", "status", "--porcelain").stdout.strip() == "", "everything is committed (the zip goes in ignored dist/)")
 tag = sh("git", "cat-file", "-t", "v1.7.0").stdout.strip()
