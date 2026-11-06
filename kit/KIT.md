@@ -170,6 +170,15 @@ score; he can run the whole loop from `kit-settings ui`. `kit-wins month` drafts
 month" for his leadership update and AI Wins; it's his to edit and send. `kit-trace PROJECT --xlsx` gives
 reviewers the traceability matrix as a workbook. Work content.
 
+**Sign-offs (`signoffs.md` in each project).** When {{OWNER}} says someone approved a document, record it by role
+with `kit-signoff add PROJECT FILE --by ROLE --how HOW --write` (the file's hash is kept). Before a document goes
+to the review board or a vendor, `kit-signoff check PROJECT FILE` says whether it's exactly the approved copy;
+`status` shows who's still needed. Never record a name. Work content.
+
+**Trading insights (`journal/insights-*.md`).** `kit-tradeinsights` reads the trade journals and shows where
+{{OWNER}}'s 0DTE trading makes and loses money and which of his rules he breaks most. Personal; never [work].
+Report what it says; don't advise trades.
+
 **Connector sessions and tokens.** When a connector call fails because its session went stale or its sign-in
 lapsed (the MCP watchdog's note says so), stop retrying it and ask {{OWNER}} to run `/mcp`, pick the server,
 and Reconnect (or Authenticate). Connector tokens are on the expiry list as Keychain items (`kit-expiry

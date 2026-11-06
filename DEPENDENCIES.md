@@ -57,6 +57,8 @@ For installing and configuring, see INSTALL.md; for how the pieces fit, see DESI
 | `kit-refarch` | Python 3.8; a reference-architecture index in the library | Same code | Match by hand with kit-precedent |
 | `kit-sysprofile` | Python 3.8; the library root | Same code | Assemble profiles by hand |
 | `kit-trace` | Python 3.8; the project's IA (Markdown or .docx), plus its GDS, test plan, and change request when they exist; `--xlsx` uses `shared/kit_xlsx.py` (standard library) | Same code | Trace requirements by hand in the template |
+| `kit-signoff` | Python 3.8; the library root (or a project path) | Same code | Keep approvals in a table by hand and compare files yourself |
+| `kit-tradeinsights` | Python 3.8; the trade journal run's `journal/` files | Same code | Read the journals and the monthly scorecard by hand |
 | `kit-release` | Python 3.8; git; a clone of the repository | Same code | Bump VERSION, the changelog, and the docs by hand, then `git archive` and `shasum -a 256` (INSTALL.md) |
 | `kit-tickets`, `ticket_watch.py` | Python 3.8; the gateway agent and a service-management connector (MCP server) in connector-guard.json for the morning run | Same code | No "Your tickets" section; ask the gateway in a session |
 | `kit-mcp-watch` | Python 3.8; `kit-hook`; Claude Code hooks in `~/.claude/settings.json` (the installer adds them) | Same code (hooks run in Git Bash on Windows) | Stale connector sessions show up only as failing calls; reconnect with `/mcp` |

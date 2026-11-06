@@ -5,6 +5,29 @@ What changed in each Kit release. The installed version is in
 morning brief summarizes the new entries once. Format: [Keep a Changelog](https://keepachangelog.com),
 versions follow [semantic versioning](https://semver.org).
 
+## [Unreleased]
+
+### Added
+- `kit-signoff`, the sign-off ledger: who approved which version of each IA or GDS, by role, when, and how, in
+  `PROJECT/signoffs.md` (a table you can edit by hand). `add` records a sign-off with the file's SHA-256 (a preview
+  first; `--write` saves it), `require` sets who must sign off, `status` shows per document whether its latest
+  version is approved, who's still needed, who approved only an older version, and whether the file changed after
+  approval, and `check FILE` says whether a file is exactly an approved copy (exit 0) or not (exit 1). Nothing is
+  sent; approvers are roles, never names (tests/test_signoff.py).
+- `kit-tradeinsights`, patterns in your 0DTE trading from Kit's daily trade journals (the last 30 days, `--month`,
+  or `--from`/`--to`): results by time of day, weekday, calls against puts, and hold time; the first trade of the
+  day and the trade after a loss against the trade after a win; how often each rule was kept or broken, on which
+  days, and what the trades after 13:00 made or lost; the two or three biggest leaks, from groups with at least 5
+  trades; and the days whose journal it couldn't read. Only your own trade tables count (the trail guard, paper
+  scalper, and agentic account are skipped). Personal, read-only apart from `--write` (journal/insights-<period>.md)
+  (tests/test_tradeinsights.py).
+
+### Fixed
+- Seven shell tests failed with Homebrew's GNU `stat` and `sed` ahead of macOS's own tools (and on Linux): the
+  owner-only permission checks used BSD `stat -f`, and test_sql_init used BSD `sed -i ''`. They now use Python for
+  both; nothing in Kit itself was wrong.
+- test_release no longer uses email addresses in its throwaway repository, which the personal-details scan flagged.
+
 ## [1.7.0] - 2026-11-05
 
 ### Added

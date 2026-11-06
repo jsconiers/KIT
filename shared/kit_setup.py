@@ -83,6 +83,10 @@ ALLOW = [f"Read({K}/**)", f"Edit({K}/memory/**)", f"Edit({K}/QUEUE.md)", f"Edit(
          # The MCP watchdog's report and the ticket watcher's last check only read Kit's own logs.
          "Bash(kit-mcp-watch status)", "Bash(kit-mcp-watch status *)", "Bash(kit-tickets show)",
          "Bash(kit-tickets show *)",
+         # The sign-off ledger's reading commands (add and require change it only with --write) and the trading
+         # insights, which read the journals and write only with --write into journal/.
+         "Bash(kit-signoff list *)", "Bash(kit-signoff status *)", "Bash(kit-signoff check *)",
+         "Bash(kit-tradeinsights)", "Bash(kit-tradeinsights *)",
          # The vendor evaluation desk's reading commands. The rest change an evaluation in the library or write a
          # file you name, so they ask.
          "Bash(kit-vendors)", "Bash(kit-vendors list)", "Bash(kit-vendors list *)", "Bash(kit-vendors due)",

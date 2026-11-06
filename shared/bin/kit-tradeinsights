@@ -1,0 +1,326 @@
+#!/usr/bin/env python3
+"""kit-tradeinsights: patterns in your 0DTE trading, from Kit's daily trade journals.
+
+  kit-tradeinsights [--month YYYY-MM | --from D --to D] [--write] [--json]
+
+By default the last 30 days. It reads journal/YYYY-MM-DD.md (the trade journal run writes one each market day)
+and reports, from your own trades only:
+  - the period: trading days, round trips, win rate, gross P&L by the trades, and fee-inclusive P&L where the
+    journal has it
+  - when you trade best: by time of day (the first hour, late morning, midday, after 13:00), by weekday, calls
+    against puts, and by how long you held, when the journal has open times
+  - streaks: your first trade of the day against later ones, and the trade after a loss against the trade after
+    a win (a revenge-trading check)
+  - your rules: how often each was kept or broken (13:00 ET hard stop, at most 9 round trips, stop at target,
+    tilt), on which days, and what the trades after 13:00 made or lost
+  - the leaks: the two or three things that cost the most, worked out from the above, never guessed
+  - what it couldn't read: days whose journal had no trade table or no figures
+
+Trades come from each journal's table of your trades (a Close or Closed time, the contract, and its P&L). Tables
+under the trail guard, the paper scalper, the bot, or the agentic account are skipped. P&L per trade is gross (before
+fees), as the journals give it; the fee-inclusive day totals are shown alongside. A group with fewer than 5 trades
+says "too few to judge". --write saves journal/insights-<period>.md. Personal: never tagged [work], read-only apart
+from --write, no model, broker, or connector call. KIT_DIR overrides the Kit folder (for tests).
+"""
+import argparse
+import datetime as dt
+import json
+import pathlib
+import re
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import kit_daily as kd  # noqa: E402
+
+PROG = "kit-tradeinsights"
+JOURNAL = kd.KIT / "journal"
+SKIP_SECTION = re.compile(r"trail|scalper|paper|\bbot\b|agentic|robinhood mcp|guard", re.I)
+MONEY = re.compile(r"([+\-−–]?)\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)")
+TIME = re.compile(r"\b(\d{1,2}):(\d{2})(?::(\d{2}))?\b")
+MIN_N = 5
+BUCKETS = [("09:30-10:30 (first hour)", (9 * 60 + 30, 10 * 60 + 30)), ("10:30-12:00", (10 * 60 + 30, 12 * 60)),
+           ("12:00-13:00", (12 * 60, 13 * 60)), ("after 13:00", (13 * 60, 16 * 60 + 15))]
+HOLDS = [("under 5 min", (0, 5)), ("5-15 min", (5, 15)), ("15-60 min", (15, 60)), ("over 60 min", (60, 10 ** 6))]
+RULES = [("13:00 ET hard stop", re.compile(r"13:00", re.I)),
+         ("at most 9 round trips", re.compile(r"round[- ]trip|\b9\b", re.I)),
+         ("stop at target", re.compile(r"stop at (?:the )?target", re.I)),
+         ("tilt", re.compile(r"^tilt", re.I))]
+RULE_SECTION = re.compile(r"discipline|rules|tilt", re.I)
+
+
+def money(text):
+    m = MONEY.search(text or "")
+    if not m:
+        return None
+    v = float(m.group(2).replace(",", ""))
+    return -v if m.group(1) in ("-", "−", "–") else v
+
+
+def minutes(text):
+    m = TIME.search(text or "")
+    return int(m.group(1)) * 60 + int(m.group(2)) if m else None
+
+
+def split_row(ln):
+    return [c.strip() for c in ln.strip().strip("|").split("|")]
+
+
+def parse_day(path):
+    """{date, trades: [{close, open, contract, side, pnl}], net, rules: {rule: status}, traded, readable, notes}."""
+    text = kd.read(path)
+    day = {"date": dt.date.fromisoformat(path.stem), "trades": [], "net": None, "rules": {}, "traded": None,
+           "readable": True, "notes": []}
+    lines = text.splitlines()
+    section = ""
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        if ln.startswith("#"):
+            section = ln.lstrip("#").strip()
+        if (ln.lstrip().startswith("|") and i + 1 < len(lines) and re.match(r"^\s*\|[\s:|-]+\|\s*$", lines[i + 1])):
+            head = [h.lower() for h in split_row(ln)]
+            j = i + 2
+            body = []
+            while j < len(lines) and lines[j].lstrip().startswith("|"):
+                body.append(split_row(lines[j]))
+                j += 1
+            ci = next((k for k, h in enumerate(head) if re.match(r"^(close|closed)\b", h)), None)
+            pi = next((k for k, h in enumerate(head) if re.search(r"p&l|pnl", h) and "cumul" not in h), None)
+            oi = next((k for k, h in enumerate(head) if re.match(r"^(open|opened)\b", h)), None)
+            ki = next((k for k, h in enumerate(head) if re.search(r"contract|option|symbol", h)), None)
+            if ci is not None and pi is not None and not SKIP_SECTION.search(section):
+                for r in body:
+                    if len(r) <= max(ci, pi):
+                        continue
+                    close, pnl = minutes(r[ci]), money(r[pi])
+                    if close is None or pnl is None:
+                        continue
+                    contract = r[ki] if ki is not None and ki < len(r) else ""
+                    side = "call" if re.search(r"\d\s*C\b", contract) else "put" if re.search(r"\d\s*P\b", contract) else ""
+                    day["trades"].append({"close": close, "open": minutes(r[oi]) if oi is not None and oi < len(r) else None,
+                                          "contract": contract, "side": side, "pnl": pnl})
+            # The day's fee-inclusive net, from its numbers table.
+            for r in body:
+                if r and re.search(r"fee-inclusive|net p&l|net, fee|after fees", r[0], re.I) and len(r) > 1 \
+                        and day["net"] is None:
+                    day["net"] = money(r[1])
+            i = j
+            continue
+        s = ln.strip()
+        if s.startswith("- ") and (RULE_SECTION.search(section) or s.startswith("- **")) \
+                and not SKIP_SECTION.search(section):
+            name = re.sub(r"\*\*", "", s[2:]).strip()
+            label = re.split(r":(?!\d)", name, maxsplit=1)[0]
+            rest = name[len(label):].lower()
+            for rule, rx in RULES:
+                if rx.search(label) and rule not in day["rules"]:
+                    day["rules"][rule] = ("broken" if re.search(r"\bbroken\b", rest) else
+                                          "n/a" if re.search(r"not applicable|doesn.t apply|does not apply|not tested|"
+                                                             r"n/a|not assessed|too few", rest) else
+                                          "kept" if re.search(r"\bkept\b|\bnone\b|none detected|no flags|held", rest) else
+                                          "unknown")
+        i += 1
+    if day["net"] is None:
+        m = re.search(r"fee-inclusive p&l (?:was|of)\s*\**([+\-−]?\$[0-9,.]+)", text, re.I)
+        if m:
+            day["net"] = money(m.group(1))
+    no_trades = re.search(r"no spx trades|made no spx trades|\b0 round trips\b", text, re.I)
+    if day["trades"]:
+        day["traded"] = True
+    elif no_trades:
+        day["traded"] = False
+        day["net"] = day["net"] if day["net"] is not None else 0.0
+    else:
+        day["readable"] = False
+        if re.search(r"not available|unavailable|unknown|failed|timed out", text, re.I):
+            day["notes"].append("the journal's sources failed that day")
+        else:
+            day["notes"].append("no table of your trades")
+    if day["trades"]:
+        day["trades"].sort(key=lambda t: t["close"])
+        late = [t for t in day["trades"] if t["close"] >= 13 * 60]
+        if day["rules"].get("13:00 ET hard stop", "unknown") == "unknown":
+            day["rules"]["13:00 ET hard stop"] = "broken" if late else "kept"
+            day["notes"].append("13:00 rule worked out from the close times")
+    return day
+
+
+def stats(trades):
+    n = len(trades)
+    wins = [t for t in trades if t["pnl"] > 0]
+    total = sum(t["pnl"] for t in trades)
+    return {"trades": n, "wins": len(wins), "win_rate": round(100 * len(wins) / n, 1) if n else None,
+            "pnl": round(total, 2), "avg": round(total / n, 2) if n else None, "enough": n >= MIN_N}
+
+
+def period(a):
+    if a.month:
+        m = re.fullmatch(r"(\d{4})-(\d{2})", a.month)
+        if not m:
+            raise SystemExit(f"{PROG}: --month takes YYYY-MM")
+        y, mo = int(m.group(1)), int(m.group(2))
+        start = dt.date(y, mo, 1)
+        end = dt.date(y + (mo == 12), mo % 12 + 1, 1) - dt.timedelta(days=1)
+        return start, end, a.month
+    end = kd.parse_date(a.to) if a.to else kd.today()
+    start = kd.parse_date(a.start) if a.start else end - dt.timedelta(days=29)
+    if not start or not end:
+        raise SystemExit(f"{PROG}: dates are DD-Mmm-YYYY or YYYY-MM-DD")
+    return start, end, f"{start.isoformat()}-to-{end.isoformat()}"
+
+
+def analyse(start, end):
+    days = []
+    for p in sorted(JOURNAL.glob("????-??-??.md")):
+        try:
+            d = dt.date.fromisoformat(p.stem)
+        except ValueError:
+            continue
+        if start <= d <= end:
+            days.append(parse_day(p))
+    trades = [dict(t, date=d["date"]) for d in days for t in d["trades"]]
+    by_time = {name: stats([t for t in trades if lo <= t["close"] < hi]) for name, (lo, hi) in BUCKETS}
+    by_day = {wd: stats([t for t in trades if t["date"].strftime("%A") == wd])
+              for wd in ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday")}
+    by_side = {s: stats([t for t in trades if t["side"] == s]) for s in ("call", "put")}
+    held = [t for t in trades if t["open"] is not None and t["close"] >= t["open"]]
+    by_hold = {name: stats([t for t in held if lo <= t["close"] - t["open"] < hi]) for name, (lo, hi) in HOLDS}
+    first, later, after_loss, after_win = [], [], [], []
+    for d in days:
+        for k, t in enumerate(d["trades"]):
+            (first if k == 0 else later).append(t)
+            if k:
+                (after_loss if d["trades"][k - 1]["pnl"] < 0 else after_win).append(t)
+    rules = {}
+    for rule, _ in RULES:
+        st = {"kept": [], "broken": [], "n/a": [], "unknown": []}
+        for d in days:
+            if d["traded"] and rule in d["rules"]:
+                st[d["rules"][rule]].append(kd.fmt(d["date"]))
+            elif d["traded"]:
+                st["unknown"].append(kd.fmt(d["date"]))
+        rules[rule] = st
+    late = [t for t in trades if t["close"] >= 13 * 60]
+    traded = [d for d in days if d["traded"]]
+    nets = [d["net"] for d in traded if d["net"] is not None]
+    res = {"from": start.isoformat(), "to": end.isoformat(), "journals": len(days), "trading_days": len(traded),
+           "no_trade_days": sum(1 for d in days if d["traded"] is False),
+           "unreadable": [{"date": kd.fmt(d["date"]), "why": "; ".join(d["notes"])} for d in days if not d["readable"]],
+           "overall": stats(trades),
+           "net_fee_inclusive": round(sum(nets), 2) if nets else None, "net_days_known": len(nets),
+           "by_time": by_time, "by_weekday": by_day, "by_side": by_side, "by_hold": by_hold,
+           "held_known": len(held), "first_trade": stats(first), "later_trades": stats(later),
+           "after_loss": stats(after_loss), "after_win": stats(after_win), "rules": rules,
+           "after_1300": stats(late), "without_after_1300": round(sum(t["pnl"] for t in trades) -
+                                                                   sum(t["pnl"] for t in late), 2)}
+    res["leaks"] = leaks(res)
+    return res
+
+
+def leaks(r):
+    """The biggest costs, each from a group with enough trades, worst first."""
+    out = []
+    broken = r["rules"]["13:00 ET hard stop"]["broken"]
+    rule_leak = bool(broken) and r["after_1300"]["pnl"] < 0
+    for name, s in [(k, v) for k, v in r["by_time"].items() if not (rule_leak and k == "after 13:00")] + [(f"{k}s", v) for k, v in r["by_side"].items()] + \
+            list(r["by_weekday"].items()) + [(f"held {k}", v) for k, v in r["by_hold"].items()]:
+        if s["enough"] and s["pnl"] < 0:
+            out.append((s["pnl"], f"{name}: {s['trades']} trades lost ${-s['pnl']:,.2f} gross "
+                                  f"(win rate {s['win_rate']:g}%)"))
+    al, aw = r["after_loss"], r["after_win"]
+    if al["enough"] and aw["trades"] and al["win_rate"] is not None and aw["win_rate"] is not None \
+            and al["win_rate"] + 10 <= aw["win_rate"]:
+        out.append((al["pnl"] if al["pnl"] < 0 else -0.01,
+                    f"the trade after a loss: win rate {al['win_rate']:g}% against {aw['win_rate']:g}% after a win "
+                    f"({al['trades']} trades, ${al['pnl']:+,.2f}); a pause after a loss may help"))
+    if rule_leak:
+        out.append((r["after_1300"]["pnl"], f"the 13:00 hard stop, broken on {len(broken)} day(s): trades after 13:00 "
+                                            f"lost ${-r['after_1300']['pnl']:,.2f} gross"))
+    out.sort(key=lambda x: x[0])
+    seen, final = set(), []
+    for _, text in out:
+        if text not in seen:
+            seen.add(text)
+            final.append(text)
+    return final[:3]
+
+
+def fmt_stats(s):
+    if not s["trades"]:
+        return "none"
+    base = f"{s['trades']} trades, {s['win_rate']:g}% wins, ${s['pnl']:+,.2f} (avg ${s['avg']:+,.2f})"
+    return base + ("" if s["enough"] else ", too few to judge")
+
+
+def render(r, label):
+    o = r["overall"]
+    out = [f"# Trading insights: {label}", "",
+           f"From {r['journals']} journal(s), {kd.fmt(dt.date.fromisoformat(r['from']))} to "
+           f"{kd.fmt(dt.date.fromisoformat(r['to']))}. Generated {kd.fmt(kd.today())} by `kit-tradeinsights`. "
+           "P&L per trade is gross (before fees), as the journals give it.", "",
+           "## The period", "",
+           f"- **{r['trading_days']} trading day(s)**, {r['no_trade_days']} with no trades, "
+           f"{len(r['unreadable'])} the journal couldn't show",
+           f"- **{o['trades']} round trips**, win rate {o['win_rate'] if o['win_rate'] is not None else '-'}%, "
+           f"**${o['pnl']:+,.2f} gross**"
+           + (f"; fee-inclusive ${r['net_fee_inclusive']:+,.2f} over the {r['net_days_known']} day(s) with that figure"
+              if r["net_fee_inclusive"] is not None else ""), ""]
+    out += ["## The leaks", ""]
+    out += [f"- {x}" for x in r["leaks"]] or ["- Nothing stands out yet: no group with enough trades lost money."]
+    out += ["", "## By time of day (close time, ET)", "", "| When | Result |", "|---|---|"]
+    out += [f"| {k} | {fmt_stats(v)} |" for k, v in r["by_time"].items()]
+    out += ["", "## By weekday", "", "| Day | Result |", "|---|---|"]
+    out += [f"| {k} | {fmt_stats(v)} |" for k, v in r["by_weekday"].items()]
+    out += ["", "## Calls and puts", "", "| Side | Result |", "|---|---|"]
+    out += [f"| {k}s | {fmt_stats(v)} |" for k, v in r["by_side"].items()]
+    if r["held_known"]:
+        out += ["", f"## How long you held ({r['held_known']} trades with an open time)", "", "| Held | Result |", "|---|---|"]
+        out += [f"| {k} | {fmt_stats(v)} |" for k, v in r["by_hold"].items()]
+    out += ["", "## Streaks", "",
+            f"- First trade of the day: {fmt_stats(r['first_trade'])}",
+            f"- Later trades: {fmt_stats(r['later_trades'])}",
+            f"- The trade after a loss: {fmt_stats(r['after_loss'])}",
+            f"- The trade after a win: {fmt_stats(r['after_win'])}", "",
+            "## Your rules", "", "| Rule | Kept | Broken | Not applicable | Couldn't tell |", "|---|---|---|---|---|"]
+    for rule, st in r["rules"].items():
+        out.append(f"| {rule} | {len(st['kept'])} | {len(st['broken'])}"
+                   + (f" ({', '.join(x[:6] for x in st['broken'])})" if st["broken"] else "")
+                   + f" | {len(st['n/a'])} | {len(st['unknown'])} |")
+    a = r["after_1300"]
+    out += ["", f"Trades closed after 13:00: {fmt_stats(a)}. Without them the period would have been "
+                f"${r['without_after_1300']:+,.2f} gross."]
+    if r["unreadable"]:
+        out += ["", "## Couldn't read", ""] + [f"- {u['date']}: {u['why']}" for u in r["unreadable"]]
+        out += ["", "Rerun the journal for those days (kit-journal-backfill DATE, if you have it) and run this again."]
+    return "\n".join(out) + "\n"
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog=PROG, description=__doc__.split("\n\n")[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
+    ap.add_argument("--month")
+    ap.add_argument("--from", dest="start")
+    ap.add_argument("--to")
+    ap.add_argument("--write", action="store_true")
+    ap.add_argument("--json", action="store_true")
+    a = ap.parse_args(argv)
+    start, end, label = period(a)
+    if not JOURNAL.is_dir():
+        print(f"{PROG}: no journal folder at {JOURNAL} (the trade journal run writes it)", file=sys.stderr)
+        return 1
+    r = analyse(start, end)
+    if a.json:
+        print(json.dumps(r, indent=2, default=str))
+        return 0
+    text = render(r, label)
+    if not a.write:
+        print(text, end="")
+        return 0
+    dest = JOURNAL / f"insights-{label}.md"
+    kd.write(dest, text)
+    print(f"{PROG}: wrote {dest}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

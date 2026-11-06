@@ -124,6 +124,7 @@ The installer links these into `~/.local/bin` (all in `shared/bin/`):
 | `kit-wins` | Accomplishments log for reviews and 1:1s: collect, this month, report by theme; `mark` after editing the log by hand; `month` is the one-page "what Kit did this month" for leadership updates and AI Wins (work finished, highlights, runs and estimated cost against the month before; `--write` saves Markdown and a print-ready page) |
 | `kit-feedback` | A private log of feedback on the people you lead (praise, coaching, goals): 1:1 prep, review notes, and who's had no note lately; never shared or texted |
 | `kit-meetload` | Meeting load audit: hours and share of working hours, recurring meetings' weekly cost, back-to-back runs, focus time left, after-hours meetings, double bookings, suggestions; `--holds` drafts focus time; reads the calendar, a JSON file, or an .ics export |
+| `kit-tradeinsights` | Patterns in your 0DTE trading from the daily journals: by time of day, weekday, calls and puts, and hold time; after a loss against after a win; rules kept and broken and what breaking the 13:00 stop cost; the biggest leaks; personal, never tagged work |
 | `kit-dates` | Important dates (birthdays, anniversaries, work anniversaries), with a to-do and a drafted card or note when one comes up |
 | `kit-touch` | Keep in touch: who you haven't talked to in a while, by your own rhythm for each; calls and meals on the calendar count |
 | `kit-library` | Catalogs folders you choose (collections): tags, full-text and scripture search, scanned PDFs read on the Mac; delivers finished work to an output folder, mirrored to a synced folder if you like (Claude Code asks before mirror and fetch; work and confidential material is never mirrored) |
@@ -138,6 +139,7 @@ The installer links these into `~/.local/bin` (all in `shared/bin/`):
 | `kit-refarch` | Suggests which published reference architectures fit a demand, ranked, with why |
 | `kit-precedent` | Ranked search of the library's indexes and registers for precedent |
 | `kit-sysprofile` | One-page profile of a system from the library's records, every line cited |
+| `kit-signoff` | Sign-off ledger: who approved which version of each IA or GDS (by role), when, and how, with each approved file's SHA-256; `status` per document (approved, still needed, edited since approval) and `check FILE` (is this exactly the approved copy?) |
 | `kit-trace` | Requirement-to-evidence matrix: IA requirement to GDS section, test case, change step, and POC verdict, with gaps flagged; `--xlsx` writes it as an Excel workbook for reviewers (gaps shaded, Reviewer status and notes columns, gap, orphan, and summary sheets), with no Excel or add-ins needed |
 | `kit-csf` | Coverage of a NIST CSF 2.0 mapping per Function, with gaps, blanks, and ID checks; `--portfolio` across projects |
 | `kit-sizing` | Rough-order compute, storage, and network sizing, every assumption shown |

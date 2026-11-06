@@ -1,0 +1,325 @@
+#!/usr/bin/env python3
+"""kit-signoff: the sign-off ledger. Who approved which version of each IA or GDS, when, and how, so "was this
+the approved version?" has one answer.
+
+  kit-signoff add PROJECT FILE --by ROLE [--how HOW] [--date D] [--evidence TEXT] [--version V] [--write]
+        record that ROLE approved FILE (a draft in the project). It notes the file's SHA-256, so a later edit is
+        caught. Shows the row and writes nothing without --write
+  kit-signoff list PROJECT [--json]              every sign-off, newest first
+  kit-signoff status PROJECT [--json]            per document: its latest version, who approved it, who approved an
+                                                 older version only, and who's still needed (the ledger's Required line)
+  kit-signoff check PROJECT FILE [--json]        is FILE exactly a version someone signed off? Exit 0 yes, 1 no (an
+                                                 edited copy, or a version nobody approved), 2 a usage problem
+  kit-signoff require PROJECT ROLE [ROLE ...] [--write]
+                                                 set who must sign off each document (the Required line)
+
+PROJECT is a folder under <library root>/artifacts/ (the library root in memory/context/library.md), or a path to
+one. FILE is a file in the project (its drafts/ folder is looked in too), or a path. The ledger is
+PROJECT/signoffs.md: a table you can read and edit by hand, one row per sign-off (date, document, version, role,
+how, evidence, the file's SHA-256 and name). A document is its file name without the version and date ("Payments
+hub IA v0.3.docx" is "Payments hub IA", version 0.3). Approvers are recorded by role (ARB chair, CISO delegate,
+domain owner), as Kit's other work registers are, never by name. Nothing is sent or asked of anyone. Work content.
+"""
+import argparse
+import datetime as dt
+import hashlib
+import json
+import os
+import pathlib
+import re
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import kit_daily as kd  # noqa: E402
+
+PROG = "kit-signoff"
+LEDGER = "signoffs.md"
+HOWS = ("arb", "email", "meeting", "chat", "document", "other")
+HEAD = ["Date", "Document", "Version", "Approved by (role)", "How", "Evidence", "SHA-256", "File"]
+VER = re.compile(r"[\s_-]*\bv(\d+(?:\.\d+)*)\b", re.I)
+DATE_IN = re.compile(r"[\s_-]*\b(\d{4}-\d{2}-\d{2}|\d{1,2}-[A-Za-z]{3}-\d{4})\b")
+
+
+class Stop(Exception):
+    def __init__(self, msg, code=2):
+        super().__init__(msg)
+        self.code = code
+
+
+def project_dir(name):
+    p = pathlib.Path(os.path.expanduser(name))
+    if p.is_dir() and (p.is_absolute() or os.sep in name or "/" in name):
+        return p.resolve()
+    root = kd.library_root()
+    if not root:
+        raise Stop("no library root: set Library root in memory/context/library.md, or give the project's path")
+    p = root / "artifacts" / name
+    if not p.is_dir():
+        raise Stop(f"no project folder {p}")
+    return p
+
+
+def find_file(proj, name):
+    p = pathlib.Path(os.path.expanduser(name))
+    for c in ([p] if p.is_absolute() else [proj / name, proj / "drafts" / name, pathlib.Path.cwd() / name]):
+        if c.is_file():
+            return c.resolve()
+    raise Stop(f"no file {name} in {proj} or its drafts/ folder (give its path)")
+
+
+def doc_and_version(path, given=None):
+    stem = pathlib.Path(path).stem
+    m = None
+    for m in VER.finditer(stem):
+        pass
+    version = given.lstrip("vV") if given else (m.group(1) if m else "")
+    doc = VER.sub("", stem)
+    doc = DATE_IN.sub("", doc)
+    doc = re.sub(r"[\s_-]+$", "", re.sub(r"\s{2,}", " ", doc)).strip(" _-") or stem
+    return doc, version
+
+
+def sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def cell(s):
+    return str(s or "").replace("|", "/").replace("\n", " ").strip()
+
+
+def read_ledger(proj):
+    """(required roles, rows) from PROJECT/signoffs.md."""
+    text = kd.read(proj / LEDGER)
+    m = re.search(r"^Required:\s*(.*)$", text, re.M)
+    required = [r.strip() for r in m.group(1).split(",") if r.strip() and r.strip().lower() != "not set"] if m else []
+    rows, head = [], None
+    for ln in text.splitlines():
+        if not ln.strip().startswith("|"):
+            head = None if not ln.strip() else head
+            continue
+        cells = [c.strip() for c in ln.strip().strip("|").split("|")]
+        if all(re.fullmatch(r":?-+:?", c) for c in cells if c):
+            continue
+        if head is None:
+            head = [c.lower() for c in cells]
+            continue
+        r = dict(zip(head, cells))
+        def g(*keys):
+            for k in keys:
+                for hk, v in r.items():
+                    if hk.startswith(k):
+                        return v
+            return ""
+        rows.append({"date": g("date"), "document": g("document"), "version": g("version").lstrip("vV"),
+                     "role": g("approved", "role"), "how": g("how"), "evidence": g("evidence"),
+                     "sha256": g("sha").lower(), "file": g("file")})
+    return required, rows
+
+
+def write_ledger(proj, required, rows):
+    rows = sorted(rows, key=lambda r: (kd.parse_date(r["date"]) or dt.date.min, r["document"], r["version"]))
+    out = [f"# Sign-offs: {proj.name}", "",
+           "Who approved which version of each document, by role. Written by `kit-signoff`; you can edit it by hand.",
+           "The SHA-256 is the approved file's, so `kit-signoff check` can tell an edited copy from the approved one.",
+           "", "Required: " + (", ".join(required) if required else "not set"), "",
+           "| " + " | ".join(HEAD) + " |", "|" + "---|" * len(HEAD)]
+    for r in rows:
+        out.append("| " + " | ".join(cell(x) for x in (r["date"], r["document"], ("v" + r["version"]) if r["version"]
+                                                        else "", r["role"], r["how"], r["evidence"], r["sha256"],
+                                                        r["file"])) + " |")
+    kd.write(proj / LEDGER, "\n".join(out) + "\n")
+
+
+def cmd_add(a):
+    proj = project_dir(a.project)
+    f = find_file(proj, a.file)
+    if not a.by.strip():
+        raise Stop("--by needs the approver's role")
+    if a.how and a.how.lower() not in HOWS:
+        raise Stop(f"--how is one of {', '.join(HOWS)}")
+    when = kd.parse_date(a.date) if a.date else kd.today()
+    if not when:
+        raise Stop("--date takes DD-Mmm-YYYY or YYYY-MM-DD")
+    doc, version = doc_and_version(f, a.version)
+    digest = sha256(f)
+    required, rows = read_ledger(proj)
+    row = {"date": kd.fmt(when), "document": doc, "version": version, "role": a.by.strip(),
+           "how": (a.how or "").lower(), "evidence": a.evidence or "", "sha256": digest,
+           "file": os.path.relpath(f, proj) if str(f).startswith(str(proj)) else f.name}
+    dup = [r for r in rows if r["document"].lower() == doc.lower() and r["version"] == version
+           and r["role"].lower() == row["role"].lower() and r["sha256"] == digest]
+    print(f"{PROG}: {row['role']} approved {doc} v{version or '?'} ({f.name}) on {row['date']}"
+          + (f", by {row['how']}" if row["how"] else "") + (f": {row['evidence']}" if row["evidence"] else ""))
+    print(f"  SHA-256 {digest}")
+    if dup:
+        print(f"{PROG}: already in the ledger; nothing to add")
+        return 0
+    if not a.write:
+        print(f"{PROG}: nothing written (add --write to record it in {proj / LEDGER})")
+        return 0
+    write_ledger(proj, required, rows + [row])
+    print(f"{PROG}: recorded in {proj / LEDGER}")
+    return 0
+
+
+def by_doc(rows):
+    docs = {}
+    for r in rows:
+        docs.setdefault(r["document"], []).append(r)
+    return docs
+
+
+def vkey(v):
+    return tuple(int(x) for x in re.findall(r"\d+", v or "")) or (0,)
+
+
+def doc_files(proj, doc):
+    """{version: path} for the files in the project that are versions of DOC."""
+    out = {}
+    for base in (proj, proj / "drafts"):
+        if base.is_dir():
+            for p in base.iterdir():
+                if p.is_file() and not p.name.startswith(".") and p.name != LEDGER:
+                    d, v = doc_and_version(p)
+                    if d.lower() == doc.lower() and v:
+                        out.setdefault(v, p)
+    return out
+
+
+def status(proj):
+    required, rows = read_ledger(proj)
+    out = []
+    for doc, rs in sorted(by_doc(rows).items()):
+        files = doc_files(proj, doc)
+        versions = set(files) | {r["version"] for r in rs if r["version"]}
+        latest = max(versions, key=vkey) if versions else ""
+        on_latest = sorted({r["role"] for r in rs if r["version"] == latest})
+        older = sorted({r["role"] for r in rs if r["version"] != latest} - set(on_latest))
+        missing = [x for x in required if x.lower() not in {y.lower() for y in on_latest}]
+        changed = False
+        if latest in files:
+            digest = sha256(files[latest])
+            changed = any(r["version"] == latest and r["sha256"] and r["sha256"] != digest for r in rs)
+        out.append({"document": doc, "latest": latest, "latest_file": str(files.get(latest, "")),
+                    "approved_latest_by": on_latest, "approved_older_only": older, "still_needed": missing,
+                    "latest_edited_since_approval": changed,
+                    "approved": bool(on_latest) and not missing and not changed})
+    return required, out
+
+
+def cmd_status(a):
+    proj = project_dir(a.project)
+    required, out = status(proj)
+    if a.json:
+        print(json.dumps({"project": proj.name, "required": required, "documents": out}, indent=2))
+        return 0
+    if not out:
+        print(f"{PROG}: no sign-offs recorded for {proj.name} yet")
+        return 0
+    print(f"Sign-offs: {proj.name}" + (f" (required: {', '.join(required)})" if required else " (no Required line)"))
+    for d in out:
+        word = "APPROVED" if d["approved"] else "not approved"
+        print(f"  {d['document']} v{d['latest'] or '?'}: {word}")
+        if d["approved_latest_by"]:
+            print(f"    signed off by: {', '.join(d['approved_latest_by'])}")
+        if d["still_needed"]:
+            print(f"    still needed: {', '.join(d['still_needed'])}")
+        if d["approved_older_only"]:
+            print(f"    approved an older version only: {', '.join(d['approved_older_only'])}")
+        if d["latest_edited_since_approval"]:
+            print("    the file has changed since it was signed off: get it approved again, or restore the approved copy")
+    return 0
+
+
+def cmd_list(a):
+    proj = project_dir(a.project)
+    _, rows = read_ledger(proj)
+    rows = sorted(rows, key=lambda r: kd.parse_date(r["date"]) or dt.date.min, reverse=True)
+    if a.json:
+        print(json.dumps(rows, indent=2))
+        return 0
+    if not rows:
+        print(f"{PROG}: no sign-offs recorded for {proj.name} yet")
+    for r in rows:
+        print(f"  {r['date']}  {r['document']} v{r['version'] or '?'}  {r['role']}"
+              + (f" ({r['how']})" if r["how"] else "") + (f": {r['evidence']}" if r["evidence"] else ""))
+    return 0
+
+
+def cmd_check(a):
+    proj = project_dir(a.project)
+    f = find_file(proj, a.file)
+    digest = sha256(f)
+    doc, version = doc_and_version(f)
+    _, rows = read_ledger(proj)
+    exact = [r for r in rows if r["sha256"] == digest]
+    same_doc = [r for r in rows if r["document"].lower() == doc.lower()]
+    res = {"file": str(f), "sha256": digest, "document": doc, "version": version,
+           "approved_by": sorted({r["role"] for r in exact}),
+           "approved_versions": sorted({r["version"] for r in same_doc}, key=vkey)}
+    if exact:
+        r = exact[0]
+        res["verdict"] = "approved"
+        msg = (f"{f.name} is exactly {r['document']} v{r['version'] or '?'} as signed off by "
+               f"{', '.join(res['approved_by'])} (first on {min(exact, key=lambda x: kd.parse_date(x['date']) or dt.date.min)['date']}).")
+    elif any(r["version"] == version for r in same_doc):
+        res["verdict"] = "edited"
+        msg = (f"{f.name} is NOT the approved copy: v{version} was signed off, but this file has changed since "
+               f"(its SHA-256 doesn't match the ledger).")
+    elif same_doc:
+        res["verdict"] = "unapproved version"
+        msg = (f"{f.name} (v{version or '?'}) hasn't been signed off. Approved versions of {doc}: "
+               + ", ".join("v" + v for v in res["approved_versions"] if v) + ".")
+    else:
+        res["verdict"] = "never approved"
+        msg = f"No version of {doc} has been signed off in {proj.name}."
+    if a.json:
+        print(json.dumps(res, indent=2))
+    else:
+        print(msg)
+    return 0 if exact else 1
+
+
+def cmd_require(a):
+    proj = project_dir(a.project)
+    required, rows = read_ledger(proj)
+    roles = [r.strip() for r in a.roles if r.strip()]
+    print(f"{PROG}: required sign-offs for {proj.name}: {', '.join(roles)}" + (f" (was {', '.join(required)})"
+                                                                              if required else ""))
+    if not a.write:
+        print(f"{PROG}: nothing written (add --write)")
+        return 0
+    write_ledger(proj, roles, rows)
+    print(f"{PROG}: saved in {proj / LEDGER}")
+    return 0
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog=PROG, description=__doc__.split("\n\n")[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("add")
+    p.add_argument("project"); p.add_argument("file")
+    p.add_argument("--by", required=True); p.add_argument("--how"); p.add_argument("--date")
+    p.add_argument("--evidence"); p.add_argument("--version"); p.add_argument("--write", action="store_true")
+    for name in ("list", "status"):
+        p = sub.add_parser(name); p.add_argument("project"); p.add_argument("--json", action="store_true")
+    p = sub.add_parser("check")
+    p.add_argument("project"); p.add_argument("file"); p.add_argument("--json", action="store_true")
+    p = sub.add_parser("require")
+    p.add_argument("project"); p.add_argument("roles", nargs="+"); p.add_argument("--write", action="store_true")
+    a = ap.parse_args(argv)
+    try:
+        return {"add": cmd_add, "list": cmd_list, "status": cmd_status, "check": cmd_check,
+                "require": cmd_require}[a.cmd](a)
+    except Stop as e:
+        print(f"{PROG}: {e}", file=sys.stderr)
+        return e.code
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

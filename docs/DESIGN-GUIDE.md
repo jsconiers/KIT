@@ -128,8 +128,8 @@ The tools in `shared/bin/` are standard-library Python with a usage docstring, l
 
 | Family | Examples | Model calls |
 |---|---|---|
-| Queue and day | `todo`, `kit-queue`, `kit-meetprep`, `kit-triage`, `kit-awaiting`, `kit-holds`, `kit-wrap`, `kit-dates`, `kit-touch`, `kit-feedback`, `kit-meetload`, `kit-expiry`, `kit-letter`, `kit-library` | None |
-| Architecture | `kit-refarch`, `kit-precedent`, `kit-sysprofile`, `kit-trace`, `kit-csf`, `kit-sizing`, `kit-diagram-diff`, `kit-diaglint`, `kit-onepager`, `kit-decisions`, `kit-viewpoints`, `kit-coverage`, `kit-controls`, `kit-lifecycle`, `kit-roadmap`, `kit-vendors`, `kit-digest` | None |
+| Queue and day | `todo`, `kit-queue`, `kit-meetprep`, `kit-triage`, `kit-awaiting`, `kit-holds`, `kit-wrap`, `kit-dates`, `kit-touch`, `kit-feedback`, `kit-meetload`, `kit-expiry`, `kit-letter`, `kit-library`, `kit-tradeinsights` | None |
+| Architecture | `kit-refarch`, `kit-precedent`, `kit-sysprofile`, `kit-trace`, `kit-csf`, `kit-sizing`, `kit-diagram-diff`, `kit-diaglint`, `kit-onepager`, `kit-decisions`, `kit-viewpoints`, `kit-coverage`, `kit-controls`, `kit-lifecycle`, `kit-roadmap`, `kit-vendors`, `kit-digest`, `kit-signoff` | None |
 | Closed reviews | `kit-preread`, `kit-rehearse`, `kit-review-loop` | One closed Claude run each, asked first; `kit-review-loop run` is four agent runs (reviewer, red team, threat modeler, standards checker), asked first (also from `kit-settings ui`'s Review loop section, with the cost shown), and its `plan`, `merge`, `feedback`, `score` (ready for ARB), and `status` make none |
 | Team | `kit-publish`, `kit-team`, `kit-teammap`, `kit-plugin` | None |
 | Models | `kit-models`, `kit-delegate`, `kit-run`, `kit-evals` | Only `kit-delegate`, `kit-run`, and `kit-evals --live` |
