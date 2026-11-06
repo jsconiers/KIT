@@ -7,7 +7,7 @@ repository; [DESIGN.md](../DESIGN.md) is the shorter reference that sits beside 
 
 | | |
 |---|---|
-| Describes | Kit 1.7.0 |
+| Describes | Kit 1.7.1 |
 | Date | 05-Nov-2026 |
 | Audience | Maintainers, security reviewers, technical adopters |
 | Licence | All rights reserved; see [LICENSE](../LICENSE) |

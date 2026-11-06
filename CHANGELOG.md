@@ -5,7 +5,7 @@ What changed in each Kit release. The installed version is in
 morning brief summarizes the new entries once. Format: [Keep a Changelog](https://keepachangelog.com),
 versions follow [semantic versioning](https://semver.org).
 
-## [Unreleased]
+## [1.7.1] - 2026-11-05
 
 ### Added
 - `kit-signoff`, the sign-off ledger: who approved which version of each IA or GDS, by role, when, and how, in
