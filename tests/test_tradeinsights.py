@@ -97,7 +97,7 @@ day("2026-10-08", """# Journal · Thu 08-Oct-2026
 |---|---|---|
 | P&L after fees | -$85.00 | realized_pnl |
 
-## John's trades
+## Your trades
 | # | Closed | Contract | Entry | Gross P&L | Cumulative |
 |---|---|---|---|---|---|
 | 1 | 12:10:00 | SPXW 7700P | $2.00 | -$50.00 | -$50.00 |
@@ -108,7 +108,7 @@ day("2026-10-08", """# Journal · Thu 08-Oct-2026
 |---|---|---|
 | 09:31 | MU | -$43.78 |
 """)
-day("2026-10-06", "# Journal · Tue 06-Oct-2026\n\nJohn made no SPX trades today. Fee-inclusive P&L was $0.00 and there were 0 round trips.\n")
+day("2026-10-06", "# Journal · Tue 06-Oct-2026\n\nNo SPX trades today. Fee-inclusive P&L was $0.00 and there were 0 round trips.\n")
 day("2026-10-07", "# Journal · Wed 07-Oct-2026\n\n| Fee-inclusive P&L | not available | realized_pnl failed |\n")
 day("2026-09-30", "# Journal · Wed 30-Sep-2026\n\n## Trades\n| Close | Contract | P&L |\n|---|---|---|\n| 10:00 | SPXW 1P | +$5.00 |\n")
 (J / "scorecard-2026-10.md").write_text("# Scorecard\n| Close | Contract | P&L |\n|---|---|---|\n| 10:00 | X | +$1.00 |\n")
