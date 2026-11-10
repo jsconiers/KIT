@@ -111,6 +111,26 @@ ok(any(r["document"] == "Payments hub GDS" and r["role"] == "Platform lead" for 
    "list reads hand-typed rows, newest first", rows[:2])
 ok("@" not in LEDGER.read_text(), "nothing like an address in the ledger")
 
+# A library root reached through a symbolic link (a synced cloud folder, or /var -> /private/var on macOS) still
+# records the file's path inside the project, and a project whose name starts another's doesn't claim its files.
+REAL = TMP / "real-library"
+(REAL / "artifacts/pay/drafts").mkdir(parents=True)
+(REAL / "artifacts/payments/drafts").mkdir(parents=True)
+LINK = TMP / "linked-library"
+LINK.symlink_to(REAL, target_is_directory=True)
+(KIT / "memory/context/library.md").write_text(f"- **Library root:** `{LINK}`\n")
+(REAL / "artifacts/pay/drafts/Pay IA v1.0.md").write_text("# Pay IA\n")
+rc, out, err = run("add", "pay", "Pay IA v1.0.md", "--by", "Domain owner", "--how", "email", "--write")
+text = (REAL / "artifacts/pay/signoffs.md").read_text() if (REAL / "artifacts/pay/signoffs.md").exists() else ""
+ok(rc == 0 and "| drafts/Pay IA v1.0.md |" in text, "a library root behind a symlink: the file column keeps drafts/",
+   out + err + text)
+(REAL / "artifacts/payments/drafts/Payments IA v1.0.md").write_text("# Payments IA\n")
+rc, out, err = run("add", "pay", str(REAL / "artifacts/payments/drafts/Payments IA v1.0.md"), "--by", "Domain owner",
+                   "--how", "email", "--write")
+text = (REAL / "artifacts/pay/signoffs.md").read_text()
+ok(rc == 0 and "| Payments IA v1.0.md |" in text and "payments/drafts" not in text and "../" not in text,
+   "a file in a project whose name starts with this one's is recorded by name only", out + err + text)
+
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"\nkit-signoff tests: {P} passed, {F} failed")
 sys.exit(1 if F else 0)

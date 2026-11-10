@@ -226,7 +226,8 @@ copies them into `~/.claude/skills` only where no skill of that name exists, and
 ## Safety model
 
 - **Ask first.** The installer adds ask rules to Claude Code's settings for deleting, pushing,
-  posting, installing, and changing settings. Kit's own rules (`KIT.md`) add sending mail,
+  posting, installing, and changing settings. A rule you move to your own allow list stays there:
+  the installer doesn't add it back. Kit's own rules (`KIT.md`) add sending mail,
   touching money or accounts, and committing you to anything.
 - **Never sends.** Mail and calendar tools only read or draft. Briefs go out as notifications or
   Outlook drafts. Calendar holds are .ics files you open and save; triage and awaiting-reply lists

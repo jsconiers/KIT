@@ -655,16 +655,27 @@ def cmd_activate(args):
         if item in s["added"]["allow"] and item in (perms.get("allow") or []):
             perms["allow"].remove(item)
             s["added"]["allow"].remove(item)
+    # An ask rule the owner has moved to their own allow list (one Kit didn't add) is the owner's decision: an ask
+    # rule beats an allow rule, so adding it back would undo that decision on every install. Leave it out, say so.
+    owner_allowed = [r for r in ASK if r in (perms.get("allow") or []) and r not in s["added"]["allow"]]
     for key, wanted in (("allow", ALLOW), ("ask", ASK), ("additionalDirectories", [str(KIT)])):
         if key not in perms:
             perms[key] = []
             if key not in s["created_lists"]:
                 s["created_lists"].append(key)
         for item in wanted:
+            if key == "ask" and item in owner_allowed:
+                if item in s["added"]["ask"]:
+                    s["added"]["ask"].remove(item)
+                continue
             if item not in perms[key]:
                 perms[key].append(item)
                 if item not in s["added"][key]:
                     s["added"][key].append(item)
+    left_out = [r for r in owner_allowed if r not in perms["ask"]]
+    if left_out:
+        print("Left out Kit's ask rule for " + ", ".join(left_out) + ": your allow list has it. Take it out "
+              "of your allow list and rerun the installer to have Claude Code ask again.")
     add_hooks(data, s)
     auto = s["auto_memory"]
     if auto.get("changed"):   # an earlier version of this installer turned auto memory off: undo that

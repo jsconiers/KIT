@@ -72,6 +72,8 @@ jobs:
           python3 tests/test_release.py
           python3 tests/test_signoff.py
           python3 tests/test_tradeinsights.py
+          python3 tests/test_docs_package.py
+          python3 tests/test_owner_allow.py
       - name: kit-update tests (reinstall when the install lags; landed patches with rebuilt documents)
         run: python3 tests/test_kit_update.py
       - name: kit-update zip tests (release zips checked as untrusted, installed, kept, pruned)

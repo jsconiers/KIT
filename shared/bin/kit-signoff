@@ -56,7 +56,15 @@ def project_dir(name):
     p = root / "artifacts" / name
     if not p.is_dir():
         raise Stop(f"no project folder {p}")
-    return p
+    return p.resolve()      # find_file resolves too, so a library root behind a symlink still compares
+
+
+def rel_to_project(f, proj):
+    """FILE's path inside the project (drafts/NAME), or its bare name when it lies outside."""
+    try:
+        return str(pathlib.Path(f).resolve().relative_to(pathlib.Path(proj).resolve()).as_posix())
+    except ValueError:
+        return pathlib.Path(f).name
 
 
 def find_file(proj, name):
@@ -149,7 +157,7 @@ def cmd_add(a):
     required, rows = read_ledger(proj)
     row = {"date": kd.fmt(when), "document": doc, "version": version, "role": a.by.strip(),
            "how": (a.how or "").lower(), "evidence": a.evidence or "", "sha256": digest,
-           "file": os.path.relpath(f, proj) if str(f).startswith(str(proj)) else f.name}
+           "file": rel_to_project(f, proj)}
     dup = [r for r in rows if r["document"].lower() == doc.lower() and r["version"] == version
            and r["role"].lower() == row["role"].lower() and r["sha256"] == digest]
     print(f"{PROG}: {row['role']} approved {doc} v{version or '?'} ({f.name}) on {row['date']}"

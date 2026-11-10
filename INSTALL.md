@@ -92,6 +92,11 @@ call through when a hook can't start, so if the check fails the installer stops 
 If your Claude Code settings run with permission prompts bypassed, the installer warns you: Kit's
 ask rules only work with prompts on.
 
+To stop Claude Code asking for one of Kit's ask rules, move it yourself from `ask` to `allow` in
+`~/.claude/settings.json`. Rerunning the installer (or `kit-update`) leaves it out of `ask` and says so,
+since an ask rule beats an allow rule. To have it ask again, take it out of your allow list and rerun
+the installer.
+
 ### The agents in Claude Code
 
 The installer puts Kit's staff in `~/Claude/Agents/kit/agents/` and copies them into

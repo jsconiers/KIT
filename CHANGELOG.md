@@ -5,6 +5,29 @@ What changed in each Kit release. The installed version is in
 morning brief summarizes the new entries once. Format: [Keep a Changelog](https://keepachangelog.com),
 versions follow [semantic versioning](https://semver.org).
 
+## [1.7.3] - 2026-11-10
+
+### Fixed
+- The installer added every one of Kit's ask rules back on each install or update, so an ask rule the owner had
+  moved to their own allow list (osascript, say) came back, and since an ask rule beats an allow rule, Claude
+  Code asked again. A rule in the owner's allow list that Kit didn't add is now left out of `ask`, the installer
+  says so and how to undo it, and uninstalling leaves the owner's allow rule alone (tests/test_owner_allow.py,
+  in CI).
+
+## [1.7.2] - 2026-11-09
+
+### Fixed
+- The Word copies of docs/OVERVIEW and docs/DESIGN-GUIDE in 1.7.0 and 1.7.1 named each image twice in
+  `[Content_Types].xml`, so Word wouldn't open them (it reported the file as corrupt, and a scripted open made an
+  empty "Document1" instead). Each part is now named once, and a new test checks the docs/ Word copies the way
+  Word reads them: CRCs, one content type entry per part, relationship targets, and XML that parses
+  (tests/test_docs_package.py, in CI).
+- `kit-signoff` recorded only the file's name, not its path in the project (`drafts/NAME`), when the library root
+  was reached through a symbolic link, as a synced cloud folder can be and as macOS's `/var` is: the project folder
+  wasn't resolved but the file was, so the two didn't compare. Both are resolved now, and the file's place is
+  checked by path, not by text, so a project whose name starts another's (`pay`, `payments`) can't claim its files
+  (tests/test_signoff.py; the test failed one check on macOS).
+
 ## [1.7.1] - 2026-11-05
 
 ### Added
