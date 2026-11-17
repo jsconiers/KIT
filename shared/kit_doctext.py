@@ -264,11 +264,13 @@ COUNT_NOUNS = {
     "tier": "tier", "tiers": "tier", "balancer": "load balancer", "balancers": "load balancer", "pod": "pod",
     "pods": "pod", "worker": "worker", "workers": "worker", "queue": "queue", "queues": "queue",
 }
-_NUM = r"(?P<num>\d{1,4}|" + "|".join(sorted((k for k in NUMWORDS), key=len, reverse=True)) + r")"
+_NUM = r"(?<![\d,.])(?P<num>\d{1,3}(?:,\d{3})+|\d{1,6}|" + "|".join(sorted((k for k in NUMWORDS), key=len, reverse=True)) + r")"
 _NOUNS = "|".join(sorted((re.escape(k) for k in COUNT_NOUNS), key=len, reverse=True))
 COUNT = re.compile(r"\b" + _NUM + r"(?:\s*[x×]\s*|\s+|-)(?P<q>(?:[A-Za-z][\w/-]*\s+){0,2}?)(?P<noun>data[ -]centers?|"
                    r"load[ -]balancers?|" + _NOUNS + r")\b", re.I)
 NOT_COUNT_AFTER = re.compile(r"^\s*(per|each|in each|for each|a|an)\b", re.I)
+PRODUCT_BEFORE = re.compile(r"\b[A-Z][A-Za-z]+\s+$")      # a product name just before a year
+PRODUCT_VERSION = re.compile(r"\s+((?:19|20)\d{2})\b")       # a product version just after the noun
 
 
 def counts(text):
@@ -286,8 +288,13 @@ def counts(text):
         if re.search(r"(version|v|phase|wave|step|figure|table|section|§|q-|tier|level)\s*$", before):
             continue
         num = m.group("num").lower()
-        n = NUMWORDS.get(num) if num in NUMWORDS else int(num)
+        n = NUMWORDS.get(num) if num in NUMWORDS else int(num.replace(",", ""))
+        if num.isdigit() and len(num) == 4 and 1990 <= n <= 2099 and PRODUCT_BEFORE.search(text[max(0, m.start() - 30):m.start()]):
+            continue    # "Server 2016 servers": 2016 names the product, it isn't a count
         q = " ".join(w for w in words(m.group("q")) if w not in STOP)
+        ver = PRODUCT_VERSION.match(text[m.end():m.end() + 8])
+        if ver:         # "51 Server 2016 servers": the version is part of what's counted
+            q = (q + " " + ver.group(1)).strip()
         out.append((n, key, q, m.group(0), m.start()))
     return out
 

@@ -156,6 +156,8 @@ def same_subject(a, b):
     sa, sb = set(a), set(b)
     if not sa or not sb:
         return False
+    if {w for w in sa if w.isdigit()} != {w for w in sb if w.isdigit()}:
+        return False    # "Server 2016" and "Server 2019" are different things
     return len(sa & sb) / min(len(sa), len(sb)) >= 0.6
 
 
@@ -174,6 +176,14 @@ def disagreements(items, kind, fmt):
         vals = {}
         for subj, v, s, m in g:
             vals.setdefault(v, []).append((s, m))
+        # A sentence that gives several values of the same subject is a range or a pair ("08-Apr-2024 to
+        # 13-Oct-2026", "approved end 30-Jun, due 30-Aug"), not a disagreement. Compare only the values that
+        # some sentence states on its own.
+        per = {}
+        for subj, v, s, m in g:
+            per.setdefault(id(s), set()).add(v)
+        alone = {v for v, places in vals.items() if any(len(per[id(s)]) == 1 for s, _ in places)}
+        vals = {v: places for v, places in vals.items() if v in alone}
         if len(vals) < 2:
             continue
         subject = " ".join(w for w in g[0][0] if all(w in x[0] for x in g)) or " ".join(g[0][0])
@@ -184,9 +194,16 @@ def disagreements(items, kind, fmt):
     return out
 
 
+REFS = re.compile(r"\b(references|sources|bibliography|works cited|citations)\b", re.I)
+REF_ENTRY = re.compile(r"^\s*\[[A-Za-z]{0,4}\d+[a-z]?\]")
+
+
 def figures(sents):
     costs, cnts, dts = [], [], []
     for s in sents:
+        if REFS.search(s.sec) or REF_ENTRY.match(s.text) or (s.block.kind == "row" and s.block.cells
+                                                              and REF_ENTRY.match(s.block.cells[0] + " ")):
+            continue    # a reference list's dates and numbers describe each source, not the design
         prev = 0    # each amount's subject is the words since the previous amount ("low $1, likely $2")
         for v, m, start, _ in dtx.money(s.text):
             ctx = context_words(s.text[prev:start], start - prev)
@@ -204,7 +221,7 @@ def figures(sents):
                 dts.append((ctx, key, s, m))
     money_fmt = lambda v: f"${v:,.0f}" if v == int(v) else f"${v:,.2f}"  # noqa: E731
     out = disagreements(costs, "cost", money_fmt)
-    out += [g for g in disagreements(cnts, "count", str) if len(g["subject"].split()) >= 1]
+    out += [g for g in disagreements(cnts, "count", lambda v: f"{v:,}") if len(g["subject"].split()) >= 1]
     out += disagreements(dts, "date", str)
     return out
 

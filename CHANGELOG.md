@@ -5,6 +5,16 @@ What changed in each Kit release. The installed version is in
 morning brief summarizes the new entries once. Format: [Keep a Changelog](https://keepachangelog.com),
 versions follow [semantic versioning](https://semver.org).
 
+## [Unreleased]
+
+### Fixed
+- `kit-dedupe` no longer flags figures that don't disagree: a count with a thousands separator is read whole
+  (4,292, not 292); a product year ("Server 2016") is not a count, and "Server 2016" and "Server 2019" are counted
+  apart; values stated together in one sentence (a date range, an approved end and a due date) are not compared
+  with each other; and dates and numbers in a reference list are left out. Counts now print with separators. The
+  count fixes are in `shared/kit_doctext.py`, so `kit-facts` and `kit-diagtext` read counts the same way
+  (tests/test_dedupe.py).
+
 ## [1.8.0] - 2026-11-17
 
 ### Added

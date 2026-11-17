@@ -3,7 +3,8 @@
 other sections (keep in the first, cut the rest), a repeat in the summary left alone unless word for word, costs,
 counts, and dates that disagree, a low-likely-high range not flagged, a Q-ID open in one place and closed in
 another, a Q-ID defined twice with different text, two documents read as one, a clean document, --write, --json,
-exit codes. Synthetic documents built in a temporary folder; nothing is sent.
+exit codes, and the false alarms seen on real IAs (thousands separators, product years, date ranges, reference
+lists). Synthetic documents built in a temporary folder; nothing is sent.
 
   python3 tests/test_dedupe.py
 """
@@ -154,6 +155,28 @@ ok(run(CLEAN, "--threshold", "2")[0] == 2, "a threshold outside 0-1: exit 2")
 rc, out, _ = run(DOC, "--threshold", "0.95", "--json")
 ok(len(json.loads(out)["repeats"]) == 1 and len(json.loads(out)["repeats"][0]["cut"]) == 1,
    "a high threshold keeps only the word-for-word copy", out[:600])
+
+# False alarms seen on real IAs (17-Nov-2026): thousands separators, product years, ranges, reference lists.
+FA = TMP / "false-alarms.md"
+FA.write_text(
+    "# 2 Scope\n\nThe CMDB lists at least 51 operational Server 2016 servers in the estate today.\n\n"
+    "# 3 Sizing\n\nThe CMDB holds 4,292 operational Windows servers across every production domain.\n\n"
+    "# 4 Server\n\nAt least 51 operational Server 2016 servers still need an upgrade path before phase 3.\n\n"
+    "# 5 Plan\n\nApproved end (30-Jun-2026) and due date (30-Aug-2026) have both passed for the demand.\n\n"
+    "The target completion is 31-Jan-2027, set 26-May-2026 by the steering group.\n\n"
+    "# 9 References\n\n[N1] Author's notes from the review, 08-Apr-2024 to 13-Oct-2026.\n\n"
+    "[R2] Red-team review of the first draft, 03-Nov-2026.\n\n[D2] Decisions on the review, 12-Nov-2026.\n")
+rc, out, err = run(FA, "--json")
+d = json.loads(out)
+ok(not d["figures"], "no false alarms: 4,292 isn't 292, Server 2016 isn't a count, a date range or a pair in one "
+   "sentence isn't a disagreement, and a reference list's dates are left out", d["figures"])
+FB = TMP / "real-count.md"
+FB.write_text("# 2 Scope\n\nThe CMDB holds 4,292 operational Windows servers in every production domain.\n\n"
+              "# 3 Sizing\n\nThe CMDB holds 4,290 operational Windows servers in every production domain.\n")
+rc, out, err = run(FB, "--json")
+fig = json.loads(out)["figures"]
+ok(len(fig) == 1 and sorted(v["value"] for v in fig[0]["values"]) == ["4,290", "4,292"],
+   "counts with a thousands separator still disagree when they really do", fig)
 
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"\nkit-dedupe tests: {P} passed, {F} failed")
