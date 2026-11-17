@@ -59,6 +59,16 @@ For installing and configuring, see INSTALL.md; for how the pieces fit, see DESI
 | `kit-trace` | Python 3.8; the project's IA (Markdown or .docx), plus its GDS, test plan, and change request when they exist; `--xlsx` uses `shared/kit_xlsx.py` (standard library) | Same code | Trace requirements by hand in the template |
 | `kit-signoff` | Python 3.8; the library root (or a project path) | Same code | Keep approvals in a table by hand and compare files yourself |
 | `kit-tradeinsights` | Python 3.8; the trade journal run's `journal/` files | Same code | Read the journals and the monthly scorecard by hand |
+| `kit-diagtext` | Python 3.8; pdftotext only for a PDF document | Same code | Compare figures with the text by eye |
+| `kit-dedupe` | Python 3.8; pdftotext only for a PDF | Same code | Read for repeats and disagreeing figures by hand |
+| `kit-facts` | Python 3.8; the library root (or a project path) | Same code | Keep the agreed numbers in a table and search drafts yourself |
+| `kit-precedent --closest` | Python 3.8; library root; kit-library catalog optional | Same code | Search the indexes by hand |
+| `kit-drift` | Python 3.8; synced folders on disk | Same code (no dataless flag; zero-byte placeholders still skipped) | Compare file names and dates by hand |
+| `kit-docs` | Python 3.8; a manifest; your build scripts; optional qpdf and pdfinfo; git (status) | Same code | Run each build script and convert the PDFs by hand |
+| `kit-settings questions` / `answer` | Python 3.8; the setup files | Same code | Edit the setup files by hand |
+| `kit-selfeval` | Python 3.8; memory/accomplishments.md | Same code | Write it from the kit-wins report |
+| `kit-360` | Python 3.8; feedback/ notes and the library root | Same code | Draft from your own notes |
+| `kit-timeoff` | Python 3.8; QUEUE.md; optional kitcal, a kit-ppmx pulse snapshot, and Claude Code for --handoff | Same code (kitcal via Outlook COM) | List due items and draft the out-of-office by hand |
 | `kit-release` | Python 3.8; git; a clone of the repository | Same code | Bump VERSION, the changelog, and the docs by hand, then `git archive` and `shasum -a 256` (INSTALL.md) |
 | `kit-tickets`, `ticket_watch.py` | Python 3.8; the gateway agent and a service-management connector (MCP server) in connector-guard.json for the morning run | Same code | No "Your tickets" section; ask the gateway in a session |
 | `kit-mcp-watch` | Python 3.8; `kit-hook`; Claude Code hooks in `~/.claude/settings.json` (the installer adds them) | Same code (hooks run in Git Bash on Windows) | Stale connector sessions show up only as failing calls; reconnect with `/mcp` |

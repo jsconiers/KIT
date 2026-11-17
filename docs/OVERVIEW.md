@@ -6,8 +6,8 @@ how to start. For depth, see the [design guide](DESIGN-GUIDE.md); for installing
 
 | | |
 |---|---|
-| Describes | Kit 1.7.3 |
-| Date | 10-Nov-2026 |
+| Describes | Kit 1.8.0 |
+| Date | 17-Nov-2026 |
 | Audience | Architects, team leads, and reviewers deciding whether to adopt Kit |
 | Licence | All rights reserved; see [LICENSE](../LICENSE) |
 
@@ -60,11 +60,11 @@ them.)
 |---|---|
 | Commitments | A running queue (`QUEUE.md`) for the owner, for Kit, and for what's waiting on others, with sprints, stale-item checks, and duplicate detection; synced to Outlook Tasks or Apple Reminders |
 | Briefings | A morning brief on weekdays, a weekly review on Mondays, a daily work list for approval, and an end-of-day wrap, delivered as a desktop notification or an Outlook draft (never sent) |
-| Architecture work | Reference-architecture matching, precedent search, system profiles, sizing, diagram diffs and linting, red-team and STRIDE threat-model reviews before peer review, requirement tracing, one-page executive summaries, ADR drafts, and review pre-reads and rehearsals |
+| Architecture work | Reference-architecture matching, precedent search (and the three closest past IAs and GDSs pulled into every new draft), system profiles, sizing, diagram diffs and linting, red-team and STRIDE threat-model reviews before peer review, requirement tracing, one-page executive summaries, ADR drafts, review pre-reads and rehearsals, and consistency checks before review: diagrams against the text, repeated statements and disagreeing figures, each draft against the project's fact sheet of agreed numbers, and drifted copies across synced libraries |
 | Frameworks and compliance | A framework profile (for example NIST CSF 2.0, Zero Trust, Secure by Design, CIS) that limits which frameworks are mapped; control lookups (NIST SP 800-53, MITRE ATT&CK, shipped as data); an exception register, evidence packs, and an audit request tracker |
 | Estate watch | End-of-support warnings from a configuration-management export, a technology radar, and a draft roadmap |
 | Portfolio | PPM Express reads, a weekly portfolio pulse, and meeting actions proposed as tasks, each change made only on the owner's yes |
-| The day | Meeting prep packs, inbox triage suggestions, mail awaiting a reply, 1:1 prep, accomplishments, calendar holds as files to open, meeting-load audits, important dates, keep-in-touch reminders, and a private feedback log |
+| The day | Meeting prep packs, inbox triage suggestions, mail awaiting a reply, 1:1 prep, accomplishments, self-evaluation and 360 feedback drafts, a time-off pack (what will slip, out-of-office drafts, the handoff), calendar holds as files to open, meeting-load audits, important dates, keep-in-touch reminders, and a private feedback log |
 | Personal admin | Formal letters from draft to reply (the letters desk), an expiry list for logins, certificates, and renewals, and a document library with full-text search |
 | Team | Sharing selected records between Kits, a team workload view, an expertise finder, a team coverage map, and agents and templates packaged as Claude Code plugins |
 
@@ -206,8 +206,8 @@ information only. Messages are drafted first and sent only on the owner's yes.
 2. Install: `KIT_OWNER=<name> bash install.sh` on macOS, or `install.ps1` on Windows
    ([INSTALL.md](../INSTALL.md)).
 3. Start `claude`, run `/context` to check `KIT.md` loaded, and say "Kit, introduce yourself."
-4. Run the health check (`doctor.py`) and fill in the setup files it flags, starting with `library.md`,
-   `writing.md`, and `calendar.md`.
+4. Run the health check (`doctor.py`), then answer the setup questions in `kit-settings ui` (or
+   `kit-settings questions`), most blocking first, starting with `library.md`, `writing.md`, and `calendar.md`.
 5. Choose delivery with `kit-settings`, add the scheduled runs you want, and check connectors with
    `kit-connect test`.
 6. Follow the first-week checklist in [ONBOARDING.md](../ONBOARDING.md).

@@ -1,0 +1,61 @@
+{
+  "about": "Example manifest for kit-docs. Copy it to ~/Claude/Agents/kit/docs-build.json (or point KIT_DOCS_MANIFEST at it) and change the folders and documents to yours. Paths may start with ~. Commands are lists, never shell strings, and run in build_dir. In a command or output name, {version}, {date} (DD-Mmm-YYYY), {isodate}, {commit}, {file}, {build}, and {docs} are filled in.",
+  "docs_dir": "~/Documents/Kit-Docs",
+  "build_dir": "~/Documents/Kit-Docs/build",
+  "copy_to": ["~/Documents/Kit-Docs"],
+  "code_repo": "~/KIT",
+  "version_file": "VERSION",
+  "path_prepend": ["~/.claude/skills/.venv/bin"],
+  "timeout": 1800,
+  "pdf": {
+    "command": ["soffice", "--headless", "--convert-to", "pdf", "--outdir", "{build}", "{file}"],
+    "repair": true,
+    "timeout": 600
+  },
+  "checks": [
+    {"name": "ooxml", "command": ["python3", "ooxml_check.py", "{file}"], "applies": [".docx", ".pptx"]}
+  ],
+  "archive": ["python3", "archive_old_versions.py", "--yes"],
+  "stamp": ["kit-patch", "--docs-done"],
+  "revision_row": "\\[\"{version}\",",
+  "bump_lines": "^\\s*(?:OUT|BASE)\\s*=|^VERSION, DATE|coverdate|\"footer\"|\\[\"Version\"|\\[\"Date\"",
+  "bump_date_lines": "^VERSION, DATE|coverdate|\\[\"Date\"",
+  "documents": [
+    {
+      "name": "overview",
+      "title": "Kit overview",
+      "steps": [["python3", "build_overview.py"]],
+      "outputs": ["Kit-overview-v{version}.docx"],
+      "pdf": true,
+      "version_from": {"file": "build_overview.py", "regex": "^VERSION = \"([0-9.]+)\""},
+      "require": ["What's new in Kit {version}"],
+      "expect_pages": [20, 120]
+    },
+    {
+      "name": "deck",
+      "title": "Kit overview deck",
+      "steps": [["python3", "build_deck.py"]],
+      "outputs": ["Kit-overview-deck-v{version}.pptx"],
+      "pdf": true,
+      "version_from": {"file": "build_deck.py", "regex": "^VERSION = \"([0-9.]+)\""},
+      "revision_row": ""
+    },
+    {
+      "name": "install-guide",
+      "title": "Install guide, with a two-pass table of contents that also makes the PDF",
+      "steps": [["python3", "toc_pass.py", "build_install.py"]],
+      "outputs": ["Kit-Install-Guide-v{version}.docx"],
+      "pdf": "built",
+      "version_from": {"file": "build_install.py", "regex": "^OUT = \"Kit-Install-Guide-v([0-9.]+)\\.docx\""}
+    },
+    {
+      "name": "matrix",
+      "title": "A Word document and a workbook from the same data",
+      "steps": [["python3", "build_matrix_doc.py"], ["python3", "build_matrix_xlsx.py"]],
+      "outputs": ["Kit-Matrix-v{version}.docx", "Kit-Matrix-v{version}.xlsx"],
+      "pdf": true,
+      "version_from": {"file": "matrix_data.py", "regex": "^DOC_VER = \"([0-9.]+)\""},
+      "version_files": ["matrix_data.py", "build_matrix_doc.py", "build_matrix_xlsx.py"]
+    }
+  ]
+}

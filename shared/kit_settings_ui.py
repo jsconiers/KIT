@@ -23,6 +23,12 @@ draft, press Start, then confirm the paid runs (the page shows how many and abou
 each note it saved. Merge writes the decisions file. Each project shows its "ready for ARB" score
 (kit-review-loop score) and links its latest notes, decisions, and feedback, which open read-only here: only
 Markdown files inside that project's folder in the library, nothing else.
+
+The Setup section is the first-run wizard: it walks the setup fields still "not set" one at a time (kit_setupq
+orders them, the ones that hold agents back most first), with the agents that read each one, a hint, and an example.
+Answer previews the change and saves it the same way as any other setting here; Skip moves the question to the end,
+Later puts it aside until "Bring back"; Done for now closes the wizard. On a new install (no
+.install/setup-wizard.json yet) it is open, at the top of the page.
 """
 import hmac
 import html
@@ -40,6 +46,7 @@ import time
 import urllib.parse
 
 import kit_settings as ks
+import kit_setupq as sq
 
 e = html.escape
 MAX_BODY = 64 * 1024
@@ -243,6 +250,7 @@ function msg(box,text,bad){var p=document.createElement('div');p.className='kmsg
 document.addEventListener('click',function(ev){var b=ev.target.closest('button[data-act]');if(!b)return;
 var act=b.getAttribute('data-act');
 if(act.indexOf('rv-')===0){review(b,act);return;}
+if(act.indexOf('sq-')===0){setupq(b,act);return;}
 if(act==='stop'){post('/api/stop').then(function(){document.body.innerHTML='<p>Stopped. You can close this tab.</p>';});return;}
 var ed=b.closest('td').querySelector('.kedit'),box=b.closest('td').querySelector('.kpreview');
 var body={id:ed.getAttribute('data-id'),value:ed.querySelector('.kin').value,expect:ed.getAttribute('data-expect')};
@@ -284,24 +292,92 @@ if(j.ok){setTimeout(function(){location.reload();},1500);}});}}
 """
 
 
+SETUP_CSS = (".kwiz{background:#EEF2F5;padding:.6rem 1rem;margin:1rem 0}.kwiz summary{font-weight:600;cursor:pointer}"
+             ".kwiz .kq{font-size:1.1rem;margin:.4rem 0}.kwiz .kin{width:100%;max-width:46rem;padding:.3rem}"
+             ".kwiz .kbar{width:100%;max-width:46rem}.kwiz button{margin:.4rem .4rem 0 0}.kprio{color:#B7791F;font-weight:600}")
+
+SETUP_JS = """
+function setupq(b,act){var csrf=document.querySelector('meta[name=kit-csrf]').content;
+function post(path,body){return fetch(path,{method:'POST',credentials:'same-origin',
+headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(body||{})})
+.then(function(r){return r.json();});}
+var card=document.getElementById('kwiz-card'),box=document.getElementById('kwiz-box');
+function say(t,bad){var p=document.createElement('div');p.className='kmsg'+(bad?' bad':'');p.textContent=t;box.appendChild(p);return p;}
+function again(){location.hash='kwiz';location.reload();}
+var id=card?card.getAttribute('data-id'):'';
+if(act==='sq-preview'){box.textContent='';var v=card.querySelector('.kin').value;
+post('/api/preview',{id:id,value:v,expect:card.getAttribute('data-expect')}).then(function(j){
+if(!j.ok){say(j.error||'Refused',true);return;}var pre=document.createElement('pre');pre.className='kdiff';
+pre.textContent=j.diff;box.appendChild(pre);say('Writes '+j.source+', backs it up first, and commits it where the file is in Kit\\'s history.');
+var c=document.createElement('button');c.type='button';c.textContent='Confirm and save';c.setAttribute('data-act','sq-apply');box.appendChild(c);});return;}
+if(act==='sq-apply'){var v2=card.querySelector('.kin').value;post('/api/apply',{id:id,value:v2,expect:card.getAttribute('data-expect')})
+.then(function(j){box.textContent='';if(!j.ok){say(j.error||'Refused',true);return;}say(j.message);
+post('/api/setup/mark',{id:id,how:'answered'}).then(function(){setTimeout(again,1200);});});return;}
+var how={'sq-skip':'skip','sq-later':'later','sq-done':'done','sq-reset':'reset','sq-open':'open'}[act];
+if(how){post('/api/setup/mark',{id:id,how:how}).then(function(j){if(!j.ok){say(j.error||'Refused',true);return;}again();});}}
+"""
+
+
+def setup_section(st, items):
+    """The first-run wizard: one open setup question at a time."""
+    todo, qs, state = sq.walk(st.kit, items)
+    c = sq.counts(qs)
+    total = len([s for s in items if s["kind"] == "setup"])
+    done_pct = round(100 * (total - c["not set"]) / total) if total else 100
+    is_open = sq.first_run(st.kit) or not state.get("closed")
+    later = len([q for q in qs if q["id"] in set(state["later"])])
+    head = (f'<summary>Setup: <span id="kwiz-left">{c["not set"]}</span> not set'
+            f'{" (" + str(c["high"]) + " high priority)" if c["high"] else ""}</summary>')
+    bar = (f'<progress class="kbar" max="100" value="{done_pct}" aria-label="Setup fields set">{done_pct}%</progress>'
+           f'<p class="note">{total - c["not set"]} of {total} setup fields set. '
+           f'{int(state.get("answered", 0))} answered here so far.'
+           f'{" " + str(later) + " saved for later." if later else ""}'
+           f'{" " + str(c["in a session"]) + " can only be changed in a Claude Code session." if c["in a session"] else ""}'
+           f'</p>')
+    if not todo:
+        body = ('<p>Nothing left to walk through here.' +
+                (' <button type="button" data-act="sq-reset">Bring back the ones saved for later</button>' if later else '')
+                + '</p>')
+    else:
+        q = todo[0]
+        who = ", ".join(q["agents"]) or "no agent names this file yet"
+        prio = f'<span class="kprio">High priority</span> ({e(q["why"])}). ' if q["priority"] == "high" else ""
+        hint = f'<p class="note">{e(q["hint"])}</p>' if q["hint"] else ""
+        ex = f'<p class="note">For example: <code>{e(q["example"])}</code></p>' if q["example"] else ""
+        body = (f'<div id="kwiz-card" data-id="{e(q["id"])}" data-expect="{e(q["expect"])}">'
+                f'<p class="note">Question 1 of {len(todo)} &middot; {prio}{e(q["source"])}, line {q["line"]}'
+                f'{" (" + e(q["section"]) + ")" if q["section"] else ""} &middot; read by {e(who)}</p>'
+                f'<p class="kq"><label for="kwiz-in">{e(q["question"])}</label></p>{hint}{ex}'
+                f'<input id="kwiz-in" class="kin" type="text" autocomplete="off" maxlength="2000">'
+                f'<div><button type="button" data-act="sq-preview">Preview</button>'
+                f'<button type="button" data-act="sq-skip">Skip</button>'
+                f'<button type="button" data-act="sq-later">Later</button>'
+                f'<button type="button" data-act="sq-done">Done for now</button>'
+                + (' <button type="button" data-act="sq-reset">Bring back later ones</button>' if later else '')
+                + '</div><div id="kwiz-box" aria-live="polite"></div></div>')
+    return (f'<details class="kwiz" id="kwiz"{" open" if is_open else ""}>{head}{bar}{body}</details>')
+
+
 def page(state):
     items = ks.collect(state.kit)
     c = ks.counts(items)
+    wizard = setup_section(state, items)
     nonce = secrets.token_urlsafe(16)
     body = (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
             f'<meta name="viewport" content="width=device-width, initial-scale=1">'
             f'<meta name="kit-csrf" content="{e(state.csrf)}"><title>Kit settings</title>'
             f'<style nonce="{nonce}">body{{font:15px/1.45 system-ui,"Segoe UI",Arial,sans-serif;margin:1.2rem 2rem;'
             f'color:#15202B}}header{{display:flex;gap:1rem;align-items:baseline;flex-wrap:wrap}}'
-            f'h1{{margin:0;font-size:1.6rem}}.note{{color:#566573}}{ks.CSS}{REVIEW_CSS}</style></head><body>'
+            f'h1{{margin:0;font-size:1.6rem}}.note{{color:#566573}}{ks.CSS}{REVIEW_CSS}{SETUP_CSS}</style></head><body>'
             f'<header><h1>Kit settings</h1><span class="note">{len(items)} settings, {c["not set"]} not set. '
             f'Only this computer can reach this page; it stops after {_span(state.idle)} idle.</span>'
             f'<button type="button" data-act="stop">Stop</button></header>'
+            f'{wizard}'
             f'<p class="note">Edit a setting, press Preview to see the change, then Confirm. Read-only settings say how '
             f'to change them. Credentials show by name only.</p>'
             f'<div class="kset" id="kset">{ks.render_table(items, editing=True)}</div>'
             f'{review_section(state)}'
-            f'<script nonce="{nonce}">{ks.FILTER_JS}{REVIEW_JS}{PAGE_JS}</script></body></html>')
+            f'<script nonce="{nonce}">{ks.FILTER_JS}{REVIEW_JS}{SETUP_JS}{PAGE_JS}</script></body></html>')
     return body, nonce
 
 
@@ -444,6 +520,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._json(200, {"ok": True})
         if path.startswith("/api/review/"):
             return self._review_api(path, body)
+        if path == "/api/setup/mark":
+            return self._setup_mark(body)
         if path not in ("/api/preview", "/api/apply"):
             return self._json(404, {"ok": False, "error": "not found"})
         sid, value, expect = body.get("id"), body.get("value"), body.get("expect")
@@ -462,6 +540,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._json(400, {"ok": False, "error": str(ex)})
         except OSError as ex:
             return self._json(500, {"ok": False, "error": f"couldn't write: {ex}"})
+
+    def _setup_mark(self, body):
+        qid, how = body.get("id", ""), body.get("how", "")
+        if not isinstance(qid, str) or how not in ("skip", "later", "answered", "done", "reset", "open"):
+            return self._json(400, {"ok": False, "error": "id must be text and how one of skip, later, answered, done, reset, open"})
+        if how in ("skip", "later") and qid not in {q["id"] for q in sq.questions(self.st.kit)}:
+            return self._json(400, {"ok": False, "error": "no such open setup question"})
+        try:
+            sq.mark(self.st.kit, qid if how in ("skip", "later") else "", how)
+        except OSError as ex:
+            return self._json(500, {"ok": False, "error": f"couldn't save the wizard's state: {ex}"})
+        return self._json(200, {"ok": True, "left": len(sq.questions(self.st.kit))})
 
     def _review_api(self, path, body):
         project, draft, only = body.get("project", ""), body.get("draft", ""), body.get("only", "")

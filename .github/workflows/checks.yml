@@ -74,6 +74,18 @@ jobs:
           python3 tests/test_tradeinsights.py
           python3 tests/test_docs_package.py
           python3 tests/test_owner_allow.py
+      - name: Consistency checks, precedent, drift, setup wizard, docs builder, and review drafts tests
+        run: |
+          python3 tests/test_diagtext.py
+          python3 tests/test_dedupe.py
+          python3 tests/test_facts.py
+          python3 tests/test_precedent_closest.py
+          python3 tests/test_drift.py
+          python3 tests/test_setup_questions.py
+          python3 tests/test_kit_docs.py
+          python3 tests/test_selfeval.py
+          python3 tests/test_360.py
+          python3 tests/test_timeoff.py
       - name: kit-update tests (reinstall when the install lags; landed patches with rebuilt documents)
         run: python3 tests/test_kit_update.py
       - name: kit-update zip tests (release zips checked as untrusted, installed, kept, pruned)

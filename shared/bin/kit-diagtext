@@ -1,0 +1,464 @@
+#!/usr/bin/env python3
+"""kit-diagtext: where a diagram and the IA or GDS text it sits in disagree.
+
+  kit-diagtext DOC DIAGRAM [DIAGRAM ...]   check a document (.docx, .md, .txt, .pdf) against diagrams
+                                           (.drawio, draw.io .xml, .vsdx, or the diagrammer's <name>-spec.json)
+  kit-diagtext PROJECT [--doc FILE]        the project's newest draft (or FILE) against every diagram in its
+                                           diagrams/ folder (a -spec.json only when no drawing has its name)
+  ... --json                               the findings as JSON
+  ... --write                              also save the report in the project's reviews/ folder
+  ... --min low|medium|high                leave out findings below this level (default low)
+
+Findings, most serious first, each with where it is in the text and in the diagram (file, page, element id):
+  high    version   a figure caption names a version of the diagram ("Figure 2 ... v0.2") other than the diagram
+                    file's (its -vN name or the version in its title block)
+  high    link      a sentence that names both ends of a connection gives a protocol or port the connection's
+                    label doesn't ("LDAP 389" in the text, "LDAPS 636" on the line)
+  high    count     the text gives a count ("6 nodes", "three sites") that no diagram page draws; "4 x node" or
+                    "(4)" in a label counts as 4. Medium when the same text also gives the drawn count somewhere
+  medium  missing   a component named in a component table of the text (first column headed Component,
+                    System, Server, Service, Application, Node, Host, or Name) that no diagram shows
+  low     unnamed   a component on the diagram the text never mentions
+Matching ignores case and punctuation, and a plural matches its singular. Title block, legend, and note shapes
+are left out. Read-only unless --write. Exit 0 when nothing high or medium is found, 1 when something is, 2 a
+usage problem (a file that isn't there, a format it can't read).
+"""
+import argparse
+import json
+import pathlib
+import re
+import sys
+import zipfile
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import kit_doctext as dtx  # noqa: E402
+from kit_diagram import VNS, drawio_pages, vsdx_page_root, vsdx_pages  # noqa: E402
+from kit_diagram import clean  # noqa: E402
+
+PROG = "kit-diagtext"
+LEVELS = {"high": 3, "medium": 2, "low": 1}
+DIAGRAM_SUFFIXES = {".drawio", ".xml", ".vsdx"}
+SKIP_LABEL = re.compile(r"^(legend|key|title|version|ver\b|rev(ision)?\b|date|author|owner|classification|"
+                        r"page|notes?\b|drawn by|status|document|doc\b|figure|fig\b|prepared)", re.I)
+COMPONENT_HEADS = {"component", "components", "system", "systems", "server", "servers", "service", "services",
+                   "application", "applications", "node", "nodes", "host", "hosts", "name", "element", "elements"}
+PROTOCOLS = ["https", "http", "tls", "ssh", "sftp", "ftps", "ftp", "ldaps", "ldap", "kerberos", "smb", "nfs", "iscsi",
+             "jdbc", "odbc", "tds", "amqp", "mqtt", "kafka", "grpc", "snmp", "syslog", "dns", "ntp", "rdp", "winrm",
+             "smtp", "imap", "rest", "soap", "rpc", "ntlm", "ipsec", "bgp", "ospf", "icmp", "wss", "ws"]
+GENERIC = {"tcp", "udp"}
+VERSION = re.compile(r"(?:\bv|\bversion\s*|\brev\.?\s*)(\d+(?:\.\d+)*)\b", re.I)
+MULTI = re.compile(r"(\d+)\s*[x×]\b|\b[x×]\s*(\d+)\b|\((\d+)\)")
+
+
+# ---------------------------------------------------------------- diagrams
+def split_label(raw):
+    parts = [clean(p) for p in re.split(r"<br\s*/?>|</div>|</p>|\n", raw or "", flags=re.I)]
+    parts = [p for p in parts if p]
+    return (parts[0] if parts else ""), " ".join(parts[1:])
+
+
+def name_of(label):
+    n = MULTI.sub(" ", label)
+    n = re.sub(r"\([^)]*\)", " ", n)
+    return re.sub(r"\s+", " ", n).strip(" -:,")
+
+
+def comp(cid, raw, page, f):
+    first, rest = split_label(raw)
+    full = (first + " " + rest).strip()
+    if not first or SKIP_LABEL.match(first) or re.fullmatch(r"[\d\s.,:/-]+", first):
+        return None
+    m = MULTI.search(full)
+    mult = int(next(g for g in m.groups() if g)) if m else 1
+    return {"id": cid, "label": first, "sub": rest, "name": name_of(first), "mult": mult, "page": page, "file": f}
+
+
+def read_drawio(path):
+    pages = []
+    for pname, model in drawio_pages(path):
+        comps, edges, raw_labels = {}, [], []
+        if model is not None:
+            cells = list(model.iter("mxCell"))
+            for o in model.iter("object"):
+                c = o.find("mxCell")
+                if c is not None and c.get("vertex") == "1":
+                    c.set("value", o.get("label") or "")
+                    c.set("id", o.get("id"))
+            for c in cells:
+                if c.get("vertex") == "1":
+                    raw_labels.append(clean(c.get("value")))
+                    x = comp(c.get("id"), c.get("value"), pname, path.name)
+                    if x:
+                        comps[x["id"]] = x
+            for c in cells:
+                if c.get("edge") == "1":
+                    edges.append({"id": c.get("id"), "from": c.get("source"), "to": c.get("target"),
+                                  "label": clean(c.get("value"))})
+            # labels sitting on an edge as a child text cell
+            for c in cells:
+                if c.get("vertex") == "1" and c.get("parent") in {e["id"] for e in edges}:
+                    for e in edges:
+                        if e["id"] == c.get("parent"):
+                            e["label"] = (e["label"] + " " + clean(c.get("value"))).strip()
+                    comps.pop(c.get("id"), None)
+        pages.append({"file": path.name, "page": pname, "comps": comps, "edges": edges, "labels": raw_labels})
+    return pages
+
+
+def read_vsdx(path):
+    z = zipfile.ZipFile(path)
+    pages = []
+    for pname, member, _sheet in vsdx_pages(z):
+        root = vsdx_page_root(z, member)
+        shapes, raw_labels = {}, []
+        for s in root.iter(VNS + "Shape"):
+            t = s.find(VNS + "Text")
+            text = "\n".join(x.strip() for x in t.itertext() if x.strip()) if t is not None else ""
+            shapes[s.get("ID")] = text
+            raw_labels.append(clean(text))
+        ends = {}
+        for c in root.iter(VNS + "Connect"):
+            ends.setdefault(c.get("FromSheet"), {})[c.get("FromCell")] = c.get("ToSheet")
+        edges = [{"id": sid, "from": cells.get("BeginX"), "to": cells.get("EndX"), "label": clean(shapes.get(sid, ""))}
+                 for sid, cells in ends.items()]
+        comps = {}
+        for sid, text in shapes.items():
+            if sid in ends:
+                continue
+            x = comp(sid, text, pname, path.name)
+            if x:
+                comps[sid] = x
+        pages.append({"file": path.name, "page": pname, "comps": comps, "edges": edges, "labels": raw_labels})
+    return pages
+
+
+def read_spec(path):
+    d = json.loads(path.read_text(encoding="utf-8"))
+    comps, labels = {}, []
+    for n in d.get("nodes", []):
+        raw = (n.get("label") or "") + ("\n" + n["sublabel"] if n.get("sublabel") else "")
+        labels.append(clean(raw))
+        x = comp(str(n.get("id")), raw, "spec", path.name)
+        if x:
+            comps[x["id"]] = x
+    edges = [{"id": f"{e.get('from')}->{e.get('to')}", "from": str(e.get("from")), "to": str(e.get("to")),
+              "label": e.get("label") or ""} for e in d.get("edges", [])]
+    if d.get("title"):
+        labels.append(str(d["title"]))
+    return [{"file": path.name, "page": "spec", "comps": comps, "edges": edges, "labels": labels,
+             "title": d.get("title") or ""}]
+
+
+def read_diagram(path):
+    suf = path.suffix.lower()
+    try:
+        if suf == ".vsdx":
+            pages = read_vsdx(path)
+        elif suf == ".json":
+            pages = read_spec(path)
+        else:
+            pages = read_drawio(path)
+    except (OSError, ValueError, KeyError, zipfile.BadZipFile, json.JSONDecodeError) as e:
+        raise dtx.Stop(f"can't read {path.name} as a diagram: {e}")
+    m = VERSION.search(path.stem.replace("_", " ").replace("-v", " v"))
+    ver = m.group(1) if m else None
+    if not ver:
+        for p in pages:
+            for lab in p["labels"]:
+                if re.match(r"\s*(version|ver\b|rev)", lab, re.I):
+                    m = VERSION.search(lab) or re.search(r"(\d+(?:\.\d+)+|\d+)", lab)
+                    if m:
+                        ver = m.group(1)
+                        break
+            if ver:
+                break
+    stem = re.sub(r"[-_ ]?(v\d+(?:\.\d+)*|spec)$", "", path.stem, flags=re.I)
+    stem = re.sub(r"[-_ ]?v\d+(?:\.\d+)*$", "", stem, flags=re.I)
+    return {"path": path, "version": ver, "stem": stem, "pages": pages}
+
+
+# ---------------------------------------------------------------- matching
+def mentioned(name, text_norm, block_norms):
+    if dtx.has_phrase(text_norm, name):
+        return True
+    n = dtx.norm(name).strip()
+    if n and (" " + " ".join(n.split()[:-1] + [dtx.plural(n.split()[-1])]) + " ") in text_norm:
+        return True
+    if n.endswith("s") and (" " + n[:-1] + " ") in text_norm:
+        return True
+    toks = [w for w in n.split() if len(w) > 2 and w not in dtx.STOP]
+    if len(toks) >= 2:
+        return any(all((" " + t + " ") in b or (" " + dtx.plural(t) + " ") in b for t in toks) for b in block_norms)
+    return False
+
+
+def head_noun(c):
+    ws = dtx.words(c["name"] + " " + c["sub"])
+    full = " ".join(ws)
+    for multi in ("data center", "load balancer"):
+        if multi in full:
+            return multi
+    for w in reversed(dtx.words(c["name"])):
+        if w in dtx.COUNT_NOUNS:
+            return dtx.COUNT_NOUNS[w]
+    return None
+
+
+def protos(text):
+    low = text.lower()
+    out = {p for p in PROTOCOLS if re.search(r"(?<![a-z])" + p + r"(?![a-z])", low)}
+    # "ldaps" contains no "ldap" match thanks to the look-arounds; https likewise
+    return out
+
+
+def ports(text, bare=False):
+    low = text.lower()
+    out = set()
+    for m in re.finditer(r"(?:tcp|udp|port|ports|" + "|".join(PROTOCOLS) + r")[\s/:]*((?:\d{1,5}[\s,/]*)+)", low):
+        out |= {int(x) for x in re.findall(r"\d{1,5}", m.group(1))}
+    out |= {int(x) for x in re.findall(r":(\d{2,5})\b", low)}
+    if bare:
+        out |= {int(x) for x in re.findall(r"(?<![\d.v])(\d{2,5})(?![\d.])", low)}
+    return {p for p in out if 0 < p < 65536}
+
+
+def quote(s, n=110):
+    s = " ".join(s.split())
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def check(doc, diagrams):
+    blocks = dtx.blocks(doc)
+    body = [b for b in blocks if b.kind != "heading"]
+    text_norm = dtx.norm(" ".join(b.text for b in blocks))
+    bnorms = [dtx.norm(b.text) for b in blocks]
+    findings = []
+
+    def add(level, kind, msg, where=None, diag=None, **extra):
+        findings.append(dict({"level": level, "kind": kind, "message": msg, "text": where,
+                              "diagram": diag}, **extra))
+
+    # 1. figure versions
+    captions = [b for b in blocks if b.kind == "caption" and re.match(r"\**(Figure|Fig\.)\s*\d+", b.text, re.I)]
+    for cap in captions:
+        m = VERSION.search(cap.text)
+        if not m:
+            continue
+        cver = m.group(1)
+        cnorm = dtx.norm(cap.text)
+        best, score = None, 0.0
+        for d in diagrams:
+            names = [d["stem"].replace("-", " ").replace("_", " ")] + [p["page"] for p in d["pages"]] + \
+                    [p.get("title", "") for p in d["pages"]]
+            for n in names:
+                toks = [w for w in dtx.words(n) if w not in dtx.STOP and len(w) > 2 and not w.isdigit()]
+                if not toks:
+                    continue
+                s = sum(1 for t in toks if (" " + t + " ") in cnorm) / len(toks)
+                if d["path"].name.lower() in cap.text.lower():
+                    s = 1.0
+                if s > score:
+                    best, score = d, s
+        if (best is None or score < 0.5) and len(diagrams) == 1 and len(captions) == 1:
+            best, score = diagrams[0], 0.5
+        if best is not None and score >= 0.5 and best["version"] and best["version"] != cver:
+            add("high", "version", f"the caption shows v{cver} of the figure, but {best['path'].name} is "
+                f"v{best['version']}", {"where": cap.where, "quote": quote(cap.text)},
+                {"file": best["path"].name, "page": None, "id": None})
+
+    # 2. connections
+    sents = [(b, s) for b in body for s in dtx.sentences(b.text)]
+    for d in diagrams:
+        for p in d["pages"]:
+            for e in p["edges"]:
+                lab = e["label"]
+                ep, eq = protos(lab) - GENERIC, ports(lab, bare=True)
+                if not ep and not eq:
+                    continue
+                a, z = p["comps"].get(e["from"]), p["comps"].get(e["to"])
+                if not a or not z:
+                    continue
+                for b, s in sents:
+                    sn = dtx.norm(s)
+                    if not (mentioned(a["name"], sn, [sn]) and mentioned(z["name"], sn, [sn])):
+                        continue
+                    tp, tq = protos(s) - GENERIC, ports(s)
+                    bad = []
+                    if ep and tp and not (ep & tp):
+                        bad.append(f"protocol {', '.join(sorted(x.upper() for x in tp))} in the text, "
+                                   f"{', '.join(sorted(x.upper() for x in ep))} on the line")
+                    if eq and tq and not (eq & tq):
+                        bad.append(f"port {', '.join(map(str, sorted(tq)))} in the text, "
+                                   f"{', '.join(map(str, sorted(eq)))} on the line")
+                    if bad:
+                        add("high", "link", f"{a['name']} -> {z['name']}: " + "; ".join(bad),
+                            {"where": b.where, "quote": quote(s)},
+                            {"file": p["file"], "page": p["page"], "id": e["id"], "label": lab})
+
+    # 3. counts
+    drawn = {}      # noun -> [(count, file, page, ids)]
+    for d in diagrams:
+        for p in d["pages"]:
+            per = {}
+            for c in p["comps"].values():
+                n = head_noun(c)
+                if n:
+                    per.setdefault(n, [0, []])
+                    per[n][0] += c["mult"]
+                    per[n][1].append(c["id"])
+            for n, (k, ids) in per.items():
+                drawn.setdefault(n, []).append((k, p["file"], p["page"], ids))
+    said = {}
+    for b in body:
+        for n, noun, q, m, _ in dtx.counts(b.text):
+            said.setdefault(noun, []).append((n, b, m))
+    for noun, mentions in said.items():
+        if noun not in drawn:
+            continue
+        drawn_counts = {k for k, *_ in drawn[noun]}
+        agrees = any(n in drawn_counts for n, _, _ in mentions)
+        biggest = max(drawn[noun], key=lambda x: x[0])
+        seen = set()
+        for n, b, m in mentions:
+            if n in drawn_counts or (n, b.where) in seen:
+                continue
+            seen.add((n, b.where))
+            k, f, pg, ids = biggest
+            add("medium" if agrees else "high", "count",
+                f"the text says {n} {noun if n == 1 else dtx.plural(noun)} (\"{m.strip()}\"); the diagram draws {k}"
+                + (" (the text gives the drawn count elsewhere too: check this one refers to a subset)" if agrees else ""),
+                {"where": b.where, "quote": quote(b.text)}, {"file": f, "page": pg, "id": ", ".join(ids[:8])})
+
+    # 4. components in the text's tables, not on any diagram
+    all_names = [c for d in diagrams for p in d["pages"] for c in p["comps"].values()]
+    diag_norm = dtx.norm(" ".join(c["name"] + " " + c["sub"] for c in all_names) + " " +
+                         " ".join(lab for d in diagrams for p in d["pages"] for lab in p["labels"]))
+    header_ok = False
+    for b in blocks:
+        if b.kind != "row":
+            header_ok = False
+            continue
+        if b.where.endswith("table row 1"):
+            header_ok = bool(b.cells) and dtx.norm(b.cells[0]).strip() in COMPONENT_HEADS
+            continue
+        if not header_ok or not b.cells or not b.cells[0].strip():
+            continue
+        name = name_of(b.cells[0])
+        if len(name) < 2 or mentioned(name, diag_norm, [diag_norm]):
+            continue
+        add("medium", "missing", f"{name} is in the text's component table but on no diagram",
+            {"where": b.where, "quote": quote(b.text)}, None)
+
+    # 5. components the text never mentions
+    seen = set()
+    for c in all_names:
+        key = dtx.norm(c["name"])
+        if key in seen:
+            continue
+        seen.add(key)
+        if not mentioned(c["name"], text_norm, bnorms):
+            add("low", "unnamed", f"{c['name']} is on the diagram but the text never mentions it", None,
+                {"file": c["file"], "page": c["page"], "id": c["id"]})
+
+    findings.sort(key=lambda f: -LEVELS[f["level"]])
+    return findings
+
+
+# ---------------------------------------------------------------- output
+def render(doc, diagrams, findings):
+    lines = [f"# Diagram and text check: {doc.name}", "",
+             f"Checked against: {', '.join(d['path'].name + (' (v' + d['version'] + ')' if d['version'] else '') for d in diagrams)}",
+             ""]
+    if not findings:
+        lines.append("No disagreements found between the diagrams and the text.")
+    for f in findings:
+        lines.append(f"- **{f['level'].upper()} {f['kind']}**: {f['message']}")
+        if f["text"]:
+            lines.append(f"  - text: {f['text']['where']}: \"{f['text']['quote']}\"")
+        if f["diagram"]:
+            dg = f["diagram"]
+            bits = [dg["file"]] + ([f"page {dg['page']}"] if dg.get("page") else []) + \
+                   ([f"id {dg['id']}"] if dg.get("id") else []) + ([f"label \"{dg['label']}\""] if dg.get("label") else [])
+            lines.append(f"  - diagram: {', '.join(bits)}")
+    c = {k: sum(1 for f in findings if f["level"] == k) for k in LEVELS}
+    lines += ["", f"{len(findings)} finding(s): {c['high']} high, {c['medium']} medium, {c['low']} low."]
+    return "\n".join(lines) + "\n"
+
+
+def newest_draft(project):
+    ds = [p for p in dtx.drafts(project) if not p.name.endswith("-spec.md")]
+    if not ds:
+        raise dtx.Stop(f"no drafts in {project / 'drafts'}")
+    return max(ds, key=lambda p: p.stat().st_mtime)
+
+
+def project_diagrams(project):
+    d = project / "diagrams"
+    if not d.is_dir():
+        raise dtx.Stop(f"no diagrams folder in {project}")
+    files = sorted(p for p in d.iterdir() if p.is_file() and p.suffix.lower() in DIAGRAM_SUFFIXES)
+    stems = {p.stem.lower() for p in files}
+    for s in sorted(d.glob("*-spec.json")):
+        if s.name[:-len("-spec.json")].lower() not in stems:
+            files.append(s)
+    if not files:
+        raise dtx.Stop(f"no diagrams in {d}")
+    return files
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog=PROG, description="Where a diagram and the document text disagree.")
+    ap.add_argument("target", help="a document, or a project")
+    ap.add_argument("diagrams", nargs="*", help="diagram files (with a document)")
+    ap.add_argument("--doc", help="with a project: the draft to check (default: the newest)")
+    ap.add_argument("--project", help="the project to save the report in (with --write)")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--write", action="store_true", help="save the report in the project's reviews/ folder")
+    ap.add_argument("--min", choices=list(LEVELS), default="low")
+    a = ap.parse_args(argv)
+    try:
+        t = pathlib.Path(a.target).expanduser()
+        if a.diagrams:
+            if not t.is_file():
+                raise dtx.Stop(f"no file {a.target}")
+            doc = t.resolve()
+            paths = []
+            for x in a.diagrams:
+                p = pathlib.Path(x).expanduser()
+                if not p.is_file():
+                    raise dtx.Stop(f"no file {x}")
+                paths.append(p.resolve())
+            project = dtx.project_dir(a.project) if a.project else dtx.project_of(doc)
+        else:
+            if t.is_file():
+                raise dtx.Stop("give the diagrams to check the document against, or a project")
+            project = dtx.project_dir(a.target)
+            doc = dtx.find_doc(project, a.doc) if a.doc else newest_draft(project)
+            paths = project_diagrams(project)
+        try:
+            diagrams = [read_diagram(p) for p in paths]
+            findings = [f for f in check(doc, diagrams) if LEVELS[f["level"]] >= LEVELS[a.min]]
+        except (RuntimeError, zipfile.BadZipFile, KeyError) as e:
+            raise dtx.Stop(f"can't read {doc.name}: {e}")
+        report = render(doc, diagrams, findings)
+        saved = None
+        if a.write:
+            if not project:
+                raise dtx.Stop("--write needs a project: give --project, or a document inside one")
+            saved = dtx.save_report(project, doc.stem, "diagtext", report)
+        if a.json:
+            print(json.dumps({"document": str(doc), "diagrams": [{"file": str(d["path"]), "version": d["version"]}
+                                                                  for d in diagrams],
+                              "findings": findings, "saved": str(saved) if saved else None}, indent=2))
+        else:
+            sys.stdout.write(report)
+            if saved:
+                print(f"Saved: {saved}")
+        return 1 if any(LEVELS[f["level"]] >= 2 for f in findings) else 0
+    except dtx.Stop as e:
+        print(f"{PROG}: {e}", file=sys.stderr)
+        return e.code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

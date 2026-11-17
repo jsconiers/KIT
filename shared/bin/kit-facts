@@ -1,0 +1,394 @@
+#!/usr/bin/env python3
+"""kit-facts: a project's fact sheet, the agreed numbers kept in one place, and every draft checked against it.
+
+  kit-facts show PROJECT [--json]          the agreed facts
+  kit-facts set PROJECT KEY VALUE [--unit U] [--alias "A;B"] [--source S] [--date D] [--by ROLE] [--write]
+                                           add a fact, or change one (the old value is kept as superseded, so a
+                                           draft still using it is caught). Shows the row; writes only with --write
+  kit-facts remove PROJECT KEY [--write]   take a fact off the sheet
+  kit-facts check PROJECT DOC [--json]     check one draft (a file in the project or its drafts/ folder, or a path)
+  kit-facts check-all PROJECT [--json]     check every draft in drafts/
+
+PROJECT is a folder under <library root>/artifacts/ (the library root in memory/context/library.md), or a path to
+one. The sheet is PROJECT/facts.md, a table you can edit by hand:
+
+  | Key | Value | Unit | Aliases | Source | Agreed | By (role) | Superseded |
+  | Phase 1 likely cost | 347,840 | USD | phase 1 cost; likely cost | cost estimate v2 | 12-Nov-2026 | Sponsor | 345,000 |
+  | Rollback time | 30 | minutes | rollback; revert time | design review | 12-Nov-2026 | Domain owner | |
+  | Sponsor | VP Engineering | | executive sponsor | steering note | 12-Nov-2026 | PMO | |
+
+How a draft is checked: for each sentence or table row that names a fact's key or one of its aliases, the values of
+the fact's kind near the name are compared with the agreed one. A money fact (unit USD or a value with $) reads
+amounts ($347,840, $348k, 347,840 USD; a rounded $348k agrees with 347,840); a fact with a unit reads numbers with
+that unit (30 minutes, 30-minute, 30 min); a plain number reads numbers; a text fact (a name or a role) is checked
+where the draft says "KEY is ...", "KEY: ...", or "KEY will be ...". A different value is a CONFLICT, a superseded
+value is STALE, and a fact the draft never mentions is listed as not mentioned (not a problem). Read-only except
+set and remove with --write. Exit 0 when a draft agrees, 1 on any conflict or stale value, 2 a usage problem.
+Nothing is sent. Work content: approvers are roles, never names.
+"""
+import argparse
+import datetime as dt
+import json
+import pathlib
+import re
+import sys
+import zipfile
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import kit_daily as kd  # noqa: E402
+import kit_doctext as dtx  # noqa: E402
+
+PROG = "kit-facts"
+SHEET = "facts.md"
+HEAD = ["Key", "Value", "Unit", "Aliases", "Source", "Agreed", "By (role)", "Superseded"]
+FIELDS = ["key", "value", "unit", "aliases", "source", "agreed", "by", "superseded"]
+UNITS = {
+    "minutes": ["minutes", "minute", "mins", "min"], "minute": ["minutes", "minute", "mins", "min"],
+    "hours": ["hours", "hour", "hrs", "hr", "h"], "hour": ["hours", "hour", "hrs", "hr", "h"],
+    "days": ["days", "day", "business days", "working days"], "day": ["days", "day"],
+    "weeks": ["weeks", "week", "wks"], "months": ["months", "month"], "seconds": ["seconds", "second", "secs", "sec", "s"],
+    "%": ["%", "percent", "per cent"], "percent": ["%", "percent", "per cent"],
+    "gb": ["gb", "gib"], "tb": ["tb", "tib"], "users": ["users", "user"], "servers": ["servers", "server"],
+}
+WINDOW_AFTER, WINDOW_BEFORE = 120, 60
+
+
+# ---------------------------------------------------------------- the sheet
+def sheet_path(project):
+    return project / SHEET
+
+
+def read_sheet(project):
+    p = sheet_path(project)
+    if not p.is_file():
+        return []
+    rows = []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        s = line.strip()
+        if not (s.startswith("|") and s.endswith("|")):
+            continue
+        cells = [c.strip() for c in s.strip("|").split("|")]
+        if all(re.fullmatch(r":?-{2,}:?", c) for c in cells if c) or cells[0].lower() == "key":
+            continue
+        cells += [""] * (len(FIELDS) - len(cells))
+        r = dict(zip(FIELDS, cells[:len(FIELDS)]))
+        if r["key"] and r["value"]:
+            rows.append(r)
+    return rows
+
+
+def write_sheet(project, rows):
+    p = sheet_path(project)
+    intro = (f"# Fact sheet: {project.name}\n\nThe agreed numbers and names for this project, one row each. Every draft is "
+             "checked against it (`kit-facts check`). Edit by hand or with `kit-facts set`; aliases are separated by "
+             "semicolons, and Superseded keeps earlier values so a draft still using one is caught.\n\n")
+    if p.is_file():
+        old = p.read_text(encoding="utf-8")
+        m = re.search(r"^\|", old, re.M)
+        intro = old[:m.start()] if m else old.rstrip() + "\n\n"
+    lines = ["| " + " | ".join(HEAD) + " |", "|" + "|".join("---" for _ in HEAD) + "|"]
+    for r in rows:
+        lines.append("| " + " | ".join(r.get(f, "").replace("|", "/") for f in FIELDS) + " |")
+    p.write_text(intro + "\n".join(lines) + "\n", encoding="utf-8")
+
+
+def find_row(rows, key):
+    k = key.strip().lower()
+    return next((r for r in rows if r["key"].lower() == k), None)
+
+
+# ---------------------------------------------------------------- values
+def kind(r):
+    u = r["unit"].strip().lower()
+    v = r["value"].strip()
+    if u in ("usd", "$", "dollars") or v.startswith("$"):
+        return "money"
+    if u:
+        return "unit"
+    if re.fullmatch(r"[\d,]+(\.\d+)?", v):
+        return "number"
+    return "text"
+
+
+def num(v):
+    m = re.search(r"\d[\d,]*(?:\.\d+)?", v or "")
+    return float(m.group(0).replace(",", "")) if m else None
+
+
+def unit_words(r):
+    u = r["unit"].strip().lower()
+    return UNITS.get(u, [u, u.rstrip("s")] if u else [])
+
+
+def values_in(text, r):
+    """[(number, matched text, start, rounded)] of the fact's kind in text."""
+    k = kind(r)
+    if k == "money":
+        return [(v, m, s, rnd) for v, m, s, rnd in dtx.money(text)]
+    out = []
+    if k == "unit":
+        alts = "|".join(sorted((re.escape(w) for w in unit_words(r)), key=len, reverse=True))
+        for m in re.finditer(r"(?<![\w.$])(\d[\d,]*(?:\.\d+)?)\s*-?\s*(?:" + alts + r")(?![a-z])", text, re.I):
+            out.append((float(m.group(1).replace(",", "")), m.group(0), m.start(), False))
+    elif k == "number":
+        for m in re.finditer(r"(?<![\w.$/-])(\d[\d,]*(?:\.\d+)?)(?![\w.%/-]|\s?(?:[kKmM]\b|USD))", text):
+            if re.fullmatch(r"(19|20)\d\d", m.group(1)):
+                continue        # a year, not a figure
+            out.append((float(m.group(1).replace(",", "")), m.group(0), m.start(), False))
+    return out
+
+
+def same(a, b, rounded):
+    if b is None:
+        return False
+    if rounded:
+        return abs(a - b) <= max(abs(b) * 0.005, 0.5)
+    return abs(a - b) < 1e-6
+
+
+def names(r):
+    return [r["key"]] + [a.strip() for a in re.split(r";", r["aliases"]) if a.strip()]
+
+
+def mention_spans(text, r):
+    """Where the fact's key or an alias is named in text: [(start, end, name)]."""
+    out = []
+    for n in names(r):
+        rx = r"(?<![A-Za-z0-9])" + r"[\s-]+".join(re.escape(w) for w in n.split()) + r"s?(?![A-Za-z0-9])"
+        out += [(m.start(), m.end(), n) for m in re.finditer(rx, text, re.I)]
+    return sorted(out)
+
+
+def check_doc(doc, rows):
+    blocks = [b for b in dtx.blocks(doc) if b.kind != "heading"]
+    results = {r["key"]: {"key": r["key"], "agreed": r["value"] + (" " + r["unit"] if r["unit"] else ""),
+                          "status": "not mentioned", "ok": [], "conflicts": [], "stale": []} for r in rows}
+    for b in blocks:
+        units = [b.text] if b.kind == "row" else dtx.sentences(b.text)
+        for u in units:
+            for r in rows:
+                spans = mention_spans(u, r)
+                if not spans:
+                    continue
+                res = results[r["key"]]
+                k = kind(r)
+                if k == "text":
+                    for s, e, n in spans:
+                        m = re.match(r"\s*(?:\([^)]*\)\s*)?(?:is|:|=|will be|was|proposed:?|is proposed as|–|—|-)\s+(.{2,80})",
+                                     u[e:], re.I)
+                        if not m:
+                            continue
+                        said = m.group(1)
+                        if dtx.has_phrase(dtx.norm(said), r["value"]):
+                            res["ok"].append({"where": b.where})
+                            continue
+                        old = [x for x in re.split(r";", r["superseded"]) if x.strip()
+                               and dtx.has_phrase(dtx.norm(said), x.strip())]
+                        bucket = "stale" if old else "conflicts"
+                        res[bucket].append({"where": b.where, "found": re.split(r"[.;,]", said)[0].strip(),
+                                            "quote": quote(u)})
+                    continue
+                agreed = num(r["value"])
+                old = [num(x) for x in re.split(r";", r["superseded"]) if num(x) is not None]
+                vals = values_in(u, r)
+                for s, e, n in spans:
+                    near = [v for v in vals if e - WINDOW_BEFORE <= v[2] <= e + WINDOW_AFTER
+                            and not (s <= v[2] < e)]
+                    if not near:
+                        continue
+                    # the value nearest the name speaks for it
+                    v, m, pos, rnd = min(near, key=lambda x: abs(x[2] - e))
+                    if same(v, agreed, rnd):
+                        res["ok"].append({"where": b.where})
+                    elif any(same(v, o, rnd) for o in old):
+                        res["stale"].append({"where": b.where, "found": m.strip(), "quote": quote(u)})
+                    else:
+                        res["conflicts"].append({"where": b.where, "found": m.strip(), "quote": quote(u)})
+                    break
+    for res in results.values():
+        for bucket in ("conflicts", "stale"):
+            seen, uniq = set(), []
+            for x in res[bucket]:
+                if (x["where"], x["found"]) not in seen:
+                    seen.add((x["where"], x["found"]))
+                    uniq.append(x)
+            res[bucket] = uniq
+        res["status"] = ("conflict" if res["conflicts"] else "stale" if res["stale"] else
+                         "agrees" if res["ok"] else "not mentioned")
+        res["ok"] = len(res["ok"])
+    return list(results.values())
+
+
+def quote(t, n=140):
+    t = " ".join(t.split())
+    return t if len(t) <= n else t[: n - 1] + "…"
+
+
+def render(doc, rows, results):
+    by = {r["key"]: r for r in rows}
+    L = [f"{doc.name}: checked against {len(rows)} fact(s)"]
+    for res in results:
+        r = by[res["key"]]
+        src = ", ".join(x for x in (r["source"], r["agreed"], r["by"]) if x)
+        for c in res["conflicts"]:
+            L.append(f"  CONFLICT {res['key']}: {c['where']} says {c['found']}; the fact sheet says {res['agreed']}"
+                     + (f" ({src})" if src else "") + f"\n           \"{c['quote']}\"")
+        for c in res["stale"]:
+            L.append(f"  STALE    {res['key']}: {c['where']} still uses {c['found']}, superseded by {res['agreed']}"
+                     + (f" ({src})" if src else "") + f"\n           \"{c['quote']}\"")
+    agree = [x["key"] for x in results if x["status"] == "agrees"]
+    missing = [x["key"] for x in results if x["status"] == "not mentioned"]
+    if agree:
+        L.append(f"  agrees:        {', '.join(agree)}")
+    if missing:
+        L.append(f"  not mentioned: {', '.join(missing)}")
+    bad = sum(len(x["conflicts"]) + len(x["stale"]) for x in results)
+    L.append(f"  {bad} problem(s)" if bad else "  agrees with the fact sheet")
+    return "\n".join(L) + "\n"
+
+
+# ---------------------------------------------------------------- commands
+def cmd_show(project, a):
+    rows = read_sheet(project)
+    if a.json:
+        print(json.dumps(rows, indent=2))
+        return 0
+    if not rows:
+        print(f"No fact sheet yet in {project.name} (add one: kit-facts set {project.name} KEY VALUE --write)")
+        return 0
+    w = max(len(r["key"]) for r in rows)
+    for r in rows:
+        extra = ", ".join(x for x in (r["source"], r["agreed"], r["by"]) if x)
+        print(f"{r['key']:<{w}}  {r['value']}{(' ' + r['unit']) if r['unit'] else ''}" + (f"  ({extra})" if extra else "")
+              + (f"  [was {r['superseded']}]" if r["superseded"] else ""))
+    return 0
+
+
+def parse_date(s):
+    if not s:
+        return kd.fmt(kd.today())
+    for f in ("%Y-%m-%d", "%d-%b-%Y"):
+        try:
+            return kd.fmt(dt.datetime.strptime(s, f).date())
+        except ValueError:
+            pass
+    raise dtx.Stop(f"a date is YYYY-MM-DD or DD-Mmm-YYYY, not {s}")
+
+
+def cmd_set(project, a):
+    rows = read_sheet(project)
+    if "@" in " ".join(filter(None, [a.by, a.source])):
+        raise dtx.Stop("record who agreed a fact by role, not by address or name")
+    r = find_row(rows, a.key)
+    new = r is None
+    if new:
+        r = dict.fromkeys(FIELDS, "")
+        r["key"] = a.key.strip()
+        rows.append(r)
+    elif r["value"] != a.value:
+        old = [x.strip() for x in r["superseded"].split(";") if x.strip()]
+        if r["value"] not in old:
+            old.append(r["value"])
+        r["superseded"] = "; ".join(x for x in old if x != a.value)
+    before = r["value"]
+    r["value"] = a.value.strip()
+    for f, v in (("unit", a.unit), ("aliases", a.alias), ("source", a.source), ("by", a.by)):
+        if v is not None:
+            r[f] = v.strip()
+    r["agreed"] = parse_date(a.date) if (a.date or new or before != r["value"] or not r["agreed"]) else r["agreed"]
+    line = "| " + " | ".join(r[f] for f in FIELDS) + " |"
+    verb = "add" if new else ("change" if before != r["value"] else "update")
+    print(f"{verb} {r['key']}: {r['value']}{(' ' + r['unit']) if r['unit'] else ''}"
+          + (f" (was {before})" if verb == "change" else ""))
+    print(line)
+    if not a.write:
+        print("(nothing written; add --write to save it in " + str(sheet_path(project)) + ")")
+        return 0
+    write_sheet(project, rows)
+    print(f"Saved: {sheet_path(project)}")
+    return 0
+
+
+def cmd_remove(project, a):
+    rows = read_sheet(project)
+    r = find_row(rows, a.key)
+    if not r:
+        raise dtx.Stop(f"no fact {a.key} in {sheet_path(project)}")
+    print(f"remove {r['key']}: {r['value']}")
+    if not a.write:
+        print("(nothing written; add --write to remove it)")
+        return 0
+    write_sheet(project, [x for x in rows if x is not r])
+    print(f"Saved: {sheet_path(project)}")
+    return 0
+
+
+def run_checks(project, docs, a):
+    rows = read_sheet(project)
+    if not rows:
+        raise dtx.Stop(f"no facts in {sheet_path(project)} yet (kit-facts set {project.name} KEY VALUE --write)")
+    out, bad = [], 0
+    for d in docs:
+        try:
+            res = check_doc(d, rows)
+        except (RuntimeError, zipfile.BadZipFile, KeyError) as e:
+            raise dtx.Stop(f"can't read {d.name}: {e}")
+        bad += sum(len(x["conflicts"]) + len(x["stale"]) for x in res)
+        out.append((d, res))
+    if a.json:
+        print(json.dumps([{"document": str(d), "facts": res} for d, res in out], indent=2))
+    else:
+        for d, res in out:
+            sys.stdout.write(render(d, rows, res))
+    return 1 if bad else 0
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog=PROG, description="A project's agreed facts, and drafts checked against them.")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("show")
+    s.add_argument("project")
+    s.add_argument("--json", action="store_true")
+    s = sub.add_parser("set")
+    s.add_argument("project")
+    s.add_argument("key")
+    s.add_argument("value")
+    s.add_argument("--unit")
+    s.add_argument("--alias", help="other names for it, separated by semicolons")
+    s.add_argument("--source")
+    s.add_argument("--date")
+    s.add_argument("--by", help="who agreed it, by role")
+    s.add_argument("--write", action="store_true")
+    s = sub.add_parser("remove")
+    s.add_argument("project")
+    s.add_argument("key")
+    s.add_argument("--write", action="store_true")
+    s = sub.add_parser("check")
+    s.add_argument("project")
+    s.add_argument("doc")
+    s.add_argument("--json", action="store_true")
+    s = sub.add_parser("check-all")
+    s.add_argument("project")
+    s.add_argument("--json", action="store_true")
+    a = ap.parse_args(argv)
+    try:
+        project = dtx.project_dir(a.project)
+        if a.cmd == "show":
+            return cmd_show(project, a)
+        if a.cmd == "set":
+            return cmd_set(project, a)
+        if a.cmd == "remove":
+            return cmd_remove(project, a)
+        if a.cmd == "check":
+            return run_checks(project, [dtx.find_doc(project, a.doc)], a)
+        docs = dtx.drafts(project)
+        if not docs:
+            raise dtx.Stop(f"no drafts in {project / 'drafts'}")
+        return run_checks(project, docs, a)
+    except dtx.Stop as e:
+        print(f"{PROG}: {e}", file=sys.stderr)
+        return e.code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

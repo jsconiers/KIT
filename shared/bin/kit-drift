@@ -1,0 +1,336 @@
+#!/usr/bin/env python3
+"""kit-drift: find copies of a document that have drifted apart, and template copies left behind.
+
+  kit-drift [ROOT ...]                 scan the folders given, or the Drift roots in library.md
+  kit-drift --since YYYY-MM-DD         only report what changed on or after the date
+  kit-drift --templates DIR            the templates folder to compare against (default: the
+                                       Templates folder in library.md, else Kit's templates/)
+  kit-drift --near 0.9                 how alike a file must be to a template to count as a copy
+                                       of it (0 to 1, by shared word runs; default 0.9)
+  kit-drift --json                     the findings as JSON
+  kit-drift --check                    one line for kit doctor
+
+It reports two things:
+  same name, different contents   files with the same name in different folders or libraries
+                                  whose bytes differ (SHA-256). Markdown and text files count
+                                  only across libraries (roots), so each project's own notes
+                                  (questions.md) aren't reported. Names are compared without a
+                                  version (v1.2), " - Copy", "(1)", or "copy" suffix, and with
+                                  the extension. Each copy is listed with its size, date, and
+                                  folder, newest first, so you can tell which one is current.
+  template copies                 files in the scanned folders whose names still carry a
+                                  template placeholder (DOC-###, say: the "Template placeholders"
+                                  patterns in library.md), or whose bytes or text match a
+                                  template in the templates folder: a template copied into a
+                                  project and never renamed or filled in.
+
+Roots come from the arguments, else the "Drift roots" field in memory/context/library.md (an
+indented `path` per line), else the folders of the kit-library collections. Synced OneDrive and
+SharePoint folders work as they are: a cloud-only file (not downloaded, or empty) is skipped and
+counted, never downloaded. Office lock files (~$...) and hidden files are skipped.
+
+Read-only: it never moves, renames, or deletes anything. Each finding says what to check and
+what you might do; the choice is yours. Exit 0 when nothing drifted, 1 when it found something,
+2 on a usage problem.
+"""
+import argparse
+import datetime as dt
+import hashlib
+import json
+import os
+import pathlib
+import re
+import sys
+import zipfile
+
+KIT = pathlib.Path(os.path.expanduser(os.environ.get("KIT_DIR", "~/Claude/Agents/kit")))
+CONTEXT = KIT / "memory/context"
+SF_DATALESS = 0x40000000        # macOS: the file's contents are in the cloud, not on disk
+DEFAULT_PLACEHOLDERS = [r"#{3,}", r"\bX{3,}\b", r"\bN{3,}\b"]
+DOC_EXTS = {".docx", ".doc", ".pptx", ".ppt", ".xlsx", ".xls", ".pdf", ".vsdx", ".drawio", ".md", ".txt",
+            ".dotx", ".potx", ".xltx", ".rtf", ".odt"}
+TEXT_EXTS = {".md", ".txt"}
+SUFFIX = re.compile(r"(?:\s*[-_ ]\s*copy(?:\s*\(\d+\))?|\s*\(\d+\)|\s+copy(?:\s+\d+)?|[\s_-]*v\d+(?:\.\d+)*"
+                    r"(?:\s*\(draft\))?|[\s_-]+draft)$", re.I)
+
+
+def expand(p):
+    return pathlib.Path(os.path.expanduser(p.strip().strip("`")))
+
+
+def tilde(p):
+    s, h = str(p), str(pathlib.Path.home())
+    return "~" + s[len(h):] if s.startswith(h) else s
+
+
+def field(text, label):
+    m = re.search(r"^- \*\*" + re.escape(label) + r":\*\*(.*?)(?=^- \*\*|\Z)", text, re.S | re.M)
+    return m.group(1) if m else ""
+
+
+def listed(text, label):
+    return re.findall(r"^\s+- `([^`]+)`", field(text, label), re.M)
+
+
+def setup():
+    f = CONTEXT / "library.md"
+    text = f.read_text(errors="ignore") if f.exists() else ""
+    roots = [expand(p) for p in listed(text, "Drift roots")]
+    pats = listed(text, "Template placeholders")
+    tm = re.search(r"`([^`]+)`", field(text, "Templates folder"))
+    return roots, pats, (expand(tm.group(1)) if tm else None)
+
+
+def collection_roots():
+    f = KIT / "library/collections.json"
+    try:
+        cfg = json.loads(f.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return []
+    return [expand(d) for c in cfg.get("collections", []) for d in c.get("folders", [])]
+
+
+def norm_name(name):
+    stem, ext = os.path.splitext(name)
+    stem = stem.strip()
+    while True:
+        new = SUFFIX.sub("", stem).strip()
+        if new == stem:
+            break
+        stem = new
+    return re.sub(r"\s+", " ", stem.lower()), ext.lower()
+
+
+def skip_reason(p, st):
+    if getattr(st, "st_flags", 0) & SF_DATALESS:
+        return "cloud-only"
+    if st.st_size == 0:
+        return "empty"
+    return None
+
+
+def walk(roots, since):
+    files, skipped, seen = [], {"cloud-only": 0, "empty": 0}, set()
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for dirpath, dirs, names in os.walk(root):
+            dirs[:] = [d for d in dirs if not d.startswith(".")]
+            for n in names:
+                if n.startswith(("~$", ".")) or os.path.splitext(n)[1].lower() not in DOC_EXTS:
+                    continue
+                p = pathlib.Path(dirpath) / n
+                try:
+                    st = p.stat()
+                    real = p.resolve()
+                except OSError:
+                    continue
+                if real in seen:
+                    continue
+                seen.add(real)
+                why = skip_reason(p, st)
+                if why:
+                    skipped[why] += 1
+                    continue
+                files.append({"path": p, "root": root, "size": st.st_size, "mtime": st.st_mtime})
+    return files, skipped
+
+
+def sha(p, cache={}):
+    if p not in cache:
+        h = hashlib.sha256()
+        try:
+            with open(p, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    h.update(chunk)
+            cache[p] = h.hexdigest()
+        except OSError:
+            cache[p] = None
+    return cache[p]
+
+
+def text_of(p, limit=2_000_000):
+    ext = p.suffix.lower()
+    try:
+        if ext in TEXT_EXTS:
+            return p.read_text(errors="ignore")[:limit]
+        if ext in (".docx", ".dotx", ".pptx", ".potx"):
+            out = []
+            with zipfile.ZipFile(p) as z:
+                for n in sorted(z.namelist()):
+                    if re.match(r"word/document\.xml$|ppt/slides/slide\d+\.xml$", n):
+                        x = z.read(n).decode("utf-8", "ignore")
+                        out.append(re.sub(r"<[^>]+>", " ", re.sub(r"</w:p>|</a:p>", "\n", x)))
+            return " ".join(out)[:limit]
+    except (OSError, KeyError, zipfile.BadZipFile):
+        return ""
+    return ""
+
+
+def shingles(text, k=5):
+    w = re.findall(r"\w+", text.lower())
+    return {hash(tuple(w[i:i + k])) for i in range(max(len(w) - k + 1, 0))}
+
+
+def likeness(a, b):
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def day(ts):
+    return dt.date.fromtimestamp(ts).isoformat()
+
+
+def same_name(files, since):
+    groups = {}
+    for f in files:
+        groups.setdefault(norm_name(f["path"].name), []).append(f)
+    out = []
+    for (stem, ext), g in sorted(groups.items()):
+        if len(g) < 2 or len({f["path"].parent for f in g}) < 2:
+            continue                              # one folder: versions side by side, not drift
+        if len({f["root"] for f in g}) < 2 and ext in TEXT_EXTS:
+            continue                              # notes files (questions.md) in several projects of one library
+        if since and max(f["mtime"] for f in g) < since:
+            continue
+        hashes = {sha(f["path"]) for f in g} - {None}
+        if len(hashes) < 2:
+            continue
+        g = sorted(g, key=lambda f: -f["mtime"])
+        copies = [{"path": str(f["path"]), "folder": tilde(f["path"].parent), "root": tilde(f["root"]),
+                   "size": f["size"], "modified": day(f["mtime"]), "sha256": sha(f["path"]),
+                   "same_as_newest": sha(f["path"]) == sha(g[0]["path"])} for f in g]
+        out.append({"name": stem + ext, "versions": len(hashes), "copies": copies,
+                    "newest": copies[0]["path"],
+                    "suggest": "Check which copy is the agreed one (the newest isn't always it), then replace "
+                               "or archive the others so each library holds the same file."})
+    return out
+
+
+def template_copies(files, templates, patterns, near, since):
+    rx = [re.compile(p, re.I) for p in patterns]
+    tfiles = []
+    if templates and templates.is_dir():
+        for p in sorted(templates.rglob("*")):
+            if p.is_file() and not p.name.startswith(("~$", ".")) and p.suffix.lower() in DOC_EXTS:
+                tfiles.append({"path": p, "sha": sha(p), "sh": None, "ext": p.suffix.lower()})
+    tdir = templates.resolve() if templates and templates.exists() else None
+    out = []
+    for f in files:
+        p = f["path"]
+        if tdir and (tdir == p.resolve().parent or tdir in p.resolve().parents):
+            continue
+        if since and f["mtime"] < since:
+            continue
+        reasons, match = [], None
+        stem = p.stem
+        hit = [r.pattern for r in rx if r.search(stem)]
+        if hit:
+            reasons.append("name still has a template placeholder (" + ", ".join(hit) + ")")
+        ext = p.suffix.lower()
+        same_ext = [t for t in tfiles if t["ext"] == ext or {t["ext"], ext} <= {".docx", ".dotx"}
+                    or {t["ext"], ext} <= {".pptx", ".potx"}]
+        for t in same_ext:
+            if t["sha"] and t["sha"] == sha(p):
+                reasons.append("byte-identical to a template")
+                match = t["path"]
+                break
+        if not match and same_ext and ext in (TEXT_EXTS | {".docx", ".dotx", ".pptx", ".potx"}):
+            mine = shingles(text_of(p))
+            best = (0.0, None)
+            for t in same_ext:
+                if t["sh"] is None:
+                    t["sh"] = shingles(text_of(t["path"]))
+                score = likeness(mine, t["sh"])
+                if score > best[0]:
+                    best = (score, t["path"])
+            if best[0] >= near:
+                reasons.append(f"{best[0]:.0%} the same text as a template")
+                match = best[1]
+        if reasons:
+            out.append({"path": str(p), "folder": tilde(p.parent), "size": f["size"], "modified": day(f["mtime"]),
+                        "reasons": reasons, "template": str(match) if match else None,
+                        "suggest": "If it's an unfilled template, remove it from the project folder; if it's the "
+                                   "real document, rename it with its number and fill in the placeholders."})
+    return out
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-drift", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("roots", nargs="*")
+    ap.add_argument("--since")
+    ap.add_argument("--templates")
+    ap.add_argument("--near", type=float, default=0.9)
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--check", action="store_true")
+    a = ap.parse_args(argv)
+
+    roots_cfg, pats, tdir = setup()
+    roots = [expand(r) for r in a.roots] or roots_cfg or collection_roots()
+    where = "arguments" if a.roots else "Drift roots" if roots_cfg else "library collections"
+    if not roots:
+        msg = "no folders to scan: give them, or set Drift roots in memory/context/library.md"
+        if a.check:
+            print("kit-drift: not set (" + msg + ")")
+            return 0
+        print("kit-drift: " + msg, file=sys.stderr)
+        return 2
+    missing = [tilde(r) for r in roots if not r.is_dir()]
+    since = None
+    if a.since:
+        try:
+            since = dt.datetime.strptime(a.since, "%Y-%m-%d").timestamp()
+        except ValueError:
+            print("kit-drift: --since takes YYYY-MM-DD", file=sys.stderr)
+            return 2
+    if not 0 < a.near <= 1:
+        print("kit-drift: --near takes a number above 0, up to 1", file=sys.stderr)
+        return 2
+    templates = expand(a.templates) if a.templates else tdir or (KIT / "templates")
+    files, skipped = walk(roots, since)
+    drift = same_name(files, since)
+    tcopies = template_copies(files, templates, pats or DEFAULT_PLACEHOLDERS, a.near, since)
+    found = bool(drift or tcopies)
+
+    if a.check:
+        state = "ok" if not found else "warn"
+        print(f"kit-drift: {state}: {len(drift)} drifted name(s), {len(tcopies)} template copy(ies) in "
+              f"{len(files)} file(s)" + (f"; missing roots: {', '.join(missing)}" if missing else ""))
+        return 0
+    if a.json:
+        print(json.dumps({"roots": [str(r) for r in roots], "roots_from": where, "missing": missing,
+                          "templates": str(templates), "files": len(files), "skipped": skipped,
+                          "same_name_different_contents": drift, "template_copies": tcopies}, indent=2))
+        return 1 if found else 0
+
+    print(f"kit-drift: {len(files)} file(s) in {len(roots) - len(missing)} folder(s) ({where})"
+          + (f", changed since {a.since}" if a.since else ""))
+    if missing:
+        print("  missing, skipped: " + ", ".join(missing))
+    if any(skipped.values()):
+        print(f"  skipped {skipped['cloud-only']} cloud-only and {skipped['empty']} empty file(s), not downloaded")
+    print(f"\nSame name, different contents: {len(drift)}")
+    for d in drift:
+        print(f"\n  {d['name']}  ({d['versions']} different versions)")
+        for i, c in enumerate(d["copies"]):
+            mark = "newest" if i == 0 else ("same as newest" if c["same_as_newest"] else "differs")
+            print(f"    {c['modified']}  {c['size']:>10,} B  {mark:<14}  {c['folder']}")
+        print(f"    -> {d['suggest']}")
+    print(f"\nTemplate copies in project folders: {len(tcopies)}")
+    for t in tcopies:
+        print(f"\n  {tilde(t['path'])}  ({t['modified']})")
+        for r in t["reasons"]:
+            print(f"    - {r}")
+        if t["template"]:
+            print(f"    template: {tilde(t['template'])}")
+        print(f"    -> {t['suggest']}")
+    if not found:
+        print("\nNothing drifted.")
+    print("\nkit-drift changes nothing; act on these yourself.")
+    return 1 if found else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -179,6 +179,24 @@ to the review board or a vendor, `kit-signoff check PROJECT FILE` says whether i
 {{OWNER}}'s 0DTE trading makes and loses money and which of his rules he breaks most. Personal; never [work].
 Report what it says; don't advise trades.
 
+**Consistency checks (`kit-diagtext`, `kit-dedupe`, `kit-facts`).** Before a draft goes to review, `kit-diagtext PROJECT`
+finds where the diagrams and the text disagree (versions, ports, counts, missing components), and `kit-dedupe FILE`
+finds repeated statements and figures that disagree, with the cuts to make. Agreed numbers live in each project's
+`facts.md`: record one when {{OWNER}} agrees it (`kit-facts set PROJECT KEY VALUE --by ROLE --write`), and check
+drafts against it with `kit-facts check`. `kit-drift` lists same-named copies that differ between synced libraries
+and template copies left in project folders; which copy is the agreed one is {{OWNER}}'s call. Work content.
+
+**Setup questions and Kit's documents.** `kit-settings questions` lists the setup fields still "not set", most
+blocking first; answer one with `kit-settings answer FILE FIELD VALUE` (preview; `--write` only after {{OWNER}} says
+yes), or let him walk them in `kit-settings ui`. When Kit changes, `kit-docs status` shows which internal documents
+are behind; `kit-docs bump V`, then `kit-docs build --archive --stamp`, rebuilds them from docs-build.json.
+
+**Reviews and leave.** `kit-selfeval` drafts {{OWNER}}'s self-evaluation from the accomplishments log and monthly
+reports, by the goals in `memory/context/reviews.md`; `kit-360 NAME` drafts feedback for a colleague from recorded
+work evidence only, in the private `feedback/` folder. Before leave, `kit-timeoff START END` builds the pack (what
+will slip, out-of-office drafts, delegate notes) and the handoff agent's brief. Drafts only: Kit never sends them
+or sets anything in Outlook. Work content.
+
 **Connector sessions and tokens.** When a connector call fails because its session went stale or its sign-in
 lapsed (the MCP watchdog's note says so), stop retrying it and ask {{OWNER}} to run `/mcp`, pick the server,
 and Reconnect (or Authenticate). Connector tokens are on the expiry list as Keychain items (`kit-expiry

@@ -29,6 +29,22 @@ incomplete, tell Kit what's missing.
 Before every draft, read the review-lessons file `writing.md` names: the reviewer's rules from
 findings that keep coming back. Check your draft against each rule before you save it.
 
+## Start from precedent
+
+Before a new draft (not a revision of your own draft), and alongside the IA, pull the three
+closest past documents into your brief:
+
+```
+python3 ~/Claude/Agents/kit/.install/shared/bin/kit-precedent --closest 3 --brief --from <demand or request file>
+```
+
+(or the request's text in quotes instead of `--from`; `--kind gds` for GDSs only). Put the
+"Closest precedents" block it prints at the top of your working notes. Read each document it
+lists, through `kit-library show ID --text` or the librarian when it's Word or PDF, for its
+structure, the decisions it made, and its numbers (sizes, costs, timings). Reuse what fits and cite
+it; check any figure from a document marked superseded or old before you carry it forward. If it
+prints "None found", say so in your report, and don't cite a precedent you didn't read.
+
 ## Start from the IA
 
 - Find the IA the design is based on: the IA draft in the project's library folder, or the
@@ -95,9 +111,9 @@ start each entry with the date and the version of the document it refers to.
 - Before you save, run `python3 ~/Claude/Agents/kit/.install/shared/bin/kit-templatecheck <draft>` (add `--type GDS` if it
   can't tell). Fix missing sections and leftover template text, and explain any renamed,
   reordered, or added section in your report.
-- Look for precedent: published GDSs for the same or similar systems, through the librarian, and
-  decisions and standards already recorded, through the curator. Ask Kit for `kit-refarch` matches
-  (reference architectures that may fit, ranked with reasons) and state which one the design follows.
+- Beyond the closest precedents above, look for more: published GDSs for the same or similar
+  systems, through the librarian, and decisions and standards already recorded, through the
+  curator. Ask Kit for `kit-refarch` matches (reference architectures that may fit, ranked with reasons) and state which one the design follows.
 - For each figure, describe what it must show, leave a labeled placeholder in the draft, and ask
   for it in **Requests** so the diagrammer can draw it.
 - Never invent a document number (use `GDS-###` until one is assigned), hostnames, addresses,
@@ -121,5 +137,6 @@ start each entry with the date and the version of the document it refers to.
 The draft's path and version, the trace (IA items carried, gaps, and new items, with kit-trace's
 untraced requirements), what changed,
 the review-lessons rules you checked (or that the file doesn't exist yet),
-"to be confirmed" items, open items for {{OWNER}}, what you exchanged with the IA writer, and
+"to be confirmed" items, open items for {{OWNER}}, the precedents you used (or that none were
+found), what you exchanged with the IA writer, and
 **Requests**, if any.

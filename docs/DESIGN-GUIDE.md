@@ -7,8 +7,8 @@ repository; [DESIGN.md](../DESIGN.md) is the shorter reference that sits beside 
 
 | | |
 |---|---|
-| Describes | Kit 1.7.3 |
-| Date | 10-Nov-2026 |
+| Describes | Kit 1.8.0 |
+| Date | 17-Nov-2026 |
 | Audience | Maintainers, security reviewers, technical adopters |
 | Licence | All rights reserved; see [LICENSE](../LICENSE) |
 
@@ -128,9 +128,9 @@ The tools in `shared/bin/` are standard-library Python with a usage docstring, l
 
 | Family | Examples | Model calls |
 |---|---|---|
-| Queue and day | `todo`, `kit-queue`, `kit-meetprep`, `kit-triage`, `kit-awaiting`, `kit-holds`, `kit-wrap`, `kit-dates`, `kit-touch`, `kit-feedback`, `kit-meetload`, `kit-expiry`, `kit-letter`, `kit-library`, `kit-tradeinsights` | None |
-| Architecture | `kit-refarch`, `kit-precedent`, `kit-sysprofile`, `kit-trace`, `kit-csf`, `kit-sizing`, `kit-diagram-diff`, `kit-diaglint`, `kit-onepager`, `kit-decisions`, `kit-viewpoints`, `kit-coverage`, `kit-controls`, `kit-lifecycle`, `kit-roadmap`, `kit-vendors`, `kit-digest`, `kit-signoff` | None |
-| Closed reviews | `kit-preread`, `kit-rehearse`, `kit-review-loop` | One closed Claude run each, asked first; `kit-review-loop run` is four agent runs (reviewer, red team, threat modeler, standards checker), asked first (also from `kit-settings ui`'s Review loop section, with the cost shown), and its `plan`, `merge`, `feedback`, `score` (ready for ARB), and `status` make none |
+| Queue and day | `todo`, `kit-queue`, `kit-meetprep`, `kit-triage`, `kit-awaiting`, `kit-holds`, `kit-wrap`, `kit-dates`, `kit-touch`, `kit-feedback`, `kit-meetload`, `kit-expiry`, `kit-letter`, `kit-library`, `kit-tradeinsights`, `kit-selfeval`, `kit-360` | None |
+| Architecture | `kit-refarch`, `kit-precedent`, `kit-sysprofile`, `kit-trace`, `kit-csf`, `kit-sizing`, `kit-diagram-diff`, `kit-diaglint`, `kit-onepager`, `kit-decisions`, `kit-viewpoints`, `kit-coverage`, `kit-controls`, `kit-lifecycle`, `kit-roadmap`, `kit-vendors`, `kit-digest`, `kit-signoff`, `kit-diagtext`, `kit-dedupe`, `kit-facts`, `kit-drift` | None |
+| Closed reviews | `kit-preread`, `kit-rehearse`, `kit-review-loop`, `kit-timeoff --handoff` | One closed Claude run each, asked first; `kit-review-loop run` is four agent runs (reviewer, red team, threat modeler, standards checker), asked first (also from `kit-settings ui`'s Review loop section, with the cost shown), and its `plan`, `merge`, `feedback`, `score` (ready for ARB), and `status` make none |
 | Team | `kit-publish`, `kit-team`, `kit-teammap`, `kit-plugin` | None |
 | Models | `kit-models`, `kit-delegate`, `kit-run`, `kit-evals` | Only `kit-delegate`, `kit-run`, and `kit-evals --live` |
 | Safety and operations | `connector-guard`, `kit-audit`, `kit-pause`, `kit-connect`, `kit-ppmx`, `kit-mcp-env`, `kit-backup`, `kit-audit-export`, `kit-retention`, `kit-alerts`, `kit-reliability`, `kit-cost`, `kit-update`, `kit-version`, `kit-release`, `kit-mcp-watch`, `kit-tickets` | Only `kit-connect test --read` (one guarded read per server); the ticket watcher's search is the morning run's, through the gateway |

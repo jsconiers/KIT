@@ -80,6 +80,16 @@ through Kit.
    - **Diagrams.** If `diagrams.md` names lint rules, run
      `python3 ~/Claude/Agents/kit/.install/shared/bin/kit-diaglint <document folder>` on the diagram
      files beside the document and report its errors and warnings as diagram findings.
+     Then run `python3 ~/Claude/Agents/kit/.install/shared/bin/kit-diagtext <project>` (or
+     `kit-diagtext <document> <diagram files>`): a figure caption naming another version of the diagram,
+     a protocol or port the text gives differently, a count the diagram doesn't draw, or a component in
+     only one of them is a diagram finding. Check each against the document before you report it.
+   - **Repeats and figures.** Run `python3 ~/Claude/Agents/kit/.install/shared/bin/kit-dedupe "<file>"`
+     (add the IA when you review a GDS). Costs, counts, dates, and Q-IDs that disagree are findings;
+     repeated statements are minor findings, with its proposed cuts as the fix.
+   - **Fact sheet.** If the project has a `facts.md`, run
+     `python3 ~/Claude/Agents/kit/.install/shared/bin/kit-facts check <project> "<file>"`. Every
+     CONFLICT or STALE line is a finding: the draft disagrees with a figure the project agreed.
 6. **Earlier versions.** If the project's `reviews/` folder holds an earlier review of this
    document, or the project's folder holds an earlier version, compare: mark each earlier finding
    fixed, partly fixed, or open, and flag new text that wasn't reviewed before.

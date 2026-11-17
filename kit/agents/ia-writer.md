@@ -30,6 +30,22 @@ working folders). Load the skills `writing.md` names with the Skill tool before 
 Before every draft, read the review-lessons file `writing.md` names: the reviewer's rules from
 findings that keep coming back. Check your draft against each rule before you save it.
 
+## Start from precedent
+
+Before a new draft (not a revision of your own draft), pull the three closest past documents into
+your brief:
+
+```
+python3 ~/Claude/Agents/kit/.install/shared/bin/kit-precedent --closest 3 --brief --from <demand or request file>
+```
+
+(or the request's text in quotes instead of `--from`; `--kind ia` for IAs only). Put the
+"Closest precedents" block it prints at the top of your working notes. Read each document it
+lists, through `kit-library show ID --text` or the librarian when it's Word or PDF, for its
+structure, the decisions it made, and its numbers (sizes, costs, timings). Reuse what fits and cite
+it; check any figure from a document marked superseded or old before you carry it forward. If it
+prints "None found", say so in your report, and don't cite a precedent you didn't read.
+
 ## Working with the GDS writer
 
 You and the GDS writer are the one pair on Kit's staff that talks directly, as well as through Kit.
@@ -102,4 +118,5 @@ start each entry with the date and the version of the document it refers to.
 
 The draft's path and version, what changed, the review-lessons rules you checked (or that the
 file doesn't exist yet), sections still incomplete, "to be confirmed" items,
-open items for {{OWNER}}, what you exchanged with the GDS writer, and **Requests**, if any.
+open items for {{OWNER}}, the precedents you used (or that none were found), what you exchanged
+with the GDS writer, and **Requests**, if any.

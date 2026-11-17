@@ -1,0 +1,294 @@
+#!/usr/bin/env python3
+"""kit-360: a draft of 360 feedback for a colleague, from work you both have on record.
+
+  kit-360 NAME [--from D] [--to D] [--json]     print the draft
+  kit-360 NAME ... --write                      save it in Kit's private feedback/ folder (360-NAME-DATE.md)
+
+Evidence, each item dated and cited:
+  - your kit-feedback notes about them (feedback/notes.jsonl; their aliases from feedback/people.json count too)
+  - library documents, minutes, and status reports that name them (kit-library search, or, without a catalog, the
+    Markdown and text files under the library root's artifacts/ folder, CATALOG.md, and LOG.md)
+  - meeting actions they own (lines in minutes that name them as an action's owner)
+  - lines in the accomplishments log (memory/accomplishments.md) that mention them
+
+The draft has strengths (from your praise notes and the work they appear in), impact with dated examples, areas to
+grow (only from your coaching or concern notes; otherwise prompts for you to fill in or leave out), and a short
+summary for you to write. It says plainly when the evidence is thin. It never guesses at motives, health, or
+private life, and reads nothing under memory/personal/.
+
+The period: --from and --to (YYYY-MM-DD or DD-Mmm-YYYY), default the last 12 months. It's a DRAFT for you to edit
+and send yourself through the review system: Kit sends nothing. Saved drafts stay in feedback/, which only your
+account can open and which is never committed or exported.
+"""
+import argparse
+import datetime as dt
+import json
+import os
+import pathlib
+import re
+import subprocess
+import sys
+
+HERE = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent))
+import kit_daily as kd  # noqa: E402
+
+PROG = "kit-360"
+FEEDBACK = kd.KIT / "feedback"
+TEXT = {".md", ".txt"}
+MAX_FILES, MAX_BYTES = 3000, 2 * 1024 * 1024
+ACTION = re.compile(r"\b(action|owner|owns|to do|todo|follow[- ]up|assigned|will)\b|^\s*-\s*\[[ xX]\]|^\s*\|", re.I)
+DONE = re.compile(r"\b(done|closed|complete[d]?|delivered|resolved)\b|\[[xX]\]", re.I)
+THIN = 3
+
+
+def norm(s):
+    return re.sub(r"[^a-z0-9 ]+", "", (s or "").lower()).strip()
+
+
+def person(name):
+    """(display name, [names to match]) from feedback/people.json, or the name as given."""
+    try:
+        people = json.loads((FEEDBACK / "people.json").read_text(encoding="utf-8-sig")).get("people", [])
+    except (OSError, ValueError):
+        people = []
+    n = norm(name)
+    for p in people:
+        names = [p.get("name", "")] + list(p.get("aliases", []))
+        if n in [norm(x) for x in names] or (len(n.split()) == 1 and norm(p.get("name")).split(" ")[0] == n):
+            return p["name"], [x for x in names if x]
+    return name.strip(), [name.strip()]
+
+
+def matcher(names):
+    pats = [r"(?<![\w])" + r"\s+".join(map(re.escape, x.split())) + r"(?![\w])" for x in names if x.strip()]
+    return re.compile("|".join(pats), re.I)
+
+
+def in_period(d, a, b):
+    return d is not None and a <= d <= b
+
+
+def feedback_notes(who, a, b):
+    out = []
+    f = FEEDBACK / "notes.jsonl"
+    for n, line in enumerate(kd.read(f).splitlines(), 1):
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        d = kd.parse_date(r.get("date", ""))
+        if norm(r.get("person")) == norm(who) and in_period(d, a, b):
+            out.append({"date": d, "kind": r.get("kind", "observation"), "text": r.get("text", ""),
+                        "impact": r.get("impact", ""), "cite": f"feedback/notes.jsonl:{n}"})
+    return out
+
+
+def accomplishments(rx, a, b):
+    out = []
+    for n, ln in enumerate(kd.read(kd.KIT / "memory/accomplishments.md").splitlines(), 1):
+        m = re.match(r"^- (\d{2}-[A-Z][a-z]{2}-\d{4}) (?:\[[^\]]+\] )?(.*)$", ln)
+        if m and rx.search(m.group(2)):
+            d = kd.parse_date(m.group(1))
+            if in_period(d, a, b):
+                out.append({"date": d, "text": m.group(2), "cite": f"memory/accomplishments.md:{n}"})
+    return out
+
+
+def kind_of(path):
+    p = str(path).lower()
+    return "minutes" if "minute" in p else "status" if "status" in p else "document"
+
+
+def catalog_search(names, a, b):
+    """kit-library search for each name: [{date, title, path, snippet}], or None when there's no catalog."""
+    tool = HERE / "kit-library"
+    if not tool.exists():
+        return None
+    hits = []
+    for nm in names:
+        try:
+            r = subprocess.run([sys.executable, str(tool), "search", f'"{nm}"', "--limit", "25", "--json"],
+                               capture_output=True, text=True, timeout=120, env=os.environ)
+            data = json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip() else None
+        except (OSError, subprocess.SubprocessError, ValueError):
+            data = None
+        if data is None:
+            return None
+        for h in data.get("results", []):
+            d = kd.parse_date(h.get("modified") or "")
+            if in_period(d, a, b):
+                hits.append({"date": d, "title": h.get("title") or pathlib.Path(h.get("path", "")).name,
+                             "path": h.get("path", ""), "snippet": h.get("snippet", ""), "kind": kind_of(h.get("path"))})
+    return hits
+
+
+def library_files(root):
+    found = []
+    for name in ("CATALOG.md", "LOG.md"):
+        if (root / name).is_file():
+            found.append(root / name)
+    art = root / "artifacts"
+    if art.is_dir():
+        for dirpath, dirs, files in os.walk(art):
+            dirs[:] = [d for d in dirs if not d.startswith(".") and d.lower() != "personal"]
+            for f in files:
+                p = pathlib.Path(dirpath) / f
+                if p.suffix.lower() in TEXT:
+                    found.append(p)
+                    if len(found) >= MAX_FILES:
+                        return found
+    return found
+
+
+def scan_library(rx, a, b):
+    """Lines that name them in the library's text files: documents, minutes, status reports, and actions."""
+    root = kd.library_root()
+    docs, actions = [], []
+    if not root or not root.is_dir():
+        return docs, actions, None
+    for p in library_files(root):
+        try:
+            if p.stat().st_size > MAX_BYTES:
+                continue
+            mtime = dt.date.fromtimestamp(p.stat().st_mtime)
+        except OSError:
+            continue
+        rel = p.relative_to(root).as_posix()
+        kind = kind_of(rel)
+        file_hits = 0
+        for n, ln in enumerate(kd.read(p).splitlines(), 1):
+            if not rx.search(ln):
+                continue
+            d = kd.parse_date(ln) or kd.parse_date(p.name) or mtime
+            if not in_period(d, a, b):
+                continue
+            row = {"date": d, "text": kd.clip(ln.strip(" -|#*"), 200), "cite": f"{rel}:{n}", "kind": kind,
+                   "done": bool(DONE.search(ln))}
+            if kind == "minutes" and ACTION.search(ln):
+                actions.append(row)
+            elif file_hits < 3:                       # a few lines per document is enough evidence
+                docs.append(row)
+                file_hits += 1
+    return docs, actions, root
+
+
+def gather(name, a, b):
+    who, names = person(name)
+    rx = matcher(names)
+    notes = feedback_notes(who, a, b)
+    wins = accomplishments(rx, a, b)
+    docs, actions, root = scan_library(rx, a, b)
+    hits = catalog_search(names, a, b)
+    if hits:
+        seen = {d["cite"].rsplit(":", 1)[0] for d in docs + actions}
+        for h in hits:
+            path = h["path"]
+            rel = path
+            if root:
+                try:
+                    rel = pathlib.Path(path).resolve().relative_to(root.resolve()).as_posix()
+                except (ValueError, OSError):
+                    rel = path
+            if rel in seen:
+                continue
+            docs.append({"date": h["date"], "text": kd.clip(f"{h['title']}: {h['snippet']}".strip(": "), 200),
+                         "cite": rel, "kind": h["kind"], "done": False})
+    for lst in (notes, wins, docs, actions):
+        lst.sort(key=lambda r: r["date"])
+    return who, notes, wins, docs, actions
+
+
+def item(r, extra=""):
+    return f"- {kd.fmt(r['date'])}: {kd.clip(r['text'], 200)}{extra} _(evidence: {r['cite']})_"
+
+
+def draft(name, a, b):
+    who, notes, wins, docs, actions = gather(name, a, b)
+    praise = [r for r in notes if r["kind"] == "praise"]
+    grow = [r for r in notes if r["kind"] in ("coaching", "concern")]
+    seen_notes = [r for r in notes if r["kind"] in ("observation", "goal")]
+    total = len(notes) + len(wins) + len(docs) + len(actions)
+    out = [f"# 360 feedback for {who}, {kd.fmt(a)} to {kd.fmt(b)} (DRAFT)", "",
+           f"DRAFT for {kd.owner()} to edit. Kit drafted it from shared work on record; keep what you saw first-hand, "
+           "put it in your own words, and send it yourself through the review system. Kit sends nothing. Private "
+           "(Kit's feedback/ folder). [work]", ""]
+    if total < THIN:
+        out += [f"**Thin evidence:** only {total} item(s) on record for {who} in the period. Write from what you "
+                "saw yourself, or say you worked with them too little to comment.", ""]
+    out += ["## Strengths", ""]
+    out += [item(r, f" (impact: {kd.clip(r['impact'], 120)})" if r.get("impact") else "") for r in praise]
+    if not praise:
+        out.append("- _No praise notes on record. From the examples below, what do they do especially well?_")
+    out += ["", "## Impact, with examples", ""]
+    examples = ([dict(r, text=r["text"]) for r in seen_notes] + wins
+                + [dict(r, text=r["text"] + (" (done)" if r["done"] else "")) for r in actions] + docs)
+    examples.sort(key=lambda r: r["date"])
+    out += [item(r) for r in examples] or ["- _Nothing on record. Add an example you saw: what they did and what it "
+                                           "led to._"]
+    if actions:
+        done = sum(1 for r in actions if r["done"])
+        out += ["", f"_Meeting actions naming them: {len(actions)}, {done} marked done._"]
+    out += ["", "## Areas to grow", ""]
+    out += [item(r) for r in grow]
+    if not grow:
+        out += ["- _No coaching notes on record. Add one or two specific, work-related suggestions you've seen a "
+                "need for, or leave this out._"]
+    out += ["", "## Summary", "",
+            f"_Two or three sentences: how working with {who} went, the strength that mattered most, and one thing "
+            "to keep doing._", "",
+            "_Work only: what they did and what it led to. No guesses about motives, health, or private life._"]
+    return {"person": who, "from": a.isoformat(), "to": b.isoformat(), "evidence": total, "thin": total < THIN,
+            "notes": len(notes), "accomplishments": len(wins), "documents": len(docs), "actions": len(actions),
+            "markdown": "\n".join(out) + "\n"}
+
+
+def write_private(name, text):
+    FEEDBACK.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(FEEDBACK, 0o700)
+    except OSError:
+        pass
+    f = FEEDBACK / name
+    tmp = f.with_name(f.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:
+        pass
+    os.replace(tmp, f)
+    return f
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog=PROG, description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("name", nargs="+")
+    ap.add_argument("--from", dest="start")
+    ap.add_argument("--to", dest="end")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--write", action="store_true")
+    args = ap.parse_args(argv)
+    name = " ".join(args.name).strip()
+    b = kd.parse_date(args.end) if args.end else kd.today()
+    a = kd.parse_date(args.start) if args.start else (b - dt.timedelta(days=365) if b else None)
+    if not a or not b or a > b:
+        print(f"{PROG}: dates are YYYY-MM-DD or DD-Mmm-YYYY, --from before --to", file=sys.stderr)
+        return 2
+    if not norm(name):
+        print(f"{PROG}: whose feedback? Give a name", file=sys.stderr)
+        return 2
+    d = draft(name, a, b)
+    if args.json:
+        print(json.dumps({k: v for k, v in d.items() if k != "markdown"}, indent=2))
+        return 0
+    if not args.write:
+        print(d["markdown"], end="")
+        return 0
+    f = write_private(f"360-{kd.slug(d['person'], 40)}-{kd.today().isoformat()}.md", d["markdown"])
+    print(f"{PROG}: wrote the draft to {f} ({d['evidence']} item(s) of evidence"
+          + ("; thin, so lean on what you saw yourself" if d["thin"] else "") + "). Edit it before you use it.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

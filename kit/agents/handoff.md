@@ -45,6 +45,14 @@ ask for it in a **Requests** section.
 7. **What to do first**: the first three things, in order.
 8. **What not to change** without checking: commitments, approvals in flight, and fragile areas.
 
+## Time off
+
+When {{OWNER}} will be away, Kit's brief comes from `kit-timeoff START END --brief`: the dates, the
+delegate, the [work] items due in or just after the absence, PPM Express key dates, and meetings
+with others. Cover every project those items touch, in one brief, ordered by due date. A closed run
+(`kit-timeoff --handoff`) can't write files: give the brief as your answer, and kit-timeoff saves it
+in Kit's `briefs/`.
+
 ## What you save
 
 `<library root>/artifacts/<project>/handoff/handoff-<YYYY-MM-DD>.md`. Never overwrite an earlier

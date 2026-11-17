@@ -10,3 +10,9 @@ librarian reads this before every job, so keep it current.
   cloud drives sync under `~/Library/CloudStorage/`).
 - **Working folders:** none yet. Add the folders where you keep your own documents and project
   files, mark which one holds your projects, and note any folder that's a copy of another.
+- **Drift roots:** none yet. The synced library and project folders `kit-drift` compares for
+  copies of a document that differ, one indented `path` per line. Without them it uses the
+  kit-library collections' folders.
+- **Template placeholders:** the defaults (`###`, `XXX`, `NNN` in a file name). Add regex
+  patterns, one indented `pattern` per line, to replace them.
+- **Templates folder:** Kit's `templates/` folder. Set a path here if your templates live elsewhere.

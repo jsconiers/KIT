@@ -14,6 +14,12 @@
   kit-settings show --all [--not-set] [--area AREA] [--json]
                                             every setting: the run config, the setup fields in memory/context,
                                             and the JSON configs, with source, status, and description
+  kit-settings questions [--json]           the open setup questions (fields still "not set"), highest priority
+                                            first: the file and field, the agents that read it, a question, and
+                                            an example answer
+  kit-settings answer FILE FIELD VALUE... [--section S] [--write]
+                                            answer one: shows the change to that field; --write saves it (a
+                                            backup first, only that field's line changes, committed and logged)
   kit-settings ui [--no-open] [--idle MINUTES]
                                             open a local page to change settings (127.0.0.1 only, a one-time
                                             link, stops after 15 minutes idle); Claude Code asks before it runs
@@ -333,6 +339,54 @@ def cmd_show_all(args):
     return 0
 
 
+def cmd_questions(args):
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+    import kit_setupq as sq
+    qs = sq.questions(KIT)
+    if "--json" in args:
+        import json
+        print(json.dumps({"counts": sq.counts(qs), "questions": qs}, indent=1))
+        return 0
+    print(sq.text_report(qs))
+    return 0
+
+
+def cmd_answer(args):
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+    import kit_setupq as sq
+    ks = sq.ks
+    write_it = "--write" in args
+    args = [a for a in args if a != "--write"]
+    section = None
+    if "--section" in args:
+        i = args.index("--section")
+        if i + 1 >= len(args):
+            sys.exit("--section takes the section's heading")
+        section = args[i + 1]
+        del args[i:i + 2]
+    if len(args) < 3:
+        sys.exit("Usage: kit-settings answer FILE FIELD VALUE... [--section S] [--write]")
+    fname, field, value = args[0], args[1], " ".join(args[2:])
+    try:
+        s = sq.find_field(KIT, fname, field, section)
+        if not write_it:
+            _, _, _, _, v, diff = ks.plan_edit(KIT, s["id"], value)
+            print(diff.rstrip())
+            print(f"\nNothing written. To save it: kit-settings answer {fname} {field!r} {value!r}"
+                  + (f" --section {section!r}" if section else "") + " --write")
+            return 0
+        res = ks.apply_edit(KIT, s["id"], value)
+        sq.mark(KIT, s["id"], "answered")
+        print(res["message"])
+        left = len(sq.questions(KIT))
+        print(f"{left} setup field{'s' if left != 1 else ''} still not set (kit-settings questions).")
+        return 0
+    except ks.Refused as ex:
+        sys.exit(f"kit-settings: {ex}")
+    except ks.Invalid as ex:
+        sys.exit(f"kit-settings: {s['name']}: {ex}")
+
+
 def cmd_ui(args):
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
     import kit_settings_ui
@@ -373,6 +427,10 @@ def main(argv):
         return cmd_show_all(rest)
     if cmd == "ui":
         return cmd_ui(rest)
+    if cmd == "questions":
+        return cmd_questions(rest)
+    if cmd == "answer":
+        return cmd_answer(rest)
     sys.exit("Unknown command. Run: kit-settings --help")
 
 

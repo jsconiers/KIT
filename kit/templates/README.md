@@ -33,6 +33,7 @@ in `memory/context/writing.md`; none ship here.
 | Compliance | `exception-register-template.md` | risk and compliance mapper, standards checker, Kit (`kit-exceptions`) | `compliance.md` |
 | Compliance | `pbc-tracker-template.md` | Kit (`kit-pbc`) | `compliance.md` |
 | Compliance | `control-map.example.json` | Kit (`kit-audit-export --controls`) | `compliance.md` |
+| Kit's own documents | `docs-build.example.json` | Kit (`kit-docs`) | `~/Claude/Agents/kit/docs-build.json` (or `KIT_DOCS_MANIFEST`) |
 | Costs | `sizing-template.md` | cost estimator, Kit (`kit-sizing`) | `costs.md` |
 | POC | `poc-charter-template.md` | POC lead | `poc.md` |
 | POC | `poc-test-plan-template.md` | POC lead | `poc.md` |

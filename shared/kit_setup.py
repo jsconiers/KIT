@@ -90,7 +90,17 @@ ALLOW = [f"Read({K}/**)", f"Edit({K}/memory/**)", f"Edit({K}/QUEUE.md)", f"Edit(
          # The vendor evaluation desk's reading commands. The rest change an evaluation in the library or write a
          # file you name, so they ask.
          "Bash(kit-vendors)", "Bash(kit-vendors list)", "Bash(kit-vendors list *)", "Bash(kit-vendors due)",
-         "Bash(kit-vendors due *)", "Bash(kit-vendors show *)", "Bash(kit-vendors gaps *)"]
+         "Bash(kit-vendors due *)", "Bash(kit-vendors show *)", "Bash(kit-vendors gaps *)",
+         # The consistency checks and the copy drift watcher read documents and write, only with --write, a report
+         # in the project's reviews/. The fact sheet's reading commands; set and remove change it, so they ask.
+         "Bash(kit-diagtext *)", "Bash(kit-dedupe *)", "Bash(kit-facts show *)", "Bash(kit-facts check *)",
+         "Bash(kit-facts check-all *)", "Bash(kit-drift)", "Bash(kit-drift *)",
+         # Setup questions and the docs builder's reading commands. Answering, building, and bumping ask.
+         "Bash(kit-settings questions)", "Bash(kit-settings questions *)", "Bash(kit-docs plan)",
+         "Bash(kit-docs plan *)", "Bash(kit-docs status)", "Bash(kit-docs status *)", "Bash(kit-docs --check)",
+         # Review drafts read Kit's own logs and notes and write only Kit's own folders. kit-timeoff asks: --handoff
+         # starts a Claude run.
+         "Bash(kit-selfeval)", "Bash(kit-selfeval *)", "Bash(kit-360 *)"]
 # Always prompt, even if a broader allow rule exists: Kit's rules, Claude Code's own settings,
 # and commands that delete, push or post, install, or change system settings.
 ASK = [

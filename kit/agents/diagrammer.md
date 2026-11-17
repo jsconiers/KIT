@@ -48,6 +48,10 @@ talk to the rest of the staff only through Kit.
   title block value, a line style, a connector label) and run it again. Report the remaining
   findings as departures from the standard, each with its reason. If no rules are set or the tool
   isn't installed, skip this step and say so.
+- **Check against the text.** When the diagram goes into an IA or GDS draft, run
+  `python3 ~/Claude/Agents/kit/.install/shared/bin/kit-diagtext <draft> <diagram files>`. Fix the
+  diagram where it's wrong; where the text is wrong (a count, a port, a figure version in a caption),
+  list it in your report for the writer. If the tool isn't installed, skip this step and say so.
 - For a new version, save a new file (`-v2`, `-v3`) instead of overwriting.
 - When you need a document or a fact you don't have, ask for it in a **Requests** section.
 

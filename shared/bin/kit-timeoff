@@ -1,0 +1,311 @@
+#!/usr/bin/env python3
+"""kit-timeoff: the pack to prepare before you take leave.
+
+  kit-timeoff START END [--delegate WHO] [--json]     print the pack (dates YYYY-MM-DD or DD-Mmm-YYYY)
+  kit-timeoff START END ... --write                   save it to briefs/timeoff-START.md
+  kit-timeoff START END ... --handoff [--write]       also run the handoff agent on the pack's brief (one Claude
+                                                      call, read only) and save its handoff brief beside the pack
+  kit-timeoff START END --brief                       print just the brief for the handoff agent, to pass it yourself
+
+The pack lists what will slip: queue items (QUEUE.md) due while you're away or within the grace days after you're
+back, and items already overdue; PPM Express key dates in the same window, from the latest saved pulse snapshot
+(briefs/ppmx/, kept by kit-ppmx pulse --save; none means none listed); and the meetings on your calendar while
+you're away (kitcal), split into ones with attendees to decline or forward and your own blocks to clear. It drafts
+the out-of-office message (an internal and an external version, with your return date and delegate), a note for
+your delegate per open work item, and the brief for the handoff agent.
+
+Only items tagged [work] go into the delegate notes and the handoff brief; your other items are listed for you
+alone. Setup: memory/context/timeoff.md (Delegate, Grace days, Urgent contact). Every part is a DRAFT: the
+out-of-office isn't set, no meeting is declined or forwarded, and nothing is sent.
+"""
+import argparse
+import datetime as dt
+import json
+import os
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+
+HERE = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent))
+import kit_daily as kd  # noqa: E402
+
+PROG = "kit-timeoff"
+SETUP = kd.CONTEXT / "timeoff.md"
+SKIP = {"Done", "Someday"}
+DAYS = "Mon Tue Wed Thu Fri Sat Sun".split()
+
+
+def field(name):
+    v = kd.setting(kd.read(SETUP), name)
+    return "" if not v or v.lower().startswith("not set") else v.rstrip(".")
+
+
+def day(d):
+    return f"{DAYS[d.weekday()]} {kd.fmt(d)}"
+
+
+def back_on(end):
+    d = end + dt.timedelta(days=1)
+    while d.weekday() >= 5:
+        d += dt.timedelta(days=1)
+    return d
+
+
+def item_date(it):
+    text = f"{it['title']} {it['rest']}"
+    return kd.due_of(text) or kd.parse_date(text)
+
+
+def queue(start, end, grace):
+    lines = kd.queue_lines()
+    owner = kd.owner_section(lines)
+    out = {"away": [], "after": [], "overdue": [], "personal": [], "untagged": []}
+    for sec in kd.sections(lines):
+        if sec in SKIP:
+            continue
+        for it in kd.items(lines, sec):
+            if it["done"]:
+                continue
+            d = item_date(it)
+            if not d or d > end + dt.timedelta(days=grace):
+                continue
+            work = "[work]" in it["line"].lower()
+            row = {"title": re.sub(r"\s*\[work\]\s*", " ", it["title"], flags=re.I).strip(), "due": d,
+                   "section": sec, "work": work, "detail": kd.clip(it["rest"].strip(" :-"), 160)}
+            if not work:
+                out["personal" if sec == owner else "untagged"].append(row)
+            elif d < start:
+                out["overdue"].append(row)
+            elif d <= end:
+                out["away"].append(row)
+            else:
+                out["after"].append(row)
+    for v in out.values():
+        v.sort(key=lambda r: r["due"])
+    return out
+
+
+def ppmx(start, end, grace):
+    """(key dates in the window, note). From the latest pulse snapshot; nothing is fetched."""
+    snaps = sorted((kd.BRIEFS / "ppmx").glob("pulse-*.json")) if (kd.BRIEFS / "ppmx").is_dir() else []
+    if not snaps:
+        return [], "no PPM Express snapshot saved (kit-ppmx pulse --save keeps one), so no key dates are listed"
+    f = snaps[-1]
+    try:
+        snap = json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return [], f"couldn't read {f.name}"
+    projects = snap.get("projects") or {}
+    out = []
+    for k, kdate in (snap.get("key_dates") or {}).items():
+        d = kd.parse_date(kdate.get("date") or "")
+        if kdate.get("done") or not d or not start <= d <= end + dt.timedelta(days=grace):
+            continue
+        pid = kdate.get("project") or k.split("/")[0]
+        out.append({"project": (projects.get(pid) or {}).get("name") or pid, "name": kdate.get("name", ""),
+                    "date": d, "status": kdate.get("status", "")})
+    out.sort(key=lambda r: r["date"])
+    return out, f"from the PPM Express snapshot of {f.stem[6:]} ({f.name}); check it's current"
+
+
+def kitcal_command():
+    exe = shutil.which("kitcal")
+    if exe:
+        return [sys.executable, exe] if exe.endswith(".py") else [exe]
+    if os.name == "nt":
+        win = kd.KIT / ".install" / "platform" / "windows"
+        if (win / "bin" / "kitcal.cmd").exists():
+            return [str(win / "bin" / "kitcal.cmd")]
+        if (win / "calendar" / "kitcal.py").exists():
+            return [sys.executable, str(win / "calendar" / "kitcal.py")]
+        return None
+    mac = pathlib.Path.home() / ".local/bin/kitcal"
+    return [str(mac)] if mac.exists() else None
+
+
+def meetings(start, end, use=True):
+    """(events, note). Read only: kitcal events for the window."""
+    if not use:
+        return [], "calendar not read (--no-calendar)"
+    cmd = kitcal_command()
+    if not cmd:
+        return [], "kitcal isn't installed here, so meetings aren't listed: check your calendar for the window"
+    try:
+        r = subprocess.run(cmd + ["events", "--from", start.isoformat(), "--to", end.isoformat()], capture_output=True,
+                           text=True, encoding="utf-8", errors="replace", timeout=120)
+        evs = json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip() else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        evs = None
+    if evs is None:
+        return [], "the calendar didn't answer (is Outlook running?), so meetings aren't listed"
+    return [e for e in evs if isinstance(e, dict)], "from your calendar (kitcal), read only"
+
+
+def pack(start, end, delegate=None, use_calendar=True):
+    m = re.match(r"\d+", field("Grace days"))
+    grace = int(m.group(0)) if m else 7
+    delegate = delegate or field("Delegate") or ""
+    urgent = field("Urgent contact")
+    q = queue(start, end, grace)
+    kdates, kd_note = ppmx(start, end, grace)
+    evs, cal_note = meetings(start, end, use_calendar)
+    ret = back_on(end)
+    owner = kd.owner()
+    who = delegate or "_(your delegate)_"
+    out = [f"# Time-off pack: {day(start)} to {day(end)} (DRAFT)", "",
+           f"Back {day(ret)}. Delegate: {who}. Every part is a DRAFT for {owner} to edit: the out-of-office isn't set, "
+           "no meeting is declined or forwarded, and nothing is sent.", ""]
+
+    def qline(r):
+        tag = " [work]" if r["work"] else ""
+        return f"- **{r['title']}**{tag}: due {day(r['due'])}" + (f". {r['detail']}" if r["detail"] else "")
+
+    out += ["## What will slip", ""]
+    if q["overdue"]:
+        out += ["Already overdue: close these before you go, or hand them over.", ""] + [qline(r) for r in q["overdue"]] + [""]
+    out += [f"Due while you're away ({len(q['away'])}):", ""] + ([qline(r) for r in q["away"]] or ["- nothing"]) + [""]
+    out += [f"Due in the {grace} days after you're back ({len(q['after'])}):", ""] \
+        + ([qline(r) for r in q["after"]] or ["- nothing"]) + [""]
+    out += ["PPM Express key dates [work]:", ""]
+    out += [f"- {r['project']}: {r['name']}, {day(r['date'])}" + (f" ({r['status']})" if r["status"] else "") + " [work]"
+            for r in kdates] or ["- none in the window"]
+    out += [f"_({kd_note})_", ""]
+    if q["untagged"]:
+        out += ["Other open items in the window, not tagged [work] (left out of the delegate notes):", ""] \
+            + [qline(r) + f" ({r['section']})" for r in q["untagged"]] + [""]
+    if q["personal"]:
+        out += ["Yours only (left out of the delegate notes and the handoff):", ""] + [qline(r) for r in q["personal"]] + [""]
+
+    with_people = [e for e in evs if (e.get("attendees") or 0) > 0 and not e.get("all_day")]
+    blocks = [e for e in evs if e not in with_people]
+
+    def eline(e):
+        rec = " (recurring: decline just these dates)" if e.get("recurring") else ""
+        return f"- {kd.clip(e.get('title') or '(no title)', 90)}, {e.get('start', '')}{rec} [work]"
+
+    out += ["## Meetings while you're away", "", f"_({cal_note})_", ""]
+    if evs:
+        out += [f"Decline, or forward to {who} (draft only; do it yourself):", ""] + ([eline(e) for e in with_people]
+                                                                                   or ["- none"]) + [""]
+        out += ["Your own blocks to clear:", ""] + ([eline(e) for e in blocks] or ["- none"]) + [""]
+
+    first = start.strftime("%d %B").lstrip("0")
+    last = end.strftime("%d %B %Y").lstrip("0")
+    retd = ret.strftime("%A %d %B").replace(" 0", " ")
+    cover = f"For anything that can't wait, please contact {delegate}" if delegate else \
+        "For anything that can't wait, please contact _(your delegate)_"
+    urgent_line = f" For urgent matters: {urgent}." if urgent else ""
+    out += ["## Out-of-office drafts", "", "Internal:", "",
+            f"> I'm out of the office from {first} to {last}, back {retd}, with limited access to email. {cover}, "
+            f"who is covering my work while I'm away.{urgent_line} I'll reply when I'm back.", "",
+            "External:", "",
+            f"> Thank you for your message. I'm out of the office until {retd} and will reply when I return. "
+            + (f"For anything urgent, please contact {urgent}." if urgent else "For anything urgent, please contact "
+               "_(a shared team address, not a person's details)_."), "",
+            "_Set these yourself in Outlook (automatic replies); Kit doesn't._", ""]
+
+    handing = q["overdue"] + q["away"] + q["after"]
+    out += [f"## Notes for {who} [work]", ""]
+    for r in handing:
+        out += [f"### {r['title']} (due {day(r['due'])})", "",
+                f"- Where it stands: {r['detail'] or '_add a line_'}",
+                "- What's needed by the due date: _add it_",
+                "- Who's involved (by role): _add them_",
+                "- Decide or escalate: _what the delegate may decide, and what waits for you_", ""]
+    for r in kdates:
+        out += [f"### {r['project']}: {r['name']} ({day(r['date'])})", "",
+                "- PPM Express key date: _what's expected, and who to update_", ""]
+    if not handing and not kdates:
+        out += ["- No work items fall in the window.", ""]
+
+    brief = handoff_brief(start, end, ret, delegate, handing, kdates, with_people)
+    out += ["## Brief for the handoff agent", "", "```", brief, "```", ""]
+    return {"start": start.isoformat(), "end": end.isoformat(), "back": ret.isoformat(), "delegate": delegate,
+            "grace_days": grace, "overdue": len(q["overdue"]), "away": len(q["away"]), "after": len(q["after"]),
+            "personal": len(q["personal"]), "untagged": len(q["untagged"]), "key_dates": len(kdates),
+            "meetings": len(with_people), "blocks": len(blocks), "calendar": cal_note, "ppmx": kd_note,
+            "brief": brief, "markdown": "\n".join(out) + "\n"}
+
+
+def handoff_brief(start, end, ret, delegate, items, kdates, meets):
+    lines = [f"Goal: a handoff brief so {delegate or 'the delegate'} can cover {kd.owner()}'s work from "
+             f"{kd.fmt(start)} to {kd.fmt(end)} (back {kd.fmt(ret)}).",
+             "Cover, per item: where it stands, open actions with owners by role and dates, decisions made, risks, the "
+             "documents to read, and what to do first. People by role, never by name.",
+             "Work items due in or just after the absence:"]
+    lines += [f"- {r['title']} (due {kd.fmt(r['due'])}){': ' + r['detail'] if r['detail'] else ''}" for r in items] \
+        or ["- none in the queue"]
+    if kdates:
+        lines += ["PPM Express key dates:"] + [f"- {r['project']}: {r['name']} ({kd.fmt(r['date'])})" for r in kdates]
+    if meets:
+        lines += ["Meetings with others while away (for context):"] + [f"- {kd.clip(e.get('title') or '', 80)}, "
+                                                                       f"{e.get('start', '')}" for e in meets]
+    lines += ["Constraints: read only; nothing is sent; work content only (skip anything personal).",
+              "Done looks like: one brief, newest facts first, cited to the library, that a delegate can act on cold."]
+    return "\n".join(kd.mask(x) for x in lines)
+
+
+def run_handoff(brief):
+    from kit_claude import agent_prompt, ask_claude, DENY
+    playbook = agent_prompt("handoff")
+    if not playbook:
+        return 1, "the handoff agent isn't installed (~/.claude/agents/handoff.md); pass it the brief yourself"
+    prompt = (playbook + "\n\n---\n\nThis is a closed run: read what you need, don't write any file, and give the "
+              "handoff brief as your answer, in Markdown.\n\n" + brief)
+    deny = DENY + ["Read(~/Claude/Agents/kit/memory/personal/**)", "Read(~/Claude/Agents/kit/journal/**)"]
+    rc, text = ask_claude(prompt, mode="timeoff", allowed=["Read", "Glob", "Grep"], deny=deny, timeout=900,
+                          prompt_stdin=True)
+    if rc == 75:
+        return rc, "skipped: Kit's spend limit for today is reached (kit-cost)"
+    return rc, text
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog=PROG, description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("start")
+    ap.add_argument("end")
+    ap.add_argument("--delegate")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--write", action="store_true")
+    ap.add_argument("--brief", action="store_true")
+    ap.add_argument("--handoff", action="store_true")
+    ap.add_argument("--no-calendar", action="store_true")
+    args = ap.parse_args(argv)
+    start, end = kd.parse_date(args.start), kd.parse_date(args.end)
+    if not start or not end or start > end:
+        print(f"{PROG}: give START and END as YYYY-MM-DD or DD-Mmm-YYYY, START first", file=sys.stderr)
+        return 2
+    p = pack(start, end, args.delegate, not args.no_calendar)
+    if args.brief:
+        print(p["brief"])
+        return 0
+    if args.json:
+        print(json.dumps({k: v for k, v in p.items() if k != "markdown"}, indent=2))
+        return 0
+    if args.write:
+        f = kd.write(kd.BRIEFS / f"timeoff-{start.isoformat()}.md", p["markdown"])
+        print(f"{PROG}: wrote the pack to {f} ({p['away']} due while away, {p['after']} just after, "
+              f"{p['meetings']} meeting(s) to decline or forward). Nothing was sent or set.")
+    elif not args.handoff:
+        print(p["markdown"], end="")
+    if args.handoff:
+        rc, text = run_handoff(p["brief"])
+        if rc or not text:
+            print(f"{PROG}: the handoff agent didn't run ({text or 'rc ' + str(rc)}). Its brief: kit-timeoff "
+                  f"{args.start} {args.end} --brief", file=sys.stderr)
+            return 1
+        body = (f"# Handoff brief: {kd.fmt(start)} to {kd.fmt(end)} (DRAFT)\n\n_Written by the handoff agent from the "
+                "time-off pack; check it before you share it. Nothing was sent._ [work]\n\n" + kd.mask(text) + "\n")
+        if args.write:
+            f = kd.write(kd.BRIEFS / f"timeoff-{start.isoformat()}-handoff.md", body)
+            print(f"{PROG}: wrote the handoff brief to {f}")
+        else:
+            print(body, end="")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

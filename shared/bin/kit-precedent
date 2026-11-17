@@ -7,6 +7,16 @@
   kit-precedent --json TERM...       the same hits as JSON, for scripts
   kit-precedent --sources            list the sources it would search, and which are missing
   kit-precedent --root DIR TERM...   search a library root other than the one in library.md
+  kit-precedent --closest [N] [--kind ia|gds|any] [--from FILE] [TEXT...] [--brief] [--json]
+                                     the N (default 3) past documents closest to a demand or
+                                     request: impact assessments and design specifications, not
+                                     lines. TEXT, or the text of FILE (markdown, text, or Word), is
+                                     compared with each document's title, number, project, and note
+                                     in the catalog and the published indexes, and with the
+                                     library catalog's text when kit-library has one. Each comes
+                                     with its path, date, the words that matched, and whether it's
+                                     superseded or old. --brief prints a "Closest precedents"
+                                     block to paste into a drafting brief
 
 It reads the sources listed in memory/context/precedent.md (files, and the markdown and text files
 directly inside listed folders), under the library root that memory/context/library.md names. It
@@ -14,8 +24,17 @@ reads indexes and registers, never whole document stores, and never changes anyt
 source is reported and skipped. Matching ignores case; a line scores higher for more distinct
 terms, for a phrase match, and when it comes from a decision record, a published index, or a POC
 register.
+
+In --closest mode a document's rows in different indexes are one document; a row whose status
+or note says superseded or withdrawn, or an older version of the same title, is marked
+superseded, and one older than "Current means" in precedent.md (default 36 months) is "old".
+Neither is dropped: the writer decides what still applies.
 """
 import argparse
+import datetime as dt
+import math
+import subprocess
+import zipfile
 import json
 import os
 import pathlib
@@ -109,6 +128,293 @@ def search(paths, phrases, words):
     return hits
 
 
+# ---- --closest: whole documents, ranked against a demand or request -------------------------------
+
+STOP = set("""a about above after again against all also am an and any are as at be because been before
+being below between both but by can could did do does doing down during each few for from further had has
+have having he her here hers him his how i if in into is it its itself just me more most my no nor not now
+of off on once only or other our out over own same she should so some such than that the their them then
+there these they this those through to too under until up very was we were what when where which while
+who whom why will with would you your new need needs request requested please team current use using
+used via per etc within across able make made want wants should must may might shall one two three
+document page section see version draft""".split())
+KINDS = {"ia": re.compile(r"\bimpact assessments?\b|^ia\b|\bia\b", re.I),
+         "gds": re.compile(r"\bdesign spec(?:ification)?s?\b|\bgds\b|\bgeneral design\b", re.I)}
+DATE_FMTS = ("%d-%b-%Y", "%Y-%m-%d", "%d %b %Y", "%b %Y", "%Y-%m")
+
+
+def words_of(text):
+    return [w for w in re.findall(r"[a-z0-9][a-z0-9+.#-]*[a-z0-9+#]|[a-z0-9]", text.lower())
+            if len(w) > 2 and w not in STOP and not w.isdigit()]
+
+
+def text_of(path):
+    """The text of a markdown, text, or Word file (Word read from its XML, no libraries needed)."""
+    p = pathlib.Path(os.path.expanduser(path))
+    if p.suffix.lower() == ".docx":
+        try:
+            with zipfile.ZipFile(p) as z:
+                x = z.read("word/document.xml").decode("utf-8", "ignore")
+        except (OSError, KeyError, zipfile.BadZipFile) as e:
+            raise SystemExit(f"kit-precedent: can't read {p}: {e}")
+        x = re.sub(r"</w:p>", "\n", x)
+        return re.sub(r"<[^>]+>", "", x)
+    try:
+        return p.read_text(errors="ignore")
+    except OSError as e:
+        raise SystemExit(f"kit-precedent: can't read {p}: {e}")
+
+
+def parse_date(s):
+    s = (s or "").strip()
+    for f in DATE_FMTS:
+        try:
+            return dt.datetime.strptime(s, f).date()
+        except ValueError:
+            pass
+    return None
+
+
+def vkey(v):
+    return tuple(int(x) for x in re.findall(r"\d+", v or "")) or (0,)
+
+
+def norm_title(t):
+    t = re.sub(r"\bv?\d+(?:\.\d+)+\b|\(draft\)|\bdraft\b", " ", t.lower())
+    return re.sub(r"[^a-z0-9]+", "", t)
+
+
+def table_rows(path):
+    """Rows of the markdown tables in an index or catalog, as dicts keyed by lowercased header."""
+    rows, head, folder = [], None, None
+    try:
+        lines = path.read_text(errors="ignore").splitlines()
+    except OSError:
+        return rows
+    for line in lines:
+        m = re.match(r"\s*Local folder:\s*`([^`]+)`", line)
+        if m:
+            folder = expand(m.group(1))
+        if not line.strip().startswith("|"):
+            head = None
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if head is None:
+            head = [c.lower() for c in cells]
+            continue
+        if all(re.fullmatch(r":?-+:?", c) for c in cells if c):
+            continue
+        row = dict(zip(head, cells))
+        row["_folder"] = folder
+        rows.append(row)
+    return rows
+
+
+def kind_of(*texts):
+    blob = " ".join(t for t in texts if t)
+    for k, rx in KINDS.items():
+        if rx.search(blob):
+            return k
+    return None
+
+
+def candidates_from_indexes(root, srcs):
+    docs = []
+    for _, p in srcs:
+        for f in files_in(p):
+            name = f.name.lower()
+            idx_kind = "ia" if re.search(r"(^|[-_])ia([-_]|$)", f.stem.lower()) else \
+                "gds" if re.search(r"(^|[-_])gds([-_]|$)", f.stem.lower()) else None
+            for r in table_rows(f):
+                title = r.get("title") or ""
+                if not title:
+                    continue
+                number = r.get("number") or r.get("document number") or ""
+                typ = r.get("type") or ""
+                num_kind = kind_of(number.split("-")[0]) if number else None
+                kind = idx_kind or kind_of(typ) or num_kind or kind_of(title)
+                loc = (r.get("location") or r.get("file") or "").strip("`")
+                if loc and r.get("_folder") and not loc.startswith(("/", "~")):
+                    loc = str(r["_folder"] / loc)
+                elif loc and root and not loc.startswith(("/", "~")):
+                    loc = str(root / loc)
+                status = (r.get("status") or "").lower()
+                note = r.get("note") or r.get("notes") or ""
+                docs.append({"title": title, "number": number, "kind": kind, "version": r.get("version") or "",
+                             "date": r.get("updated") or r.get("modified") or r.get("date") or "",
+                             "status": status, "project": r.get("project") or "", "note": note,
+                             "path": loc, "source": str(f), "text": " ".join([title, number, typ, r.get("project") or "", note]),
+                             "superseded": bool(re.search(r"supersed|withdrawn|replaced by", status + " " + note.lower()))})
+    return docs
+
+
+def candidates_from_library(terms, limit=25):
+    """Documents the kit-library catalog finds for the terms, when it has a catalog."""
+    tool = pathlib.Path(__file__).resolve().parent / "kit-library"
+    if not tool.exists() or not terms or not (KIT / ".install/library/index.db").exists():
+        return []
+    try:
+        r = subprocess.run([sys.executable, str(tool), "search", " OR ".join(terms[:12]), "--json",
+                            "--limit", str(limit)], capture_output=True, text=True, timeout=60)
+        hits = json.loads(r.stdout).get("results", []) if r.returncode == 0 else []
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return []
+    out = []
+    for h in hits:
+        if h.get("ext") not in ("docx", "doc", "pdf", "md", "pptx"):
+            continue
+        title = h.get("title") or os.path.basename(h.get("path", ""))
+        out.append({"title": title, "number": "", "kind": kind_of(title, h.get("path", "")),
+                    "version": "", "date": h.get("modified") or "", "status": "", "project": "", "note": "",
+                    "path": h.get("path", ""), "source": "kit-library catalog",
+                    "text": " ".join([title, os.path.basename(h.get("path", "")), h.get("snippet", "")]),
+                    "superseded": False})
+    return out
+
+
+def current_months():
+    f = CONTEXT / "precedent.md"
+    m = re.search(r"\*\*Current means:\*\*[^\n]*?(\d+)\s*months", f.read_text(errors="ignore")) if f.exists() else None
+    return int(m.group(1)) if m else 36
+
+
+def merge(docs):
+    """One entry per document: rows for the same number or title in several indexes become one."""
+    by = {}
+    for d in docs:
+        # A number counts only when it has digits: a placeholder like "DOC-###" names no one document.
+        key = d["number"].lower() if re.search(r"\d", d["number"]) else norm_title(d["title"])
+        if not key:
+            continue
+        cur = by.get(key)
+        if cur is None:
+            by[key] = dict(d, sources=[d["source"]])
+            continue
+        cur["sources"].append(d["source"])
+        cur["text"] += " " + d["text"]
+        for k in ("number", "kind", "version", "date", "status", "project", "note"):
+            cur[k] = cur[k] or d[k]
+        if d["path"] and (not cur["path"] or cur["source"] == "kit-library catalog"):
+            cur["path"] = d["path"]
+        cur["superseded"] = cur["superseded"] or d["superseded"]
+    out = list(by.values())
+    # An older version of the same title is superseded by the newer one.
+    groups = {}
+    for d in out:
+        groups.setdefault(norm_title(d["title"]), []).append(d)
+    for g in groups.values():
+        if len(g) < 2:
+            continue
+        newest = max(g, key=lambda d: (vkey(d["version"]), parse_date(d["date"]) or dt.date.min))
+        for d in g:
+            if d is not newest:
+                d["superseded"] = True
+                d["superseded_by"] = newest["title"] + (f" v{newest['version']}" if newest["version"] else "")
+    return out
+
+
+def rank(docs, query_words, kind):
+    q = {}
+    for w in query_words:
+        q[w] = q.get(w, 0) + 1
+    n = max(len(docs), 1)
+    doc_words = [set(words_of(d["text"])) for d in docs]
+    title_words = [set(words_of(d["title"])) for d in docs]
+    df = {}
+    for ws in doc_words:
+        for w in ws:
+            df[w] = df.get(w, 0) + 1
+    scored = []
+    for d, ws, tw in zip(docs, doc_words, title_words):
+        if kind != "any" and d["kind"] != kind:
+            continue
+        if kind == "any" and d["kind"] not in ("ia", "gds"):
+            continue
+        hit = [w for w in q if w in ws]
+        if not hit:
+            continue
+        score = 0.0
+        for w in hit:
+            idf = math.log(1 + n / df[w])
+            score += idf * (1 + math.log(q[w])) * (2.0 if w in tw else 1.0)
+        score /= 1 + 0.15 * math.log(len(ws) + 1)
+        scored.append((score, d, sorted(hit, key=lambda w: (-(w in tw), -q[w], w))))
+    scored.sort(key=lambda x: (-x[0], x[1]["superseded"], x[1]["title"]))
+    return scored
+
+
+def closest(a, root, srcs):
+    raw = " ".join(a.terms)
+    if a.from_file:
+        raw = text_of(a.from_file) + " " + raw
+    qw = words_of(raw)
+    if not qw:
+        print("kit-precedent: give the demand or request as text or --from FILE", file=sys.stderr)
+        return 2
+    freq = {}
+    for w in qw:
+        freq[w] = freq.get(w, 0) + 1
+    top_terms = sorted(freq, key=lambda w: -freq[w])[:60]
+    docs = candidates_from_indexes(root, srcs) + candidates_from_library(top_terms)
+    docs = merge(docs)
+    months = current_months()
+    today = dt.date.today()
+    found = []
+    for score, d, hit in rank(docs, [w for w in qw if w in set(top_terms)], a.kind)[:a.closest]:
+        when = parse_date(d["date"])
+        old = bool(when and (today - when).days > months * 30.44)
+        found.append({"score": round(score, 3), "title": d["title"], "number": d["number"], "kind": d["kind"],
+                      "version": d["version"], "date": d["date"], "status": d["status"], "project": d["project"],
+                      "path": d["path"], "sources": d["sources"], "matched": hit[:8],
+                      "superseded": d["superseded"], "superseded_by": d.get("superseded_by"), "old": old})
+    searched = sorted({s for d in docs for s in d["sources"]})
+    if a.json:
+        print(json.dumps({"root": str(root) if root else None, "kind": a.kind, "documents": len(docs),
+                          "searched": searched, "closest": found}, indent=2))
+        return 0
+    label = {"ia": "impact assessments", "gds": "design specifications", "any": "IAs and GDSs"}[a.kind]
+
+    def rel(p):
+        if root and p.startswith(str(root)):
+            return p[len(str(root)):].lstrip("/")
+        return p.replace(str(pathlib.Path.home()), "~", 1) if p else "(no path in the index)"
+
+    def state(f):
+        bits = []
+        if f["superseded"]:
+            bits.append("superseded" + (f" by {f['superseded_by']}" if f.get("superseded_by") else ""))
+        if f["old"]:
+            bits.append(f"old (over {months} months)")
+        return "; ".join(bits) or "current"
+
+    if a.brief:
+        print("## Closest precedents\n")
+        print(f"The {a.closest} past {label} closest to this request, from `kit-precedent --closest`"
+              f" ({len(docs)} documents in {len(searched)} index(es), {today.strftime('%d-%b-%Y')}).\n")
+        if not found:
+            print(f"None found: no past {label} share this request's terms. Say so in the draft rather "
+                  "than cite a precedent.")
+            return 0
+        for i, f in enumerate(found, 1):
+            ident = ", ".join(x for x in (f["number"], f"v{f['version']}" if f["version"] else "", f["date"]) if x)
+            print(f"{i}. **{f['title']}**" + (f" ({ident})" if ident else "") + f" - {state(f)}")
+            print(f"   - Where: `{rel(f['path'])}`")
+            print(f"   - Why it matched: {', '.join(f['matched'])}")
+        print("\nRead each for its structure, decisions, and numbers; cite what you reuse, and don't "
+              "carry a superseded or old one's figures forward without checking them.")
+        return 0
+    if not found:
+        print(f"kit-precedent: no close {label} found in {len(docs)} document(s)")
+        return 0
+    for i, f in enumerate(found, 1):
+        ident = " ".join(x for x in (f["number"], f"v{f['version']}" if f["version"] else "", f["date"]) if x)
+        print(f"{i}. {f['title']}  [{ident or 'no number'}]  {state(f)}")
+        print(f"   {rel(f['path'])}")
+        print(f"   matched: {', '.join(f['matched'])}")
+    print(f"\nkit-precedent: {len(found)} closest of {len(docs)} document(s) in {len(searched)} index(es)")
+    return 0
+
+
 def main(argv):
     ap = argparse.ArgumentParser(prog="kit-precedent", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -117,7 +423,18 @@ def main(argv):
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--sources", action="store_true")
     ap.add_argument("--root")
+    ap.add_argument("--closest", nargs="?", const="3", default=None, metavar="N")
+    ap.add_argument("--kind", choices=("ia", "gds", "any"), default="any")
+    ap.add_argument("--from", dest="from_file", metavar="FILE")
+    ap.add_argument("--brief", action="store_true")
     a = ap.parse_args(argv)
+    if a.closest is not None and not a.closest.isdigit():
+        a.terms.insert(0, a.closest)           # "--closest some request text": the text isn't N
+        a.closest = "3"
+    if (a.brief or a.from_file) and a.closest is None:
+        a.closest = "3"
+    if a.closest is not None:
+        a.closest = max(int(a.closest), 1)
 
     root = expand(a.root) if a.root else library_root()
     if root is None:
@@ -129,6 +446,8 @@ def main(argv):
         for s, p in srcs:
             print(f"{'ok     ' if p is not None and p.exists() else 'missing'} {s}  ({p})")
         return 0
+    if a.closest is not None:
+        return closest(a, root, srcs)
     if not a.terms:
         ap.error("give one or more search terms")
     phrases, words = parse_terms(a.terms)

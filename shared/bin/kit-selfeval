@@ -1,0 +1,228 @@
+#!/usr/bin/env python3
+"""kit-selfeval: a draft of your self-evaluation, from the work Kit has on record.
+
+  kit-selfeval [--from D] [--to D] [--words N] [--json]   print the draft
+  kit-selfeval ... --write [--deliver]                     save briefs/reviews/selfeval-FROM_TO.md (--deliver also
+                                                           puts a Word copy in Kit Output with kit-library deliver)
+
+It reads the accomplishments log (memory/accomplishments.md, kept by kit-wins), the finished work kit-wins collect
+hasn't added to it yet, and the monthly reports (briefs/kit-month-YYYY-MM.md) in the period. Finished work is
+grouped under your goals (the Goals field in memory/context/reviews.md, each "Name: words; Name: words"), and
+whatever matches no goal is grouped by kit-wins' themes. Every claim keeps its date and where it came from. Impact
+and "what I'd do differently" are left as prompts, since only you know them. --words (or the Word limit field)
+trims the longest groups until the claims fit, and says how many it left out.
+
+The period: --from and --to (YYYY-MM-DD or DD-Mmm-YYYY), else the Review period field, else 1 January to today.
+It's a DRAFT for you to edit, work content only (nothing under memory/personal/ is read), and nothing is sent or
+entered anywhere.
+"""
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import pathlib
+import re
+import subprocess
+import sys
+
+HERE = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent))
+import kit_daily as kd  # noqa: E402
+
+PROG = "kit-selfeval"
+SETUP = kd.CONTEXT / "reviews.md"
+
+
+def load_wins():
+    loader = importlib.machinery.SourceFileLoader("kit_wins_selfeval", str(HERE / "kit-wins"))
+    spec = importlib.util.spec_from_loader("kit_wins_selfeval", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def field(name):
+    v = kd.setting(kd.read(SETUP), name)
+    return "" if not v or v.lower().startswith("not set") else v
+
+
+def goals():
+    """[(name, [keyword, ...])] from the Goals field."""
+    out = []
+    for part in field("Goals").split(";"):
+        part = part.strip().rstrip(".")
+        if not part:
+            continue
+        name, _, kws = part.partition(":")
+        words = [w.strip() for w in kws.split(",") if w.strip()] or [name.strip()]
+        out.append((name.strip(), words))
+    return out
+
+
+def period(a_text, b_text):
+    a, b = kd.parse_date(a_text) if a_text else None, kd.parse_date(b_text) if b_text else None
+    if (a_text and not a) or (b_text and not b):
+        raise ValueError("dates are YYYY-MM-DD or DD-Mmm-YYYY")
+    if not a:
+        found = re.findall(r"\d{4}-\d{2}-\d{2}|\d{1,2}-[A-Z][a-z]{2}-\d{4}", field("Review period"))
+        if len(found) == 2:
+            a, b = kd.parse_date(found[0]), b or kd.parse_date(found[1])
+    a = a or kd.today().replace(month=1, day=1)
+    b = b or kd.today()
+    if a > b:
+        raise ValueError("--from is after --to")
+    return a, b
+
+
+def evidence(wins, a, b):
+    """Claims in the period: date, theme, text, source, cite."""
+    log = wins.LOG
+    out, seen = [], set()
+    for n, ln in enumerate(kd.read(log).splitlines(), 1):
+        m = wins.LINE.match(ln)
+        if not m:
+            continue
+        d = kd.parse_date(m["date"])
+        if d and a <= d <= b:
+            seen.add(wins.key(m["text"]))
+            out.append({"date": d, "theme": m["theme"], "text": m["text"], "source": m["src"] or "log",
+                        "cite": f"memory/accomplishments.md:{n}"})
+    try:
+        pending = [e for e in wins.month_wins(a, b) if e.get("pending")]
+    except Exception:                     # a source kit-wins can't read shouldn't stop the draft
+        pending = []
+    for e in pending:
+        if wins.key(e["text"]) in seen:
+            continue
+        out.append({"date": e["date"], "theme": e["theme"], "text": e["text"], "source": e["src"],
+                    "cite": f"{e['src']} (not yet in the log; kit-wins collect adds it)"})
+    out.sort(key=lambda e: e["date"])
+    return out
+
+
+def monthly_reports(a, b):
+    out = []
+    for f in sorted(kd.BRIEFS.glob("kit-month-*.md")):
+        m = re.match(r"kit-month-(\d{4})-(\d{2})\.md$", f.name)
+        if m and (a.year, a.month) <= (int(m[1]), int(m[2])) <= (b.year, b.month):
+            out.append(f"briefs/{f.name}")
+    return out
+
+
+def group(claims, gs, wins):
+    groups = {}
+    for c in claims:
+        hay = f"{c['text']} {c['theme']}"
+        home = next((g for g, kws in gs if any(re.search(r"(?<!\w)" + re.escape(k) + r"(?!\w)", hay, re.I)
+                                              for k in kws)), None)
+        groups.setdefault(home or f"Other work: {c['theme']}", []).append(c)
+    order = [g for g, _ in gs] + sorted(k for k in groups if k not in dict(gs))
+    return [(g, groups.get(g, [])) for g in order]
+
+
+def claim_line(c):
+    return f"- {kd.fmt(c['date'])}: {kd.clip(c['text'], 200)} _(evidence: {c['cite']})_"
+
+
+def count_words(groups):
+    return sum(len(kd.clip(c["text"], 200).split()) for _, cs in groups for c in cs)
+
+
+def trim(groups, limit):
+    """Drop the oldest claims from the biggest group until the claims fit in limit words."""
+    groups = [(g, list(cs)) for g, cs in groups]
+    left_out = 0
+    while limit and count_words(groups) > limit and sum(len(cs) for _, cs in groups) > 1:
+        g, cs = max((gc for gc in groups if gc[1]), key=lambda gc: (len(gc[1]), -gc[1][0]["date"].toordinal()))
+        cs.pop(0)
+        left_out += 1
+    return groups, left_out
+
+
+def draft(a, b, limit=None):
+    wins = load_wins()
+    gs = goals()
+    claims = evidence(wins, a, b)
+    groups = group(claims, gs, wins)
+    if limit is None:
+        try:
+            limit = int(re.match(r"\d+", field("Word limit")).group(0))
+        except (AttributeError, ValueError):
+            limit = None
+    shown, left_out = trim(groups, limit)
+    reports = monthly_reports(a, b)
+    scale = field("Rating scale")
+    owner = kd.owner()
+    out = [f"# Self-evaluation, {kd.fmt(a)} to {kd.fmt(b)} (DRAFT)", "",
+           f"DRAFT for {owner} to edit: Kit drafted this from the work on record. Check every line, add the impact only "
+           "you know, and write the reflection yourself. Nothing has been sent or entered anywhere. [work]", ""]
+    if not gs:
+        out += ["_No goals set: add them to the Goals field in memory/context/reviews.md to group this work by goal._", ""]
+    out += ["## Summary", "",
+            f"_{len(claims)} finished item(s) on record in the period"
+            + (f", under {sum(1 for g, cs in groups if cs and g in dict(gs))} of {len(gs)} goal(s)" if gs else "")
+            + ". Write two or three sentences: what you set out to do, what you delivered, and the result that "
+              "mattered most._", ""]
+    for g, cs in shown:
+        total = len(dict(groups)[g])
+        if not total and g not in dict(gs):
+            continue
+        out += [f"## {g}", ""]
+        if not total:
+            out += ["- _Nothing on record for this goal in the period. Add what you did, or say why it moved._", ""]
+            continue
+        out += [claim_line(c) for c in cs]
+        if len(cs) < total:
+            out.append(f"- _({total - len(cs)} older item(s) left out to fit the word limit; see the evidence list)_")
+        out += ["- Impact: _what changed because of this work (numbers, risk reduced, time saved, who benefited)?_", ""]
+    out += ["## Growth and what I'd do differently", "",
+            "- _What was hardest this period, and what did you learn from it?_",
+            "- _What would you do differently next time?_",
+            "- _What do you want to develop next period, and what support would help?_", ""]
+    out += ["## Rating", "", f"- Scale: {scale}" if scale else "- Scale: _not set (Rating scale in memory/context/reviews.md)_",
+            "- Your rating: _choose it yourself_", ""]
+    out += ["## Evidence", ""]
+    out += [f"- {c['cite']}: {kd.fmt(c['date'])} {kd.clip(c['text'], 120)}" for c in claims] or ["- none on record"]
+    if reports:
+        out += ["", "Monthly reports in the period: " + ", ".join(reports)]
+    words = count_words(shown)
+    out += ["", f"_Claims: {words} words" + (f" (limit {limit}; {left_out} item(s) left out)" if limit else "") + "._"]
+    return {"from": a.isoformat(), "to": b.isoformat(), "goals": [g for g, _ in gs], "claims": len(claims),
+            "left_out": left_out, "words": words, "limit": limit, "monthly_reports": reports,
+            "groups": {g: [{"date": c["date"].isoformat(), "text": c["text"], "cite": c["cite"]} for c in cs]
+                       for g, cs in shown if cs},
+            "markdown": "\n".join(out) + "\n"}
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog=PROG, description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--from", dest="start")
+    ap.add_argument("--to", dest="end")
+    ap.add_argument("--words", type=int)
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--write", action="store_true")
+    ap.add_argument("--deliver", action="store_true")
+    args = ap.parse_args(argv)
+    try:
+        a, b = period(args.start, args.end)
+    except ValueError as ex:
+        print(f"{PROG}: {ex}", file=sys.stderr)
+        return 2
+    d = draft(a, b, args.words)
+    if args.json:
+        print(json.dumps({k: v for k, v in d.items() if k != "markdown"}, indent=2))
+        return 0
+    if not args.write:
+        print(d["markdown"], end="")
+        return 0
+    out = kd.write(kd.BRIEFS / "reviews" / f"selfeval-{a.isoformat()}_{b.isoformat()}.md", d["markdown"])
+    print(f"{PROG}: wrote the draft to {out} ({d['claims']} item(s), {d['words']} words). Edit it before you use it.")
+    if args.deliver:
+        r = subprocess.run([sys.executable, str(HERE / "kit-library"), "deliver", str(out), "--kind", "reports"],
+                           capture_output=True, text=True)
+        print((r.stdout or r.stderr).strip() or f"{PROG}: kit-library deliver exited {r.returncode}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

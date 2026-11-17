@@ -5,6 +5,35 @@ What changed in each Kit release. The installed version is in
 morning brief summarizes the new entries once. Format: [Keep a Changelog](https://keepachangelog.com),
 versions follow [semantic versioning](https://semver.org).
 
+## [1.8.0] - 2026-11-17
+
+### Added
+- `kit-diagtext`, the diagram-to-text consistency check: where a draw.io, Visio, or spec diagram and the IA or GDS
+  text disagree (a figure caption's version, a connection's protocol or port, counts, components in only one of
+  them), ranked, with the section and the diagram's page and element id. The reviewer and diagrammer run it
+  (tests/test_diagtext.py).
+- `kit-dedupe`, the repetition and consistency checker: repeated statements across sections with proposed cuts,
+  and costs, counts, dates, and Q-IDs that disagree (tests/test_dedupe.py).
+- `kit-facts`, a fact sheet per project (`facts.md`): the agreed figures in one place, every draft checked against
+  it, conflicts and superseded values flagged (tests/test_facts.py). `shared/kit_doctext.py` is the shared reader
+  for the three (.docx, Markdown, text, PDF through pdftotext).
+- `kit-precedent --closest [N]`: the past IAs and GDSs closest to a request, `--brief` as a paste-ready block. The
+  IA and GDS writers run it before every new draft and cite what they reuse (tests/test_precedent_closest.py).
+- `kit-drift`: same-named documents whose contents differ across synced libraries, and template copies left in
+  project folders. Read-only; never downloads cloud-only files. New Drift roots, Template placeholders, and
+  Templates folder fields in library.md (tests/test_drift.py).
+- First-run setup wizard: `kit-settings questions` and `kit-settings answer FILE FIELD VALUE [--write]`, and a Setup
+  section in `kit-settings ui` that walks the "not set" fields one at a time and opens first on a new install
+  (tests/test_setup_questions.py).
+- `kit-docs`, the internal docs builder, driven by a private manifest: `plan`, `build` (PDFs, qpdf, checks, page
+  counts; `--archive` and `--stamp` only when all passed), `bump V`, `status`. Commands are lists, never shell
+  strings; nothing is deleted (tests/test_kit_docs.py; kit/templates/docs-build.example.json).
+- `kit-selfeval` (self-evaluation draft from the accomplishments log and monthly reports, by the goals in the new
+  memory/context/reviews.md), `kit-360 NAME` (360 feedback draft from recorded work evidence, saved only in the
+  private feedback/ folder), and `kit-timeoff START END` (what will slip, out-of-office drafts, delegate notes, and
+  the handoff agent's brief; setup in the new memory/context/timeoff.md). Drafts only; nothing is sent or set
+  (tests/test_selfeval.py, tests/test_360.py, tests/test_timeoff.py).
+
 ## [1.7.3] - 2026-11-10
 
 ### Fixed

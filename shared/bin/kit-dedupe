@@ -1,0 +1,343 @@
+#!/usr/bin/env python3
+"""kit-dedupe: statements repeated across sections, and figures that disagree, with the cuts to make.
+
+  kit-dedupe DOC [DOC ...]          a markdown report on one document (or a set read as one: an IA and its GDS)
+  ... --threshold 0.6               how alike two sentences must be to count as a repeat (0-1, word 3-gram overlap;
+                                    default 0.6). Sentences shorter than --min-words (default 8) are left out
+  ... --ids REGEX                   the question or item IDs to follow (default Q-\\d+)
+  ... --json                        the findings as JSON
+  ... --write [--project P]         also save the report in the project's reviews/ folder (the project the first
+                                    document sits in, or P)
+
+What it finds:
+  repeats   the same statement in more than one section, word for word or nearly. It proposes which one to
+            keep (the first full statement outside a summary section) and which to cut or replace with a
+            cross-reference. A repeat in an executive summary, overview, or abstract is expected; it is listed
+            only when it's word for word
+  cost      the same cost (a cost word near the amount: cost, price, budget, total, licence, estimate, spend,
+            saving, capex, opex) given as different amounts
+  count     the same thing counted differently ("12 production domains" and "14 production domains")
+  date      the same milestone (decision, go-live, cutover, start, end, due, deadline, target, review) on
+            different dates
+  id        an ID (Q-047) that's open in one place and closed, answered, or resolved in another, or defined twice
+            (a table row or "Q-047:" paragraph that starts with it) with different text
+Each finding gives the sections and a quote, so you can check it. It never changes a document. Exit 0 when nothing
+is found, 1 when something is, 2 a usage problem.
+"""
+import argparse
+import json
+import pathlib
+import re
+import sys
+import zipfile
+from difflib import SequenceMatcher
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import kit_doctext as dtx  # noqa: E402
+
+PROG = "kit-dedupe"
+SUMMARY = re.compile(r"(executive )?summary|overview|abstract|at a glance|introduction|purpose", re.I)
+COST_WORDS = {"cost", "costs", "price", "budget", "total", "licence", "license", "licensing", "estimate", "estimated",
+              "spend", "saving", "savings", "capex", "opex", "rom", "fee", "fees", "funding"}
+DATE_WORDS = {"decision", "go-live", "golive", "live", "cutover", "cut-over", "start", "starts", "end", "ends", "due",
+              "deadline", "target", "review", "complete", "completion", "launch", "freeze", "retire", "retirement",
+              "decommission", "migration", "kickoff", "kick-off", "delivery", "eos", "eol", "expiry", "expires"}
+OPEN = re.compile(r"\b(open|pending|unanswered|outstanding|awaiting|tbc|to be confirmed)\b", re.I)
+CLOSED = re.compile(r"\b(closed|answered|resolved|withdrawn|superseded|done)\b", re.I)
+PARTLY = re.compile(r"\b(partly|partially|part)\s+(answered|resolved|closed)\b", re.I)
+
+
+class Sent:
+    __slots__ = ("text", "block", "doc", "sec", "where", "words", "sh")
+
+    def __init__(self, text, block, doc):
+        self.text, self.block, self.doc = text, block, doc
+        self.sec = block.section or "start"
+        self.where = (f"{doc}: " if doc else "") + block.where
+        self.words = dtx.words(text)
+        self.sh = {" ".join(self.words[i:i + 3]) for i in range(max(0, len(self.words) - 2))}
+
+
+def sect(s):
+    return (s.doc + ": " if s.doc else "") + "§" + s.sec
+
+
+def quote(t, n=140):
+    t = " ".join(t.split())
+    return t if len(t) <= n else t[: n - 1] + "…"
+
+
+def load(paths):
+    multi = len(paths) > 1
+    sents, blocks = [], []
+    for p in paths:
+        name = p.name if multi else ""
+        for b in dtx.blocks(p):
+            if b.kind == "heading":
+                continue
+            blocks.append((b, name))
+            parts = [b.text] if b.kind == "row" else dtx.sentences(b.text)
+            for s in parts:
+                sents.append(Sent(s, b, name))
+    return sents, blocks
+
+
+# ---------------------------------------------------------------- repeats
+def repeats(sents, threshold, min_words):
+    cand = [s for s in sents if len(s.words) >= min_words and s.block.kind != "row"]
+    index = {}
+    for i, s in enumerate(cand):
+        for g in s.sh:
+            index.setdefault(g, []).append(i)
+    common = max(40, len(cand) // 10)
+    pairs = {}
+    for ids in index.values():
+        if len(ids) > common:
+            continue
+        for x in range(len(ids)):
+            for y in range(x + 1, len(ids)):
+                i, j = ids[x], ids[y]
+                if i != j:
+                    pairs[(i, j)] = pairs.get((i, j), 0) + 1
+    parent = list(range(len(cand)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+    scores = {}
+    for (i, j), shared in pairs.items():
+        a, b = cand[i], cand[j]
+        if a.block is b.block:
+            continue
+        sim = shared / len(a.sh | b.sh) if (a.sh | b.sh) else 0
+        if sim < threshold:
+            sim2 = SequenceMatcher(None, " ".join(a.words), " ".join(b.words)).ratio()
+            if sim2 < max(threshold, 0.8):
+                continue
+            sim = max(sim, sim2 - 0.2)
+        exact = a.words == b.words
+        if (SUMMARY.search(a.sec) or SUMMARY.search(b.sec)) and not exact:
+            continue
+        if a.sec == b.sec and a.doc == b.doc and not exact and sim < 0.9:
+            continue
+        parent[find(i)] = find(j)
+        scores[(i, j)] = sim
+    groups = {}
+    for (i, j) in scores:
+        groups.setdefault(find(i), set()).update((i, j))
+    out = []
+    for members in groups.values():
+        ms = sorted(members, key=lambda k: (cand[k].doc, cand[k].block.index))
+        if len({(cand[k].doc, cand[k].sec) for k in ms}) < 2 and not all(cand[k].words == cand[ms[0]].words for k in ms):
+            continue
+        keep = next((k for k in ms if not SUMMARY.search(cand[k].sec)), ms[0])
+        sim = max(v for (i, j), v in scores.items() if i in members and j in members)
+        out.append({"kind": "repeats", "similarity": round(min(sim, 1.0), 2),
+                    "exact": all(cand[k].words == cand[ms[0]].words for k in ms),
+                    "keep": {"where": cand[keep].where, "section": sect(cand[keep]), "quote": quote(cand[keep].text)},
+                    "cut": [{"where": cand[k].where, "section": sect(cand[k]), "quote": quote(cand[k].text)}
+                            for k in ms if k != keep and not SUMMARY.search(cand[k].sec)],
+                    "summary": [{"where": cand[k].where, "section": sect(cand[k])}
+                                for k in ms if k != keep and SUMMARY.search(cand[k].sec)]})
+    out = [g for g in out if g["cut"] or g["exact"]]
+    out.sort(key=lambda g: (-len(g["cut"]), -g["similarity"]))
+    return out
+
+
+# ---------------------------------------------------------------- figures
+def context_words(text, start, n=7):
+    before = dtx.words(text[:start])[-n:]
+    return [w for w in before if w not in dtx.STOP and not w.isdigit()]
+
+
+def same_subject(a, b):
+    sa, sb = set(a), set(b)
+    if not sa or not sb:
+        return False
+    return len(sa & sb) / min(len(sa), len(sb)) >= 0.6
+
+
+def disagreements(items, kind, fmt):
+    """items: [(subject words, value, Sent, matched text)]. Groups mentions of the same subject, flags differing values."""
+    groups = []
+    for it in items:
+        for g in groups:
+            if same_subject(g[0][0], it[0]):
+                g.append(it)
+                break
+        else:
+            groups.append([it])
+    out = []
+    for g in groups:
+        vals = {}
+        for subj, v, s, m in g:
+            vals.setdefault(v, []).append((s, m))
+        if len(vals) < 2:
+            continue
+        subject = " ".join(w for w in g[0][0] if all(w in x[0] for x in g)) or " ".join(g[0][0])
+        out.append({"kind": kind, "subject": subject,
+                    "values": [{"value": fmt(v), "places": [{"where": s.where, "section": sect(s), "match": m,
+                                                             "quote": quote(s.text)} for s, m in places]}
+                               for v, places in sorted(vals.items(), key=lambda kv: -len(kv[1]))]})
+    return out
+
+
+def figures(sents):
+    costs, cnts, dts = [], [], []
+    for s in sents:
+        prev = 0    # each amount's subject is the words since the previous amount ("low $1, likely $2")
+        for v, m, start, _ in dtx.money(s.text):
+            ctx = context_words(s.text[prev:start], start - prev)
+            prev = start + len(m)
+            if COST_WORDS & set(ctx) or COST_WORDS & set(dtx.words(s.text)):
+                subj = [w for w in ctx if w not in {"is", "of", "usd"}] or [w for w in dtx.words(s.text) if w in COST_WORDS]
+                costs.append((subj, round(v, 2), s, m))
+        for n, noun, q, m, start in dtx.counts(s.text):
+            subj = ([w for w in q.split()] + [noun]) if q else [noun] + context_words(s.text, start, 3)
+            cnts.append((subj, n, s, m))
+        for key, m, start in dtx.dates(s.text):
+            ctx = context_words(s.text, start, 8)
+            hits = [w for w in ctx if w in DATE_WORDS]
+            if hits:
+                dts.append((ctx, key, s, m))
+    money_fmt = lambda v: f"${v:,.0f}" if v == int(v) else f"${v:,.2f}"  # noqa: E731
+    out = disagreements(costs, "cost", money_fmt)
+    out += [g for g in disagreements(cnts, "count", str) if len(g["subject"].split()) >= 1]
+    out += disagreements(dts, "date", str)
+    return out
+
+
+def ids(blocks, pattern):
+    rx = re.compile(r"\b(" + pattern + r")\b")
+    status, defs = {}, {}
+    for b, doc in blocks:
+        where = (f"{doc}: " if doc else "") + b.where
+        sec = (f"{doc}: " if doc else "") + "§" + (b.section or "start")
+        units = [b.text] if b.kind == "row" else dtx.sentences(b.text)
+        for u in units:
+            found = rx.findall(u)
+            if not found:
+                continue
+            if len(set(found)) == 1:
+                qid = found[0]
+                st = "partly" if PARTLY.search(u) else "closed" if CLOSED.search(u) else "open" if OPEN.search(u) else None
+                if st:
+                    status.setdefault(qid, []).append((st, where, sec, quote(u)))
+        first = b.cells[0].strip() if b.kind == "row" and b.cells else ""
+        m = rx.fullmatch(first) if first else None
+        text = None
+        if m and len(b.cells) > 1:
+            text = b.cells[1]
+        else:
+            m2 = re.match(r"\**(" + pattern + r")\**\s*[:.–-]\s*(.+)", b.text)
+            if m2 and b.kind != "row":
+                m, text = m2, m2.group(2)
+        if m and text and len(dtx.words(text)) >= 3:
+            defs.setdefault(m.group(1), []).append((text, where, sec))
+    out = []
+    for qid, sts in sorted(status.items()):
+        kinds = {s for s, *_ in sts}
+        if "open" in kinds and "closed" in kinds:
+            out.append({"kind": "id", "id": qid, "problem": "open in one place, closed in another",
+                        "places": [{"status": s, "where": w, "section": sec, "quote": q} for s, w, sec, q in sts]})
+    for qid, ds in sorted(defs.items()):
+        uniq = []
+        for t, w, sec in ds:
+            if not any(SequenceMatcher(None, dtx.norm(t), dtx.norm(u[0])).ratio() >= 0.8 for u in uniq):
+                uniq.append((t, w, sec))
+        if len(uniq) > 1:
+            out.append({"kind": "id", "id": qid, "problem": "defined more than once, with different text",
+                        "places": [{"where": w, "section": sec, "quote": quote(t)} for t, w, sec in uniq]})
+    return out
+
+
+# ---------------------------------------------------------------- output
+def render(paths, reps, figs, idf):
+    title = ", ".join(p.name for p in paths)
+    L = [f"# Repetition and consistency check: {title}", ""]
+    if not (reps or figs or idf):
+        L.append("No repeated statements or disagreeing figures found.")
+    if figs or idf:
+        L += ["## Figures that disagree", ""]
+        for f in figs:
+            L.append(f"- **{f['kind']}** ({f['subject']}): " +
+                     "; ".join(f"{v['value']} in {', '.join(p['section'] for p in v['places'])}" for v in f["values"]))
+            for v in f["values"]:
+                for p in v["places"]:
+                    L.append(f"  - {v['value']}: {p['where']}: \"{p['quote']}\"")
+            L.append("  - Proposed: agree one figure, then use it everywhere (the fact sheet, kit-facts, can hold it).")
+        for f in idf:
+            L.append(f"- **id {f['id']}**: {f['problem']}")
+            for p in f["places"]:
+                L.append(f"  - {p.get('status', 'defined')}: {p['where']}: \"{p['quote']}\"")
+        L.append("")
+    if reps:
+        L += ["## Repeated statements", ""]
+        for i, g in enumerate(reps, 1):
+            tag = "word for word" if g["exact"] else f"nearly word for word, up to {int(g['similarity'] * 100)}% alike"
+            cuts = ", ".join(dict.fromkeys(c["section"] for c in g["cut"])) or "(summary only)"
+            L.append(f"{i}. Keep in {g['keep']['section']}, cut in {cuts} ({tag}).")
+            L.append(f"   - keep: {g['keep']['where']}: \"{g['keep']['quote']}\"")
+            for c in g["cut"]:
+                L.append(f"   - cut, or replace with a cross-reference: {c['where']}: \"{c['quote']}\"")
+            for s in g["summary"]:
+                L.append(f"   - also in the summary ({s['section']}): expected; trim if it's word for word")
+        L.append("")
+    L.append(f"{len(reps)} repeated statement(s), {len(figs)} figure disagreement(s), {len(idf)} ID problem(s).")
+    return "\n".join(L) + "\n"
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog=PROG, description="Repeated statements and figures that disagree.")
+    ap.add_argument("docs", nargs="+")
+    ap.add_argument("--threshold", type=float, default=0.6)
+    ap.add_argument("--min-words", type=int, default=8)
+    ap.add_argument("--ids", default=r"Q-\d+")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--write", action="store_true")
+    ap.add_argument("--project")
+    a = ap.parse_args(argv)
+    try:
+        if not 0 < a.threshold <= 1:
+            raise dtx.Stop("--threshold is between 0 and 1")
+        try:
+            re.compile(a.ids)
+        except re.error as e:
+            raise dtx.Stop(f"--ids isn't a valid pattern: {e}")
+        paths = []
+        for d in a.docs:
+            p = pathlib.Path(d).expanduser()
+            if not p.is_file():
+                raise dtx.Stop(f"no file {d}")
+            paths.append(p.resolve())
+        try:
+            sents, blocks = load(paths)
+        except (RuntimeError, zipfile.BadZipFile, KeyError) as e:
+            raise dtx.Stop(f"can't read the document: {e}")
+        reps = repeats(sents, a.threshold, a.min_words)
+        figs = figures(sents)
+        idf = ids(blocks, a.ids)
+        report = render(paths, reps, figs, idf)
+        saved = None
+        if a.write:
+            project = dtx.project_dir(a.project) if a.project else dtx.project_of(paths[0])
+            if not project:
+                raise dtx.Stop("--write needs a project: give --project, or a document inside one")
+            saved = dtx.save_report(project, paths[0].stem, "dedupe", report)
+        if a.json:
+            print(json.dumps({"documents": [str(p) for p in paths], "repeats": reps, "figures": figs, "ids": idf,
+                              "saved": str(saved) if saved else None}, indent=2))
+        else:
+            sys.stdout.write(report)
+            if saved:
+                print(f"Saved: {saved}")
+        return 1 if (reps or figs or idf) else 0
+    except dtx.Stop as e:
+        print(f"{PROG}: {e}", file=sys.stderr)
+        return e.code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

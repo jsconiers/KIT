@@ -1,0 +1,669 @@
+#!/usr/bin/env python3
+"""kit-docs: rebuild your internal documents about Kit (overview, deck, guides, their PDFs) from one manifest.
+
+  kit-docs plan [--only NAME[,NAME]] [--version V]
+                    what a build would do, step by step: each document's commands, outputs, PDF, checks, and where
+                    the files are copied, and whether its build script already says version V. Runs nothing
+  kit-docs build [--only NAME[,NAME]] [--version V] [--archive] [--stamp] [--keep-going]
+                    run each document's build, make and repair its PDFs, run the checks, count the pages, copy the
+                    files to the manifest's folders, and print a table (document, version, pages, result, seconds).
+                    The result is saved in the build folder (kit-docs-result.json). --archive runs the manifest's
+                    archive command and --stamp its stamp command (for example kit-patch --docs-done), each only
+                    when every document built and passed, and --stamp only for a full build (no --only)
+  kit-docs bump V [--only NAME[,NAME]] [--write]
+                    move each build script's labels to V: "vOLD" document labels (file names, footers,
+                    cross-references) everywhere, the bare version on the label lines (OUT, cover, control table),
+                    today's date on the date lines, and the code commit; never revision-history rows or a release
+                    named in prose. Shows the change; --write saves it, with a copy of each script first
+  kit-docs status [--json]
+                    which documents are behind the code: built for an older version, or from an older commit of the
+                    code repository than its HEAD, or never built by kit-docs
+  kit-docs --check  one line for kit doctor
+
+V defaults to the code repository's VERSION file. A document whose build script names another version is not built
+(say kit-docs bump V first); the build also says when a script has no revision-history row for V or misses a
+"require" pattern (for example a "What's new in Kit V" heading), which are for you or Kit to write.
+
+The manifest is JSON: KIT_DOCS_MANIFEST, else ~/Claude/Agents/kit/docs-build.json (private: it names your own
+folders; kit/templates/docs-build.example.json shows every key). Commands are lists (never a shell string) and run
+in the build folder, one document at a time; {version}, {date}, {commit}, {file}, {build}, {docs} are filled in.
+Nothing is deleted: a copied file that would replace a different one is kept first in the build folder's
+kit-docs-backups/, and the bump keeps each script's old copy there too. Office (Word, PowerPoint) may open while a
+build runs; nothing is sent anywhere.
+"""
+import argparse
+import datetime as dt
+import json
+import os
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+PROG = "kit-docs"
+RESULT = "kit-docs-result.json"
+MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+DATE_DMY = re.compile(r"\b\d{2}-(?:%s)-\d{4}\b" % "|".join(MONTHS))
+DATE_ISO = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
+DEFAULT_LINES = (r"^\s*(?:OUT|BASE)\s*=|^VERSION, DATE|^DOC_VER|^KIT_RELEASE|coverdate|CoverPageDate|\"footer\"|"
+                 r"\[\"Version\"|\[\"Date\"")
+DEFAULT_DATE_LINES = r"VERSION, DATE|DOC_VER|^DATE\s*=|coverdate|CoverPageDate|\[\"Date\""
+DEFAULT_SKIP = r"^\s*\[\"\d+(?:\.\d+)+\",\s*"          # revision-history rows stay as they are
+
+
+class Stop(Exception):
+    pass
+
+
+def expand(p, ctx=None):
+    s = str(p)
+    for k, v in (ctx or {}).items():
+        s = s.replace("{" + k + "}", str(v))
+    return os.path.expandvars(os.path.expanduser(s))
+
+
+def manifest_path():
+    env = os.environ.get("KIT_DOCS_MANIFEST")
+    if env:
+        return pathlib.Path(os.path.expanduser(env))
+    kit = pathlib.Path(os.path.expanduser(os.environ.get("KIT_DIR", "~/Claude/Agents/kit")))
+    return kit / "docs-build.json"
+
+
+def load_manifest():
+    p = manifest_path()
+    try:
+        m = json.loads(p.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise Stop(f"no manifest at {p}: copy kit/templates/docs-build.example.json there and fill it in "
+                   "(or set KIT_DOCS_MANIFEST)")
+    except ValueError as ex:
+        raise Stop(f"{p} isn't valid JSON: {ex}")
+    if not isinstance(m, dict) or not isinstance(m.get("documents"), list) or not m["documents"]:
+        raise Stop(f"{p}: needs a 'documents' list")
+    for k in ("build_dir",):
+        if not m.get(k):
+            raise Stop(f"{p}: needs '{k}'")
+    names = set()
+    for d in m["documents"]:
+        if not isinstance(d, dict) or not d.get("name") or not isinstance(d.get("steps", []), list):
+            raise Stop(f"{p}: each document needs a name and a steps list")
+        if d["name"] in names:
+            raise Stop(f"{p}: two documents are called {d['name']}")
+        names.add(d["name"])
+        for st in d.get("steps", []):
+            if not isinstance(st, list) or not st or not all(isinstance(x, str) for x in st):
+                raise Stop(f"{p}: {d['name']}: each step is a command as a list of strings, never a shell string")
+    m["_path"] = str(p)
+    m["_build"] = pathlib.Path(expand(m["build_dir"]))
+    m["_docs"] = pathlib.Path(expand(m.get("docs_dir") or m["build_dir"]))
+    return m
+
+
+def git(repo, *args):
+    try:
+        r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, timeout=30)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def code_state(m):
+    repo = pathlib.Path(expand(m.get("code_repo") or "~/KIT"))
+    ver = ""
+    vf = repo / (m.get("version_file") or "VERSION")
+    if vf.is_file():
+        ver = vf.read_text(encoding="utf-8").strip()
+    changed = 0.0                                   # the newest uncommitted change to the code, if any
+    for ln in git(repo, "status", "--porcelain").splitlines():
+        f = repo / ln[3:].split(" -> ")[-1].strip('"')
+        try:
+            changed = max(changed, f.stat().st_mtime)
+        except OSError:
+            pass
+    return {"repo": repo, "version": ver, "commit": git(repo, "rev-parse", "--short", "HEAD"),
+            "time": git(repo, "log", "-1", "--format=%ct"), "uncommitted": changed}
+
+
+def pick(m, only):
+    docs = m["documents"]
+    if not only:
+        return docs
+    want = [x.strip() for x in only.split(",") if x.strip()]
+    known = {d["name"] for d in docs}
+    bad = [w for w in want if w not in known]
+    if bad:
+        raise Stop("no document called " + ", ".join(bad) + "; the manifest has: " + ", ".join(sorted(known)))
+    return [d for d in docs if d["name"] in want]
+
+
+def declared(m, d):
+    """The version the document's build script says it is (its version_from), or None."""
+    vf = d.get("version_from")
+    if not vf:
+        return None
+    path = m["_build"] / vf["file"]
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    mm = re.search(vf["regex"], text, re.M)
+    return mm.group(1) if mm else None
+
+
+def ctx_for(m, d, version, code):
+    today = dt.date.today()
+    return {"version": version, "date": f"{today.day:02d}-{MONTHS[today.month - 1]}-{today.year}",
+            "isodate": today.isoformat(), "commit": code.get("commit", ""), "build": str(m["_build"]),
+            "docs": str(m["_docs"]), "name": d["name"]}
+
+
+def outputs(m, d, ctx):
+    return [m["_build"] / expand(o, ctx) for o in d.get("outputs", [])]
+
+
+def env_for(m, version):
+    env = dict(os.environ, KIT_DOCS_VERSION=version)
+    pre = [expand(p) for p in m.get("path_prepend", [])]
+    if pre:
+        env["PATH"] = os.pathsep.join(pre + [env.get("PATH", "")])
+    return env
+
+
+def run(cmd, cwd, env, timeout):
+    t = time.monotonic()
+    try:
+        r = subprocess.run(cmd, cwd=str(cwd), env=env, capture_output=True, text=True, timeout=timeout,
+                           stdin=subprocess.DEVNULL)
+        return r.returncode, (r.stdout + r.stderr).strip(), time.monotonic() - t
+    except FileNotFoundError:
+        return 127, f"command not found: {cmd[0]}", time.monotonic() - t
+    except subprocess.TimeoutExpired:
+        return 124, f"timed out after {timeout} s", time.monotonic() - t
+
+
+def pdf_of(path):
+    return path.with_suffix(".pdf")
+
+
+def pages(pdf, env=None):
+    tool = shutil.which("pdfinfo", path=(env or os.environ).get("PATH"))
+    if not tool or not pdf.is_file():
+        return None
+    try:
+        out = subprocess.run([tool, str(pdf)], capture_output=True, text=True, timeout=60).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    mm = re.search(r"^Pages:\s+(\d+)", out, re.M)
+    return int(mm.group(1)) if mm else None
+
+
+def repair_pdf(pdf, env):
+    """Rewrite a PDF with qpdf (Word's export can leave a damaged cross-reference table). None if qpdf is absent."""
+    tool = shutil.which("qpdf", path=env.get("PATH"))
+    if not tool:
+        return None
+    tmp = pdf.with_name(pdf.stem + ".kit-docs-qpdf.pdf")
+    code, out, _ = run([tool, str(pdf), str(tmp)], pdf.parent, env, 300)
+    if code in (0, 3) and tmp.is_file():                  # 3: qpdf repaired it, with warnings
+        os.replace(str(tmp), str(pdf))
+        return "repaired" if code == 3 else "rewritten"
+    if tmp.exists():
+        tmp.unlink()
+    return f"qpdf failed ({code}): {out[-200:]}"
+
+
+def backup_dir(m):
+    return m["_build"] / "kit-docs-backups" / time.strftime("%Y%m%d-%H%M%S")
+
+
+def same(a, b):
+    try:
+        if a.stat().st_size != b.stat().st_size:
+            return False
+        return a.read_bytes() == b.read_bytes()
+    except OSError:
+        return False
+
+
+def copy_out(m, files, bdir):
+    """Copy each file to each copy_to folder; a different file already there is kept in bdir first."""
+    done = []
+    for dest in m.get("copy_to", []):
+        ddir = pathlib.Path(expand(dest))
+        if not ddir.is_dir():
+            done.append(f"skipped {ddir} (no such folder)")
+            continue
+        for f in files:
+            if not f.is_file():
+                continue
+            target = ddir / f.name
+            if target.resolve() == f.resolve():
+                continue
+            if target.exists() and not same(target, f):
+                keep = bdir / ddir.name / f.name
+                keep.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(target), str(keep))
+            shutil.copy2(str(f), str(target))
+            done.append(str(target))
+    return done
+
+
+def reminders(m, d, version):
+    """Things the build can't write: a revision-history row and any 'require' pattern."""
+    notes = []
+    files = [m["_build"] / f for f in d.get("version_files") or ([d["version_from"]["file"]] if d.get("version_from") else [])]
+    text = ""
+    for f in files:
+        try:
+            text += f.read_text(encoding="utf-8") + "\n"
+        except OSError:
+            pass
+    if not text:
+        return notes
+    row = d.get("revision_row", m.get("revision_row", r'\["{version}",'))
+    if row and not re.search(row.replace("{version}", re.escape(version)), text):
+        notes.append(f"no revision-history row for {version}")
+    for req in d.get("require", []):
+        if not re.search(req.replace("{version}", re.escape(version)), text):
+            notes.append(f"missing: {req.replace('{version}', version)}")
+    return notes
+
+
+# ---- plan ------------------------------------------------------------------------------------------------------
+
+def cmd_plan(m, args):
+    code = code_state(m)
+    version = args.version or code["version"]
+    print(f"Manifest {m['_path']}")
+    print(f"Build folder {m['_build']}; code {code['repo']} at {code['commit'] or '?'} (VERSION {code['version'] or '?'}); "
+          f"target version {version}")
+    pdfc = m.get("pdf", {}).get("command")
+    print(f"PDF: {' '.join(pdfc) if pdfc else 'none set'}; repair with qpdf: "
+          f"{'yes' if m.get('pdf', {}).get('repair', True) and shutil.which('qpdf') else 'no (qpdf missing or off)'}; "
+          f"pages with pdfinfo: {'yes' if shutil.which('pdfinfo') else 'no (pdfinfo missing)'}")
+    for c in m.get("checks", []):
+        print(f"Check {c.get('name', '?')}: {' '.join(c['command'])} on {', '.join(c.get('applies', ['.docx']))}")
+    print("Copies to: " + (", ".join(expand(x) for x in m.get("copy_to", [])) or "nowhere (files stay in the build folder)"))
+    problems = 0
+    for d in pick(m, args.only):
+        ctx = ctx_for(m, d, version, code)
+        dv = declared(m, d)
+        state = ("ready" if dv == version else f"says {dv}: run kit-docs bump {version}" if dv else
+                 "version unknown (no version_from)")
+        if dv and dv != version:
+            problems += 1
+        print(f"\n{d['name']}" + (f" ({d['title']})" if d.get("title") else "") + f": {state}")
+        for st in d.get("steps", []):
+            exe = st[0]
+            missing = [a for a in st[1:] if a.endswith(".py") and not (m["_build"] / expand(a, ctx)).exists()]
+            flag = f"  [missing: {', '.join(missing)}]" if missing else ""
+            if missing:
+                problems += 1
+            print(f"  run   {' '.join(expand(x, ctx) for x in st)}{flag}")
+            del exe
+        for o in outputs(m, d, ctx):
+            pdf = d.get("pdf", True)
+            how = {True: "PDF made here", "built": "PDF made by the build", False: "no PDF"}.get(pdf, "no PDF")
+            if o.suffix.lower() not in (".docx", ".pptx"):
+                how = "no PDF"
+            print(f"  out   {o.name} ({how})")
+        for n in reminders(m, d, version):
+            print(f"  note  {n}")
+    print(f"\n{len(pick(m, args.only))} document(s); {problems} to fix before building. Nothing was run.")
+    return 0
+
+
+# ---- build -----------------------------------------------------------------------------------------------------
+
+def build_one(m, d, version, code, env, bdir):
+    ctx = ctx_for(m, d, version, code)
+    t0 = time.monotonic()
+    res = {"name": d["name"], "version": version, "commit": code.get("commit", ""), "ok": True, "pages": {},
+           "log": [], "files": []}
+    dv = declared(m, d)
+    if d.get("version_from") and dv != version:
+        res.update(ok=False, error=f"its build script says {dv or 'no version'}; run kit-docs bump {version} first")
+        res["seconds"] = 0
+        return res
+    timeout = int(d.get("timeout", m.get("timeout", 1800)))
+    for st in d.get("steps", []):
+        cmd = [expand(x, ctx) for x in st]
+        rc, out, secs = run(cmd, m["_build"], env, timeout)
+        res["log"].append({"cmd": cmd, "rc": rc, "seconds": round(secs, 1), "tail": out[-1500:]})
+        if rc != 0:
+            res.update(ok=False, error=f"{' '.join(cmd)} exited {rc}: {(out.splitlines() or [''])[-1][:200]}")
+            break
+    outs = outputs(m, d, ctx)
+    if res["ok"]:
+        for o in outs:
+            if not o.is_file():
+                res.update(ok=False, error=f"the build didn't make {o.name}")
+                break
+            if o.stat().st_mtime < t0 - 1 and not d.get("allow_unchanged"):
+                res.update(ok=False, error=f"{o.name} wasn't rewritten by the build (it's older than this run)")
+                break
+    pdfcfg = m.get("pdf", {})
+    if res["ok"]:
+        for o in outs:
+            if o.suffix.lower() not in (".docx", ".pptx"):
+                res["files"].append(str(o))
+                continue
+            want = d.get("pdf", True)
+            pdf = pdf_of(o)
+            if want is True:
+                if not pdfcfg.get("command"):
+                    res.update(ok=False, error="the manifest has no pdf command")
+                    break
+                cmd = [expand(x, dict(ctx, file=str(o))) for x in pdfcfg["command"]]
+                rc, out, secs = run(cmd, m["_build"], env, int(pdfcfg.get("timeout", 600)))
+                res["log"].append({"cmd": cmd, "rc": rc, "seconds": round(secs, 1), "tail": out[-800:]})
+                if rc != 0 or not pdf.is_file() or pdf.stat().st_mtime < t0 - 1:
+                    res.update(ok=False, error=f"no PDF for {o.name} ({rc}): {(out.splitlines() or [''])[-1][:200]}")
+                    break
+            if want in (True, "built"):
+                if not pdf.is_file():
+                    res.update(ok=False, error=f"no PDF for {o.name}")
+                    break
+                if pdfcfg.get("repair", True):
+                    r = repair_pdf(pdf, env)
+                    if r and r.startswith("qpdf failed"):
+                        res.update(ok=False, error=f"{pdf.name}: {r}")
+                        break
+                res["pages"][o.name] = pages(pdf, env)
+                res["files"].append(str(pdf))
+            res["files"].append(str(o))
+    if res["ok"]:
+        for c in m.get("checks", []):
+            for o in outs:
+                if o.suffix.lower() not in c.get("applies", [".docx"]):
+                    continue
+                cmd = [expand(x, dict(ctx, file=str(o))) for x in c["command"]]
+                rc, out, secs = run(cmd, m["_build"], env, int(c.get("timeout", 300)))
+                res["log"].append({"cmd": cmd, "rc": rc, "seconds": round(secs, 1), "tail": out[-800:]})
+                if rc != 0:
+                    res.update(ok=False, error=f"check {c.get('name', cmd[0])} failed on {o.name}: "
+                                                f"{(out.splitlines() or [''])[-1][:200]}")
+                    break
+            if not res["ok"]:
+                break
+        exp = d.get("expect_pages")
+        for o, n in res["pages"].items():
+            if exp and n is not None and not (exp[0] <= n <= exp[1]):
+                res.update(ok=False, error=f"{o} has {n} pages, outside the expected {exp[0]} to {exp[1]}")
+    if res["ok"]:
+        res["copied"] = copy_out(m, [pathlib.Path(f) for f in res["files"]], bdir)
+    res["notes"] = reminders(m, d, version)
+    res["seconds"] = round(time.monotonic() - t0, 1)
+    return res
+
+
+def table(results):
+    rows = [("Document", "Version", "Pages", "Result", "Seconds")]
+    for r in results:
+        pg = ", ".join(str(v) if v is not None else "?" for v in r["pages"].values()) or "-"
+        rows.append((r["name"], r["version"], pg, "ok" if r["ok"] else "FAIL", f"{r['seconds']:.0f}"))
+    w = [max(len(str(x[i])) for x in rows) for i in range(5)]
+    out = []
+    for i, row in enumerate(rows):
+        out.append("  ".join(str(c).ljust(w[j]) for j, c in enumerate(row)).rstrip())
+        if i == 0:
+            out.append("  ".join("-" * x for x in w))
+    return "\n".join(out)
+
+
+def cmd_build(m, args):
+    code = code_state(m)
+    version = args.version or code["version"]
+    if not version:
+        raise Stop("no version: give --version V, or set version_file / code_repo in the manifest")
+    if not m["_build"].is_dir():
+        raise Stop(f"no build folder {m['_build']}")
+    env = env_for(m, version)
+    bdir = backup_dir(m)
+    docs = pick(m, args.only)
+    results = []
+    for d in docs:
+        print(f"{PROG}: building {d['name']} ...", flush=True)
+        r = build_one(m, d, version, code, env, bdir)
+        results.append(r)
+        print(f"{PROG}: {d['name']}: {'ok' if r['ok'] else 'FAILED: ' + r.get('error', '')} ({r['seconds']:.0f} s)",
+              flush=True)
+        if not r["ok"] and not args.keep_going:
+            break
+    print()
+    print(table(results))
+    for r in results:
+        for n in r.get("notes", []):
+            print(f"  {r['name']}: {n}")
+        if not r["ok"]:
+            print(f"  {r['name']}: {r.get('error', '')}")
+    all_ok = len(results) == len(docs) and all(r["ok"] for r in results)
+    record = {"when": dt.datetime.now().isoformat(timespec="seconds"), "version": version, "commit": code["commit"],
+              "only": args.only or "", "ok": all_ok, "results": results}
+    prev = {}
+    try:
+        prev = json.loads((m["_build"] / RESULT).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        pass
+    docs_state = dict(prev.get("documents", {}))
+    for r in results:
+        if r["ok"]:
+            docs_state[r["name"]] = {"version": version, "commit": code["commit"], "when": record["when"],
+                                     "pages": r["pages"], "files": [pathlib.Path(f).name for f in r["files"]]}
+    record["documents"] = docs_state
+    (m["_build"] / RESULT).write_text(json.dumps(record, indent=1), encoding="utf-8")
+    print(f"\nSaved {m['_build'] / RESULT}.")
+    rc = 0 if all_ok else 1
+    for flag, key in ((args.archive, "archive"), (args.stamp, "stamp")):
+        if not flag:
+            continue
+        if not all_ok:
+            print(f"Not running the {key} command: not every document built and passed.")
+            continue
+        if key == "stamp" and args.only:
+            print("Not stamping: --stamp records every internal document as current, so it needs a full build (no --only).")
+            continue
+        cmdl = m.get(key)
+        if not cmdl:
+            print(f"No {key} command in the manifest.")
+            continue
+        cmd = [expand(x, ctx_for(m, {"name": key}, version, code)) for x in cmdl]
+        print(f"Running {' '.join(cmd)}")
+        c, out, _ = run(cmd, m["_build"], env, 600)
+        print(out)
+        if c != 0:
+            print(f"The {key} command exited {c}.")
+            rc = 1
+    return rc
+
+
+# ---- bump ------------------------------------------------------------------------------------------------------
+
+def bump_text(text, old, new, lines_re, skip_re, new_date, old_commit, new_commit, date_re=DEFAULT_DATE_LINES):
+    """Move a script's labels from version OLD to NEW. On every line but the skipped ones (revision-history rows),
+    a document label "vOLD" (a file name, a footer, a cross-reference) becomes "vNEW"; on the label lines
+    (lines_re) a bare OLD does too, and the code commit on a KIT_COMMIT line; on the date lines (date_re) the
+    date becomes today's, in the same format. A release mentioned in prose ("since Kit 1.7.3") is left alone."""
+    out, changed = [], []
+    ver = re.escape(old)
+    for n, ln in enumerate(text.splitlines(keepends=True), 1):
+        if re.match(skip_re, ln):
+            out.append(ln)
+            continue
+        nl = re.sub(rf"(?<![\w.])v{ver}(?![\d])", "v" + new, ln)
+        if re.search(lines_re, ln):
+            nl = re.sub(rf"(?<![\w.]){ver}(?![\d])", new, nl)
+            if old_commit and new_commit and re.search(r"KIT_COMMIT", nl):
+                nl = nl.replace(old_commit, new_commit)
+        if new_date and date_re and re.search(date_re, ln):
+            nl = DATE_DMY.sub(new_date[0], nl)
+            nl = DATE_ISO.sub(new_date[1], nl)
+        if nl != ln:
+            changed.append((n, ln.rstrip("\r\n"), nl.rstrip("\r\n")))
+        out.append(nl)
+    return "".join(out), changed
+
+
+def cmd_bump(m, args):
+    code = code_state(m)
+    new = args.version
+    today = dt.date.today()
+    new_date = (f"{today.day:02d}-{MONTHS[today.month - 1]}-{today.year}", today.isoformat())
+    bdir = backup_dir(m)
+    planned = 0
+    for d in pick(m, args.only):
+        old = declared(m, d)
+        if not old:
+            print(f"{d['name']}: no version_from in the manifest, or its pattern didn't match; skipped")
+            continue
+        if old == new:
+            print(f"{d['name']}: already {new}")
+            continue
+        spec = d.get("bump", {})
+        files = d.get("version_files") or [d["version_from"]["file"]]
+        old_commit = spec.get("old_commit") or ""
+        if not old_commit:
+            for f in files:
+                try:
+                    mm = re.search(r'KIT_COMMIT\s*=\s*"([0-9a-f]{7,})"|KIT_RELEASE, KIT_COMMIT = "[^"]+", "([0-9a-f]{7,})"',
+                                   (m["_build"] / f).read_text(encoding="utf-8"))
+                except OSError:
+                    mm = None
+                if mm:
+                    old_commit = mm.group(1) or mm.group(2)
+                    break
+        for f in files:
+            path = m["_build"] / f
+            try:
+                text = path.read_text(encoding="utf-8")
+            except OSError:
+                print(f"{d['name']}: can't read {path}")
+                continue
+            new_text, changed = bump_text(text, old, new, spec.get("lines", m.get("bump_lines", DEFAULT_LINES)),
+                                          spec.get("skip", m.get("bump_skip", DEFAULT_SKIP)),
+                                          new_date if spec.get("dates", True) else None, old_commit, code["commit"],
+                                          spec.get("date_lines", m.get("bump_date_lines", DEFAULT_DATE_LINES)))
+            if not changed:
+                continue
+            planned += len(changed)
+            print(f"{d['name']}: {f}: {old} -> {new}, {len(changed)} line(s)")
+            for n, a, b in changed:
+                print(f"  {n:5d} - {a.strip()[:150]}\n        + {b.strip()[:150]}")
+            if args.write:
+                keep = bdir / "scripts" / f
+                keep.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(path), str(keep))
+                path.write_text(new_text, encoding="utf-8")
+        for n in reminders(m, d, new):
+            print(f"  note {d['name']}: {n} (write it before the build)")
+    if args.write:
+        print(f"\nWrote {planned} line(s); the old scripts are in {bdir / 'scripts'}.")
+    else:
+        print(f"\n{planned} line(s) would change. Nothing written; add --write to save.")
+    return 0
+
+
+# ---- status ----------------------------------------------------------------------------------------------------
+
+def doc_status(m):
+    code = code_state(m)
+    try:
+        rec = json.loads((m["_build"] / RESULT).read_text(encoding="utf-8")).get("documents", {})
+    except (OSError, ValueError):
+        rec = {}
+    rows = []
+    for d in m["documents"]:
+        r = rec.get(d["name"])
+        dv = declared(m, d)
+        if not r:
+            ctx = ctx_for(m, d, dv or code["version"], code)
+            files = [m["_docs"] / o.name for o in outputs(m, d, ctx)]
+            mt = max((f.stat().st_mtime for f in files if f.exists()), default=None)
+            if mt is None:
+                state, why = "missing", "never built by kit-docs, and no output found"
+            elif code["time"] and mt < float(code["time"]):
+                state, why = "behind", "never built by kit-docs; its files are older than the code's last commit"
+            elif code["uncommitted"] and mt < code["uncommitted"]:
+                state, why = "behind", "never built by kit-docs; the code has uncommitted changes newer than its files"
+            else:
+                state, why = "unknown", "never built by kit-docs; its files are newer than the code's last commit"
+            rows.append({"name": d["name"], "version": dv, "state": state, "why": why})
+            continue
+        why = []
+        if code["version"] and r["version"] != code["version"]:
+            why.append(f"built for {r['version']}, the code is {code['version']}")
+        if code["commit"] and r.get("commit") and r["commit"] != code["commit"]:
+            n = git(code["repo"], "rev-list", "--count", f"{r['commit']}..HEAD")
+            why.append(f"built from {r['commit']}, {n or '?'} commit(s) behind {code['commit']}")
+        built = dt.datetime.fromisoformat(r["when"]).timestamp() if r.get("when") else 0
+        if code["uncommitted"] and code["uncommitted"] > built:
+            why.append("the code has uncommitted changes made after this build")
+        rows.append({"name": d["name"], "version": r["version"], "state": "behind" if why else "current",
+                     "why": "; ".join(why) or f"built {r['when']} from {r.get('commit')}", "pages": r.get("pages")})
+    return code, rows
+
+
+def cmd_status(m, args):
+    code, rows = doc_status(m)
+    if args.json:
+        print(json.dumps({"code": {"version": code["version"], "commit": code["commit"]}, "documents": rows}, indent=1))
+        return 0
+    print(f"Code {code['repo']}: version {code['version'] or '?'}, commit {code['commit'] or '?'}")
+    w = max(len(r["name"]) for r in rows)
+    for r in rows:
+        print(f"  {r['name'].ljust(w)}  {r['state']:8s} {r['why']}")
+    behind = sum(r["state"] in ("behind", "missing") for r in rows)
+    print(f"{behind} of {len(rows)} behind the code." + (" Rebuild: kit-docs build" if behind else ""))
+    return 0
+
+
+def cmd_check():
+    try:
+        m = load_manifest()
+    except Stop as ex:
+        print(f"kit-docs: not set up ({ex})")
+        return 0
+    _, rows = doc_status(m)
+    behind = [r["name"] for r in rows if r["state"] in ("behind", "missing")]
+    print(f"kit-docs: {len(rows) - len(behind)} of {len(rows)} internal documents current"
+          + (f"; behind: {', '.join(behind)}" if behind else ""))
+    return 0
+
+
+def main(argv):
+    if argv and argv[0] == "--check":
+        return cmd_check()
+    ap = argparse.ArgumentParser(prog=PROG, description="Rebuild internal documents from a manifest.",
+                                 epilog="See the top of this file for details.")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("plan")
+    p.add_argument("--only")
+    p.add_argument("--version")
+    b = sub.add_parser("build")
+    b.add_argument("--only")
+    b.add_argument("--version")
+    b.add_argument("--archive", action="store_true")
+    b.add_argument("--stamp", action="store_true")
+    b.add_argument("--keep-going", action="store_true")
+    u = sub.add_parser("bump")
+    u.add_argument("version")
+    u.add_argument("--only")
+    u.add_argument("--write", action="store_true")
+    s = sub.add_parser("status")
+    s.add_argument("--json", action="store_true")
+    args = ap.parse_args(argv)
+    if getattr(args, "version", None) and not re.fullmatch(r"\d+(?:\.\d+)*", args.version):
+        raise Stop("a version is numbers and dots, for example 1.8.0")
+    m = load_manifest()
+    return {"plan": cmd_plan, "build": cmd_build, "bump": cmd_bump, "status": cmd_status}[args.cmd](m, args)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except Stop as ex:
+        print(f"{PROG}: {ex}", file=sys.stderr)
+        sys.exit(2)
