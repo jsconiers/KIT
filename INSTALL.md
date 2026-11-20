@@ -132,7 +132,8 @@ the line reads as not set, and the health check's "Setup paths" warning names th
 The quickest way through them is the Setup section of `kit-settings ui` (or `kit-settings questions` in a
 terminal): it asks the most blocking questions first, one at a time, and each answer lowers the "not set" count
 in the health score. To rebuild your own documents about Kit, copy `kit/templates/docs-build.example.json` to
-`~/Claude/Agents/kit/docs-build.json`, list your documents, and run `kit-docs plan`, then `kit-docs build`.
+`~/Claude/Agents/kit/docs-build.json`, list your documents, and run `kit-docs plan`, then `kit-docs build`. `kit-docs build --archive`
+(or `kit-docs-archive --yes` on its own) moves the versions a build superseded into the docs folder's `archive/`.
 Fill in what applies to you, in roughly this order:
 
 | File | Used by | What to fill in |

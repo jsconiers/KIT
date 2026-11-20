@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""kit-docs-archive: move superseded versions of your documents into the docs folder's archive/.
+
+  kit-docs-archive            show what would move (nothing changes)
+  kit-docs-archive --yes      move it
+
+A document is superseded when the same name exists with a higher version, for example
+Kit-overview-v1.4.docx when Kit-overview-v1.5.docx exists (and the unversioned originals, such as
+Kit-overview.docx, once any versioned copy exists). Word, PowerPoint, PDF, and Excel copies (.docx, .pptx,
+.pdf, .xlsx) are all covered, so a workbook moves with its document. Old diagram folders
+(editable-diagrams/v<old>/, and the original drawio/ and powerpoint/ folders) move once a newer
+version folder exists. A file open in Word, PowerPoint, Excel, or Preview (an open handle, or Office's ~$ lock
+file beside it) is skipped and listed; close it and run again. Nothing is deleted. To undo, move the files
+back from archive/.
+
+The folder is KIT_DOCS_DIR if set, else docs_dir in kit-docs' manifest (KIT_DOCS_MANIFEST, default
+~/Claude/Agents/kit/docs-build.json). kit-docs build --archive runs this when the manifest's "archive" names it.
+"""
+import argparse
+import json
+import os
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+
+
+def docs_dir():
+    env = os.environ.get("KIT_DOCS_DIR")
+    if env:
+        return pathlib.Path(os.path.expanduser(env))
+    man = os.environ.get("KIT_DOCS_MANIFEST") or os.path.join(
+        os.environ.get("KIT_DIR", "~/Claude/Agents/kit"), "docs-build.json")
+    try:
+        d = json.loads(pathlib.Path(os.path.expanduser(man)).read_text(encoding="utf-8")).get("docs_dir")
+    except (OSError, ValueError, AttributeError):
+        d = None
+    return pathlib.Path(os.path.expandvars(os.path.expanduser(d))) if d else None
+
+
+DOCS = docs_dir() or pathlib.Path(".")
+ARCHIVE = DOCS / "archive"
+VERSIONED = re.compile(r"^(?P<stem>.+?)-v(?P<ver>\d+(?:\.\d+)*)\.(?P<ext>docx|pptx|pdf|xlsx)$")
+PLAIN = re.compile(r"^(?P<stem>.+?)\.(?P<ext>docx|pptx|pdf|xlsx)$")
+
+
+def vkey(v):
+    return tuple(int(x) for x in v.split("."))
+
+
+def open_files():
+    try:
+        out = subprocess.run(["lsof", "-Fn", "+D", str(DOCS)], capture_output=True, text=True,
+                             timeout=60).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return set()
+    return {pathlib.Path(line[1:]).resolve() for line in out.splitlines() if line.startswith("n")}
+
+
+def candidates():
+    files = [p for p in DOCS.iterdir() if p.is_file() and not p.name.startswith("~$")]
+    latest = {}
+    for p in files:
+        m = VERSIONED.match(p.name)
+        if m:
+            s = m["stem"]
+            latest[s] = max(latest.get(s, "0"), m["ver"], key=vkey)
+    moves = []
+    for p in files:
+        m = VERSIONED.match(p.name)
+        if m and vkey(m["ver"]) < vkey(latest[m["stem"]]):
+            moves.append(p)
+            continue
+        m = PLAIN.match(p.name)
+        if m and not VERSIONED.match(p.name) and m["stem"] in latest:
+            moves.append(p)
+    diag = DOCS / "editable-diagrams"
+    if diag.is_dir():
+        vers = [d for d in diag.iterdir() if d.is_dir() and re.fullmatch(r"v\d+(?:\.\d+)*", d.name)]
+        if vers:
+            top = max(vers, key=lambda d: vkey(d.name[1:]))
+            moves += [d for d in vers if d != top]
+            moves += [diag / n for n in ("drawio", "powerpoint") if (diag / n).is_dir()]
+    return sorted(moves)
+
+
+def busy(path, opened):
+    if path.is_dir():
+        return any(o == path.resolve() or path.resolve() in o.parents for o in opened)
+    if path.resolve() in opened:
+        return True
+    # Office's lock file: "~$" plus the name, or plus the name less its first two characters for long names.
+    return any((path.parent / f"~${n}").exists() for n in (path.name, path.name[2:]))
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-docs-archive", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--yes", action="store_true", help="move the files (default: show only)")
+    args = ap.parse_args(argv)
+    if docs_dir() is None:
+        sys.exit("kit-docs-archive: no docs folder: set KIT_DOCS_DIR, or docs_dir in kit-docs' manifest")
+    if not DOCS.is_dir():
+        sys.exit(f"kit-docs-archive: {DOCS} not found")
+    opened = open_files()
+    moves = candidates()
+    if not moves:
+        print("kit-docs-archive: nothing superseded; the folder holds current versions only")
+        return 0
+    skipped = []
+    for p in moves:
+        rel = p.relative_to(DOCS)
+        if busy(p, opened):
+            skipped.append(rel)
+            continue
+        dest = ARCHIVE / rel
+        if not args.yes:
+            print(f"would move {rel} -> archive/{rel}")
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        n = 1
+        while dest.exists():
+            dest = (ARCHIVE / rel).with_name(f"{(ARCHIVE / rel).stem}-dup{n if n > 1 else ''}{dest.suffix}")
+            n += 1
+        shutil.move(str(p), str(dest))
+        print(f"moved {rel} -> archive/{dest.relative_to(ARCHIVE)}")
+    for rel in skipped:
+        print(f"skipped {rel}: open in an app; close it and run again")
+    if not args.yes:
+        print("Nothing changed. To move them: kit-docs-archive --yes")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -8,6 +8,11 @@ versions follow [semantic versioning](https://semver.org).
 ## [1.8.1] - 2026-11-20
 
 ### Added
+- `kit-docs-archive [--yes]`: moves superseded versions of your documents (.docx, .pptx, .pdf, and .xlsx, so a
+  workbook moves with its document) into the docs folder's `archive/`; the folder is `KIT_DOCS_DIR` or kit-docs'
+  manifest `docs_dir`. A file open in an app or with an Office `~$` lock file beside it is skipped, nothing is
+  deleted, and an archive copy is never overwritten. The manifest template's `archive` step now names it
+  (tests/test_docs_archive.py).
 - Outlook auto-recovery: `kit-outlook` now checks the calendar as well as the version, because Outlook can give its
   version and still hang on the calendar (what stopped kitmail on 18-20 Nov). That case gets a new `hung` status, with
   the fix in the brief, the health checks, and a new dashboard banner. `OUTLOOK_RECOVER` is `off`, `notify` (the

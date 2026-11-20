@@ -131,6 +131,7 @@ The installer links these into `~/.local/bin` (all in `shared/bin/`):
 | `kit-textback` | macOS: text Kit from your phone ("kit today", "kit find ..."); changes come back with a code to confirm |
 | `kit-letter` | A Word letter from plain text: `build` leaves room for a pen signature; `sign` adds your saved signature, and Claude Code asks you each time |
 | `kit-settings` | How briefs reach you and which app your to-dos sync with, work and personal; `show --all` lists every setting (run config, setup fields, JSON configs) with its source, status, and description; `ui` opens a local page to change the safe ones, grouped by area with search, plain-English help, and one Review & save step that takes a snapshot first |
+| `kit-docs-archive` | Moves superseded versions of your documents (Word, PowerPoint, PDF, Excel) into the docs folder's `archive/`; preview first, `--yes` moves; skips open or locked files; nothing is deleted |
 | `kit-config` | Configuration snapshots: `snapshot`, `list`, `diff`, and `restore` Kit's settings (never credentials); restore previews first and snapshots the current state, so it can be undone. Taken automatically before every settings save, install, and update |
 
 **Architecture work**

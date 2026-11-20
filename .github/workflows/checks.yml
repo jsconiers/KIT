@@ -97,6 +97,7 @@ jobs:
           python3 tests/test_timeoff.py
           python3 tests/test_acronyms.py
           python3 tests/test_pages.py
+          python3 tests/test_docs_archive.py
       - name: Outlook recovery and calendar cache tests
         run: |
           python3 tests/test_outlook_recover.py

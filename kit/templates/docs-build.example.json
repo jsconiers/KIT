@@ -15,7 +15,7 @@
   "checks": [
     {"name": "ooxml", "command": ["python3", "ooxml_check.py", "{file}"], "applies": [".docx", ".pptx"]}
   ],
-  "archive": ["python3", "archive_old_versions.py", "--yes"],
+  "archive": ["kit-docs-archive", "--yes"],
   "stamp": ["kit-patch", "--docs-done"],
   "revision_row": "\\[\"{version}\",",
   "bump_lines": "^\\s*(?:OUT|BASE)\\s*=|^VERSION, DATE|coverdate|\"footer\"|\\[\"Version\"|\\[\"Date\"",
