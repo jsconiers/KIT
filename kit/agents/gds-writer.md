@@ -108,6 +108,7 @@ start each entry with the date and the version of the document it refers to.
   text only once you've written that section.
 - When a source document (a BRD, charter, or notes) adds requirements the IA doesn't carry, pull
   them out with the `requirements-extraction` skill, cite them, and mark them new.
+- Before you save, run `python3 ~/Claude/Agents/kit/.install/shared/bin/kit-acronyms check <project> <draft>` and spell out each acronym it lists at first use, with the meaning it proposes (check it fits); ask about any it can't find rather than guess. If `facts.md` sets a page budget for this document, run `python3 ~/Claude/Agents/kit/.install/shared/bin/kit-pages check <project> <draft>` and cut from the largest sections when it's over.
 - Before you save, run `python3 ~/Claude/Agents/kit/.install/shared/bin/kit-templatecheck <draft>` (add `--type GDS` if it
   can't tell). Fix missing sections and leftover template text, and explain any renamed,
   reordered, or added section in your report.

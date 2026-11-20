@@ -207,7 +207,7 @@ def queue_todo(item, when):
         return False
     due = max(dt.date.today(), when - dt.timedelta(days=ACTION_LEAD[action]))
     title = f"{DOING[action]} {item['name']}: {describe(item, when)}, {when:%a %d-%b}"
-    args = [sys.executable, str(TODO)] + (["work"] if is_work(item) else []) + [title, f"{due:%d-%b-%Y}"]
+    args = [sys.executable, str(TODO), "--merge"] + (["work"] if is_work(item) else []) + [title, f"{due:%d-%b-%Y}"]
     r = subprocess.run(args, capture_output=True, text=True, timeout=60)
     if r.returncode != 0:
         print(f"(couldn't add the to-do for {item['name']}: {(r.stderr or r.stdout).strip()[:120]})",

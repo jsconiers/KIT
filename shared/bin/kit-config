@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+"""kit-config: snapshots of Kit's configuration, and restoring one.
+
+  kit-config snapshot [--note TEXT] [--force] [--quiet]
+        save the run config, the JSON configs, the setup files, the wizard's state, and Kit's own permission rules
+        in ~/.claude/settings.json. Credentials are left out. If nothing changed since the latest snapshot, it says
+        so and keeps that one (--force takes a new one anyway)
+  kit-config list [--json]                      the snapshots, newest first
+  kit-config show ID [--json]                   what a snapshot holds, and what it left out
+  kit-config diff ID [ID2|current]              what changed from snapshot ID to ID2 (default: now)
+  kit-config restore ID [--yes] [--include-permissions]
+        show what restoring ID would change; --yes writes it, after taking a snapshot of the current state (so
+        `kit-config restore <that id>` undoes it). Kit's permission rules are put back only with
+        --include-permissions; the owner's own rules are never touched
+  kit-config prune [--keep N]                   delete the oldest snapshots past N (default 30, or SNAPSHOT_KEEP)
+
+Snapshots are in ~/Claude/Agents/kit/.install/snapshots/<id>/ with a manifest (a SHA-256 per file), private to your
+account. The settings page takes one before every save, and the installers and kit-update before they change
+anything. Credentials never go in: a credential's line or key is left out, a restore keeps the current one, and
+files whose names say they hold secrets (.env and the like) are skipped. Exit 0 done, 1 refused or failed, 2 usage.
+"""
+import argparse
+import json
+import pathlib
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import kit_config as kc  # noqa: E402
+
+PROG = "kit-config"
+
+
+def say(*a):
+    print(*a, flush=True)
+
+
+def cmd_snapshot(args):
+    r = kc.snapshot(args.kit, note=args.note or "", force=args.force)
+    if args.quiet and not r["new"]:
+        return 0
+    if r["new"]:
+        say(f"{PROG}: snapshot {r['id']} taken ({r['files']} files).")
+    else:
+        say(f"{PROG}: nothing changed since snapshot {r['id']}; kept that one.")
+    if not args.quiet:
+        for rel, keys in r["omitted"].items():
+            say(f"  left out of {rel} (credentials): {', '.join(_path(k) for k in keys)}")
+        for rel, why in r["skipped"].items():
+            say(f"  skipped {rel}: {why}")
+        if r["pruned"]:
+            say(f"  pruned {len(r['pruned'])} older snapshot(s), keeping {kc.keep_count(args.kit)}")
+    return 0
+
+
+def _path(k):
+    return ".".join(str(x) for x in k) if isinstance(k, list) else str(k)
+
+
+def cmd_list(args):
+    rows = kc.listing(args.kit)
+    if args.json:
+        say(json.dumps(rows, indent=2))
+        return 0
+    if not rows:
+        say(f"{PROG}: no snapshots yet. Take one with: {PROG} snapshot")
+        return 0
+    say(f"{len(rows)} snapshot(s), newest first:")
+    for r in rows:
+        say(f"  {r['id']}  {r['created'][:16].replace('T', ' ')}  {r['files']:>3} files"
+            f"{'  Kit ' + r['kit_version'] if r['kit_version'] else ''}  {r['note']}")
+    return 0
+
+
+def cmd_show(args):
+    m = kc.manifest(args.kit, args.id)
+    if args.json:
+        say(json.dumps(m, indent=2))
+        return 0
+    say(f"Snapshot {m['id']}, {m['created'].replace('T', ' ')}" + (f": {m['note']}" if m.get("note") else ""))
+    for rel, f in sorted(m["files"].items()):
+        om = f.get("omitted") or []
+        say(f"  {rel}  ({f['size']} bytes, sha256 {f['sha256'][:12]})"
+            + (f"; left out: {', '.join(_path(k) for k in om)}" if om else ""))
+    for rel, why in sorted((m.get("skipped") or {}).items()):
+        say(f"  skipped {rel}: {why}")
+    p = m.get("permissions")
+    say("  Kit's permission rules: " + ("not recorded (no ~/.claude/settings.json)" if p is None else
+                                        ", ".join(f"{len(p.get(k) or [])} {k}" for k in kc.PERM_LISTS)))
+    return 0
+
+
+def cmd_diff(args):
+    d = kc.diff(args.kit, args.id, args.other or "current")
+    say(d.rstrip() if d else f"No differences between {args.id} and {args.other or 'the current configuration'}.")
+    return 0
+
+
+def cmd_restore(args):
+    plan = kc.plan_restore(args.kit, args.id, args.include_permissions)
+    if not plan["changes"] and not plan["permissions"]:
+        say(plan["diff"].rstrip() or f"{PROG}: the configuration already matches {args.id}; nothing to restore.")
+        return 0
+    say(plan["diff"].rstrip())
+    if plan["left"]:
+        say(f"\nNot in {args.id}, left as they are: {', '.join(plan['left'])}")
+    if not args.yes:
+        n = len(plan["changes"]) + (1 if plan["permissions"] else 0)
+        say(f"\n{PROG}: {n} file(s) would change. Nothing written. To restore: {PROG} restore {args.id} --yes"
+            + (" --include-permissions" if args.include_permissions else ""))
+        return 0
+    r = kc.restore(args.kit, args.id, args.include_permissions)
+    say("\n" + r["message"])
+    return 0
+
+
+def cmd_prune(args):
+    keep = args.keep if args.keep is not None else kc.keep_count(args.kit)
+    gone = kc.prune(args.kit, keep)
+    say(f"{PROG}: pruned {len(gone)} snapshot(s); keeping the newest {keep}." if gone else
+        f"{PROG}: nothing to prune (at most {keep} kept).")
+    return 0
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog=PROG, description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--kit", help=argparse.SUPPRESS)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("snapshot")
+    s.add_argument("--note", default="")
+    s.add_argument("--force", action="store_true")
+    s.add_argument("--quiet", action="store_true")
+    s = sub.add_parser("list")
+    s.add_argument("--json", action="store_true")
+    s = sub.add_parser("show")
+    s.add_argument("id")
+    s.add_argument("--json", action="store_true")
+    s = sub.add_parser("diff")
+    s.add_argument("id")
+    s.add_argument("other", nargs="?")
+    s = sub.add_parser("restore")
+    s.add_argument("id")
+    s.add_argument("--yes", action="store_true")
+    s.add_argument("--include-permissions", action="store_true")
+    s = sub.add_parser("prune")
+    s.add_argument("--keep", type=int)
+    args = ap.parse_args(argv)
+    if args.cmd == "prune" and args.keep is not None and args.keep < 1:
+        ap.error("--keep must be 1 or more")
+    try:
+        return {"snapshot": cmd_snapshot, "list": cmd_list, "show": cmd_show, "diff": cmd_diff,
+                "restore": cmd_restore, "prune": cmd_prune}[args.cmd](args)
+    except kc.Error as ex:
+        print(f"{PROG}: {ex}", file=sys.stderr)
+        return 1
+    except OSError as ex:
+        print(f"{PROG}: couldn't read or write a file: {ex}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

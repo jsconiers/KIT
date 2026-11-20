@@ -23,7 +23,9 @@ arrived), an outage opens when
     .install/logs/sync.ok, which the sync writes after each clean run.
 It adds one [work] item to the owner's section of QUEUE.md through `todo work` ("Fix Kit's <mode>
 run, failing since DD-Mmm-YYYY (kit-reliability)", or "Check Kit's <mode> run, no success since
-..."), once per outage, and raises the dashboard's red "Scheduled run" banner. The next success
+..."), once per outage, and raises the dashboard's red "Scheduled run" banner. If an item for the same
+run is still open from an earlier outage (another "since" date), the new outage goes on that item as
+"seen again" with a detail line instead of a second item (kit_queue.find_duplicate). The next success
 clears it, with a "Recovered" line on the queue item for the owner to check off.
 
 Cost (kit-cost). With COST_BUDGET_MONTHLY set:

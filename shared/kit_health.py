@@ -7,8 +7,9 @@ Four parts, 25 points each, from files Kit already keeps (it reads them and chan
               an open outage (briefs/connectors-alerts.json) or a failed check counts 0, and a server with no
               result in the last 3 days counts half. No servers configured: full marks.
   runs        Kit's scheduled runs over the last 7 days (kit-reliability): a success counts 1, a degraded run
-              half, a failure or timeout 0. Each open run alert (briefs/alerts.json) takes 5 points off. No
-              runs in 7 days: half marks.
+              half, a failure or timeout 0. Each open run alert (briefs/alerts.json) takes 5 points off, and a
+              recorded Claude usage limit (.install/logs/usage-limit.json, kit_limits.py) 10. No runs in 7
+              days: half marks.
   audit       today's audit findings (briefs/audit-status.json, from kit-audit --daily): 10 points off per
               critical, 3 per warning; and 3 off per open integrity alert in briefs/alerts.json (agent drift,
               connector guard, library index, cost). No audit status yet: half marks.
@@ -102,6 +103,22 @@ def _reliability(kit):
     return None
 
 
+def usage_limit(kit):
+    """A line when Claude's usage limit is recorded (.install/logs/usage-limit.json, kit_limits.py) and its
+    reset hasn't passed; else ""."""
+    st = _json(kit / ".install/logs/usage-limit.json")
+    if not isinstance(st, dict) or not st:
+        return ""
+    reset = st.get("reset")
+    if reset:
+        try:
+            if dt.datetime.now(dt.timezone.utc) >= dt.datetime.fromisoformat(reset):
+                return ""
+        except (TypeError, ValueError):
+            pass
+    return f"Claude usage limit reached; access returns {reset or 'at an unknown time'} (kit-cost limit)"
+
+
 def runs(kit, report=None):
     alerts = (_json(kit / "briefs/alerts.json", {}) or {}).get("alerts") or {}
     open_runs = [a for a in alerts.values() if isinstance(a, dict) and a.get("kind") == "run"] \
@@ -117,6 +134,10 @@ def runs(kit, report=None):
     w7 = (report.get("windows") or {}).get("7") or {}
     total = sum(s.get("runs", 0) for s in w7.values())
     problems = [f"{a.get('mode', '?')}: {a.get('reason', 'alert open')}" for a in open_runs]
+    limited = usage_limit(kit)
+    if limited:
+        problems.insert(0, limited)
+        open_runs = open_runs + [{"kind": "usage-limit"}, {"kind": "usage-limit"}]   # 10 points off
     if not total:
         return _part("Runs", PART / 2 - 5 * len(open_runs), "no scheduled runs in the last 7 days",
                      problems or ["no scheduled runs in the last 7 days"])

@@ -68,6 +68,22 @@ function Invoke-Claude([string[]]$ArgList, [int]$Seconds) {
 
 # 1. Claude Code: one tiny headless call, the same path the scheduled runs use. It's a paid call, so it
 # asks for JSON output and goes in the cost ledger (kit-cost, mode "preflight") like every scheduled run.
+# While a usage limit is recorded (kit_limits.py), the call is skipped until the reset; when the reset
+# time is unknown, it runs once a day to test whether access is back (check --probe).
+$kitLimits = Join-Path $KitHome ".install\shared\kit_limits.py"
+$limitOn = ("" + $Cfg["USAGE_LIMIT_GUARD"]) -ne "off"
+$limitMark = Join-Path $LogDir "usage-limit-notified"
+$pyl = Resolve-Python
+$limitState = "ok"
+if ($limitOn -and $null -ne $pyl -and (Test-Path -LiteralPath $kitLimits)) {
+    $limitState = (("" + (& $pyl.Exe @($pyl.Args + @($kitLimits, "check", "--probe")) 2>$null | Select-Object -First 1)) -split ' ')[0]
+}
+if ($limitState -eq "limited") {
+    $when = "" + (& $pyl.Exe @($pyl.Args + @($kitLimits, "when")) 2>$null | Select-Object -First 1)
+    Write-Line "login check skipped: Claude usage limit recorded (access returns $when)"
+    $msg = "" + (& $pyl.Exe @($pyl.Args + @($kitLimits, "notice")) 2>$null | Select-Object -First 1)
+    if ($msg.Trim() -ne "") { Send-Notice $limitMark $msg }
+} else {
 $outFile = Join-Path $LogDir ".preflight-$PID.json"
 $errFile = Join-Path $LogDir ".preflight-$PID.err"
 $job = Start-Job -ScriptBlock {
@@ -97,11 +113,23 @@ foreach ($f in @($outFile, $errFile)) {
 }
 if ($rc -eq 124) { $out += "timed out after 120 s`n" }
 $out += "RC=$rc"
+$limitHit = ""
+if ($limitOn -and $null -ne $pyl -and (Test-Path -LiteralPath $kitLimits) -and $rc -ne 0) {
+    $limitHit = "" + (& $pyl.Exe @($pyl.Args + @($kitLimits, "detect", "--source", "preflight", $outFile, $errFile)) 2>$null | Select-Object -First 1)
+}
 Remove-Item -LiteralPath $outFile, $errFile -Force -ErrorAction SilentlyContinue
 $first = (($out -split "`r?`n") | Where-Object { $_ -and $_ -notmatch '^RC=' } | Select-Object -First 1)
 $lapsed = Join-Path $LogDir "login-lapsed"
-if ($out -match "RC=0" -and $out -match "\bOK\b") {
+if ($limitHit -ne "") {
+    Write-Line "Claude usage limit reached ($limitHit): scheduled runs stand down until it resets"
+    $msg = "" + (& $pyl.Exe @($pyl.Args + @($kitLimits, "notice")) 2>$null | Select-Object -First 1)
+    if ($msg.Trim() -ne "") { Send-Notice $limitMark $msg }
+} elseif ($out -match "RC=0" -and $out -match "\bOK\b") {
     Write-Line "login ok"
+    if ($null -ne $pyl -and (Test-Path -LiteralPath $kitLimits) -and (Test-Path -LiteralPath (Join-Path $LogDir "usage-limit.json"))) {
+        & $pyl.Exe @($pyl.Args + @($kitLimits, "success", "--source", "preflight")) 2>$null | Out-Null
+        Write-Line "usage limit cleared"
+    }
     if (Test-Path -LiteralPath $lapsed) { Remove-Item -LiteralPath $lapsed; Write-Line "login restored" }
 } elseif ($out -match "(?i)not logged in|/login|oauth|invalid api key|authenticat") {
     Write-Line "LOGGED OUT: $first"
@@ -109,6 +137,7 @@ if ($out -match "RC=0" -and $out -match "\bOK\b") {
                          "To fix it at the computer: open a terminal, run claude, and type /login.")
 } else {
     Write-Line "login check inconclusive: $first"
+}
 }
 
 # 2. Connectors that need the owner's sign-in now and then (OAuth), from PREFLIGHT_CONNECTORS.

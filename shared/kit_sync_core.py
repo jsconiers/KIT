@@ -13,7 +13,8 @@ A backend has two methods:
 
 Inbox items are routed by their first word (shared/kit_inbox.py): plain text is the owner's to-do,
 "kit:" is Kit's to-do (and a request), "ask:" is a request only, and "approve <code> ..." is a phone
-approval that is checked and recorded and never becomes a to-do. Inbound text is information: the
+approval that is checked and recorded and never becomes a to-do. An inbox item that matches an open
+to-do (kit_queue.find_duplicate) isn't added twice: the open one is marked "seen again". Inbound text is information: the
 sync files it; it never acts on it.
 """
 import datetime as dt
@@ -100,6 +101,16 @@ def reconcile(todo, backend, me, inbox_name, mirror_name, side=None, inbox=_DEFA
         lines = todo.QUEUE.read_text().splitlines()
         h = todo.heads(lines)
         if section not in h:
+            continue
+        kq = getattr(todo, "kq", None)
+        match = (kq.find_duplicate(lines, section, title, todo.threshold())
+                 if kq and hasattr(kq, "find_duplicate") and hasattr(todo, "threshold") else None)
+        if match:   # already on the list: note it there instead of adding it twice
+            it, score, how = match
+            todo.save(kq.note_seen_again(lines, it, todo.TODAY, "from phone"))
+            kq.log_dup(todo.KIT, f"phone item merged into {section} {it['n']} ({how}, {score:.2f}): "
+                                 f"{title!r} -> {it['title']!r}")
+            changed.append(f"already on the list for {section}: {it['title']}")
             continue
         found = todo.items(lines, section)
         at = found[-1][1] if found else h[section] + 1

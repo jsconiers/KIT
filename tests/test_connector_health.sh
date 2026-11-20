@@ -44,6 +44,7 @@ check() {  # check <date> [extra args]  -> prints the brief line
     --date "$d" --kit "$KIT" "$@" 2>>"$S/err.txt"
 }
 items() { grep -c 'Fix connector wiki' "$Q"; }
+closeall() { sed -i.bak 's/^- \[ \] \*\*Fix connector wiki/- [x] **Fix connector wiki/' "$Q" && rm -f "$Q.bak"; }  # the owner checks them off
 banner() { python3 - "$HERE" <<'PY'
 import sys, importlib.util
 spec = importlib.util.spec_from_file_location("dash", sys.argv[1] + "/shared/dashboard.py")
@@ -88,17 +89,21 @@ out=$(FAKE_WIKI=pass check 2026-10-23)
 ! grep -q wiki "$AL" && [ -z "$(banner)" ] && ok "recovery: alert and banner cleared" || bad "alert not cleared: $(cat "$AL")"
 grep -q '  Recovered 23-Oct-2026: the connector check passed again' "$Q" && grep -q '^- \[ \] \*\*Fix connector wiki.*updated 23-Oct-2026' "$Q" \
   && ok "recovery: queue item noted and stamped, left for the owner to check off" || bad "recovery note"
-# a new outage later gets its own item
+# a new outage while the recovered item is still open goes on that item (seen again), not a second item
 check 2026-10-26 >/dev/null; check 2026-10-27 >/dev/null
-grep -q 'Fix connector wiki, failing since 26-Oct-2026' "$Q" && [ "$(items)" = "2" ] && ok "a later outage gets a new item" || bad "second outage"
+! grep -q 'failing since 26-Oct-2026' "$Q" && [ "$(items)" = "1" ] && grep -q 'seen again 27-Oct-2026' "$Q" \
+  && grep -q '  Last check 27-Oct-2026' "$Q" && ok "a later outage, item still open: noted on it, no duplicate" || bad "second outage"
 FAKE_WIKI=pass check 2026-10-28 >/dev/null
+grep -q '  Recovered 28-Oct-2026' "$Q" && ok "its recovery is noted on the same item" || bad "second recovery note"
+closeall
 
 # ---- streak setting, not-checked mornings, no-track, robustness -------------------------------
 check 2026-11-02 --streak 3 >/dev/null; check 2026-11-03 --streak 3 >/dev/null
-[ "$(items)" = "2" ] && ok "CONNECTOR_FAIL_STREAK=3: two fails aren't enough" || bad "streak 3 raised early"
+[ "$(items)" = "1" ] && ok "CONNECTOR_FAIL_STREAK=3: two fails aren't enough" || bad "streak 3 raised early"
 check 2026-11-04 --streak 3 >/dev/null
-[ "$(items)" = "3" ] && ok "CONNECTOR_FAIL_STREAK=3: the third fail raises it" || bad "streak 3 not raised"
+[ "$(items)" = "2" ] && ok "CONNECTOR_FAIL_STREAK=3: the third fail raises it (a new item once the old is checked off)" || bad "streak 3 not raised"
 FAKE_WIKI=pass check 2026-11-05 >/dev/null
+closeall
 n=$(wc -l < "$HI"); python3 "$HERE/shared/morning/connector_health.py" --kit-connect "$S/missing" --out "$B/connectors.txt" --kit "$KIT" >/dev/null
 [ "$(wc -l < "$HI")" = "$n" ] && ok "a 'not checked' morning records nothing" || bad "not-checked recorded"
 rm -f "$HI"; check 2026-11-06 --no-track >/dev/null

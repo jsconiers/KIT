@@ -156,7 +156,8 @@ def first_id(page):
 
 code, _, page = req("GET", "/", headers={"Cookie": COOKIE})
 ok(code == 200 and '<details class="kwiz" id="kwiz" open>' in page, "on a new install the wizard is open", page[:1500])
-ok(page.find('id="kwiz"') < page.find('id="kset"'), "and comes first, before the settings table")
+ok(0 <= page.find('id="kwiz"') < page.find('id="p-delivery"') and 'data-first="setup"' in page,
+   "and comes first: its section opens before the settings groups")
 ok("style=" not in page.split("<body>", 1)[1], "no inline style attributes (the page's CSP blocks them)")
 left = len(sq.questions(KIT))
 ok(f'<span id="kwiz-left">{left}</span> not set' in page, "it shows how many are not set", left)

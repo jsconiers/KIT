@@ -16,6 +16,15 @@ A small HTTP server (Python's http.server, standard library only) that runs only
 
 It handles one request at a time, so two edits can't interleave.
 
+The page itself (kit_settings_page) groups the settings by kit_settings.GROUPS with a section list, search, and
+filters. Edits are held on the page and checked as you type (/api/preview), then saved together: /api/batch/preview
+shows every change's diff, and /api/batch/apply, after re-checking all of them (any refusal saves nothing), takes a
+configuration snapshot (kit_config) and writes each one through kit_settings.apply_edit. A single /api/apply (the
+wizard's) takes a snapshot first too. The Snapshots section lists kit-config snapshots: compare one with now, take
+one, or restore one (/api/snapshots/restore-preview first, then /api/snapshots/restore with confirm; never Kit's
+permission rules, which only kit-config restore --include-permissions puts back). Every POST goes through the same
+session, Origin, CSRF, JSON, and size checks.
+
 The Review loop section runs kit-review-loop from the page, in one click: pick a project in the library and a
 draft, press Start, then confirm the paid runs (the page shows how many and about what they'll cost). It starts
 `kit-review-loop run PROJECT DRAFT --yes` in the background (one at a time; its output goes to
@@ -45,11 +54,14 @@ import sys
 import time
 import urllib.parse
 
+import kit_config as kcfg
 import kit_settings as ks
+import kit_settings_page as kp
 import kit_setupq as sq
 
 e = html.escape
 MAX_BODY = 64 * 1024
+MAX_BATCH = 50
 
 
 class State:
@@ -241,37 +253,6 @@ def merge_review(st, project):
     return r.returncode == 0, out, link
 
 
-PAGE_JS = """
-(function(){var csrf=document.querySelector('meta[name=kit-csrf]').content;
-function post(path,body){return fetch(path,{method:'POST',credentials:'same-origin',
-headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(body||{})})
-.then(function(r){return r.json().then(function(j){j.status=r.status;return j;});});}
-function msg(box,text,bad){var p=document.createElement('div');p.className='kmsg'+(bad?' bad':'');p.textContent=text;box.appendChild(p);}
-document.addEventListener('click',function(ev){var b=ev.target.closest('button[data-act]');if(!b)return;
-var act=b.getAttribute('data-act');
-if(act.indexOf('rv-')===0){review(b,act);return;}
-if(act.indexOf('sq-')===0){setupq(b,act);return;}
-if(act==='stop'){post('/api/stop').then(function(){document.body.innerHTML='<p>Stopped. You can close this tab.</p>';});return;}
-var ed=b.closest('td').querySelector('.kedit'),box=b.closest('td').querySelector('.kpreview');
-var body={id:ed.getAttribute('data-id'),value:ed.querySelector('.kin').value,expect:ed.getAttribute('data-expect')};
-if(act==='preview'){box.textContent='';post('/api/preview',body).then(function(j){
-if(!j.ok){msg(box,j.error||'Refused',true);return;}
-var pre=document.createElement('pre');pre.className='kdiff';pre.textContent=j.diff;box.appendChild(pre);
-msg(box,'Writes '+j.source+', backs it up first, and commits it where the file is in Kit\\'s history.');
-var c=document.createElement('button');c.type='button';c.textContent='Confirm and save';c.setAttribute('data-act','apply');
-box.appendChild(c);var x=document.createElement('button');x.type='button';x.textContent='Cancel';
-x.addEventListener('click',function(){box.textContent='';});box.appendChild(x);});}
-if(act==='apply'){post('/api/apply',body).then(function(j){box.textContent='';
-if(!j.ok){msg(box,j.error||'Refused',true);return;}msg(box,j.message);
-setTimeout(function(){location.reload();},1800);});}
-});})();
-"""
-
-REVIEW_CSS = (".krev{margin-top:2rem}.krev h2{font-size:1.3rem}.kreview{border-collapse:collapse;width:100%}"
-              ".kreview th,.kreview td{text-align:left;vertical-align:top;padding:.4rem .5rem;border-top:1px solid #C9D0D6}"
-              ".kscore{font-weight:600}.kscore.ok{color:#2E7D4F}.kscore.warn{color:#B7791F}.kscore.bad{color:#C1121F}"
-              ".klinks a{margin-right:.6rem}.kjob{background:#EEF2F5;padding:.5rem .8rem;margin:.6rem 0}")
-
 REVIEW_JS = """
 function review(b,act){var csrf=document.querySelector('meta[name=kit-csrf]').content;
 function post(path,body){return fetch(path,{method:'POST',credentials:'same-origin',
@@ -291,10 +272,6 @@ if(act==='rv-go'){post('/api/review/start',{project:proj,draft:draft,only:only})
 if(j.ok){setTimeout(function(){location.reload();},1500);}});}}
 """
 
-
-SETUP_CSS = (".kwiz{background:#EEF2F5;padding:.6rem 1rem;margin:1rem 0}.kwiz summary{font-weight:600;cursor:pointer}"
-             ".kwiz .kq{font-size:1.1rem;margin:.4rem 0}.kwiz .kin{width:100%;max-width:46rem;padding:.3rem}"
-             ".kwiz .kbar{width:100%;max-width:46rem}.kwiz button{margin:.4rem .4rem 0 0}.kprio{color:#B7791F;font-weight:600}")
 
 SETUP_JS = """
 function setupq(b,act){var csrf=document.querySelector('meta[name=kit-csrf]').content;
@@ -358,26 +335,26 @@ def setup_section(st, items):
     return (f'<details class="kwiz" id="kwiz"{" open" if is_open else ""}>{head}{bar}{body}</details>')
 
 
+def take_snapshot(state, note):
+    """(snapshot id or None, warning or ""): a configuration snapshot before a save. A failed snapshot doesn't
+    stop the save (the file's own backup is still taken); the message says so."""
+    try:
+        return kcfg.snapshot(state.kit, note=note)["id"], ""
+    except (OSError, ValueError, kcfg.Error) as ex:
+        print(f"kit-settings ui: snapshot failed: {ex}", file=sys.stderr)
+        return None, f"(No configuration snapshot was taken: {ex}. The file's own backup was.)"
+
+
 def page(state):
     items = ks.collect(state.kit)
-    c = ks.counts(items)
     wizard = setup_section(state, items)
     nonce = secrets.token_urlsafe(16)
-    body = (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
-            f'<meta name="viewport" content="width=device-width, initial-scale=1">'
-            f'<meta name="kit-csrf" content="{e(state.csrf)}"><title>Kit settings</title>'
-            f'<style nonce="{nonce}">body{{font:15px/1.45 system-ui,"Segoe UI",Arial,sans-serif;margin:1.2rem 2rem;'
-            f'color:#15202B}}header{{display:flex;gap:1rem;align-items:baseline;flex-wrap:wrap}}'
-            f'h1{{margin:0;font-size:1.6rem}}.note{{color:#566573}}{ks.CSS}{REVIEW_CSS}{SETUP_CSS}</style></head><body>'
-            f'<header><h1>Kit settings</h1><span class="note">{len(items)} settings, {c["not set"]} not set. '
-            f'Only this computer can reach this page; it stops after {_span(state.idle)} idle.</span>'
-            f'<button type="button" data-act="stop">Stop</button></header>'
-            f'{wizard}'
-            f'<p class="note">Edit a setting, press Preview to see the change, then Confirm. Read-only settings say how '
-            f'to change them. Credentials show by name only.</p>'
-            f'<div class="kset" id="kset">{ks.render_table(items, editing=True)}</div>'
-            f'{review_section(state)}'
-            f'<script nonce="{nonce}">{ks.FILTER_JS}{REVIEW_JS}{SETUP_JS}{PAGE_JS}</script></body></html>')
+    try:
+        snaps = kcfg.listing(state.kit)
+    except (OSError, ValueError, kcfg.Error):
+        snaps = []
+    body = kp.render(items, wizard, review_section(state), snaps, state.csrf, nonce, _span(state.idle),
+                     extra_js=REVIEW_JS + SETUP_JS)
     return body, nonce
 
 
@@ -522,6 +499,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._review_api(path, body)
         if path == "/api/setup/mark":
             return self._setup_mark(body)
+        if path.startswith("/api/batch/"):
+            return self._batch(path, body)
+        if path.startswith("/api/snapshots/"):
+            return self._snapshots(path, body)
         if path not in ("/api/preview", "/api/apply"):
             return self._json(404, {"ok": False, "error": "not found"})
         sid, value, expect = body.get("id"), body.get("value"), body.get("expect")
@@ -531,8 +512,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if path == "/api/preview":
                 s, p, _, _, v, diff = ks.plan_edit(self.st.kit, sid, value, expect, self.st.platform)
                 return self._json(200, {"ok": True, "diff": diff, "source": s["source"], "value": v})
+            ks.plan_edit(self.st.kit, sid, value, expect, self.st.platform)     # refuse before taking a snapshot
+            snap, warn = take_snapshot(self.st, "before a save in the settings page")
             res = ks.apply_edit(self.st.kit, sid, value, expect, self.st.platform,
                                 rebuild=getattr(self.server, "rebuild", True))
+            res["snapshot"] = snap
+            if warn:
+                res["message"] += " " + warn
             return self._json(200, res)
         except ks.Refused as ex:
             return self._json(403, {"ok": False, "error": str(ex)})
@@ -540,6 +526,121 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._json(400, {"ok": False, "error": str(ex)})
         except OSError as ex:
             return self._json(500, {"ok": False, "error": f"couldn't write: {ex}"})
+
+    def _changes(self, body):
+        """The batch's changes as [(id, value, expect)], or raise ValueError with why."""
+        ch = body.get("changes")
+        if not isinstance(ch, list) or not ch:
+            raise ValueError("send at least one change")
+        if len(ch) > MAX_BATCH:
+            raise ValueError(f"at most {MAX_BATCH} changes at once")
+        out, seen = [], set()
+        for c in ch:
+            if not isinstance(c, dict):
+                raise ValueError("each change must be an object")
+            sid, value, expect = c.get("id"), c.get("value"), c.get("expect")
+            if not isinstance(sid, str) or not isinstance(value, str) or (expect is not None and not isinstance(expect, str)):
+                raise ValueError("each change needs an id and a value as text")
+            if sid in seen:
+                raise ValueError("a setting is in the batch twice")
+            seen.add(sid)
+            out.append((sid, value, expect))
+        return out
+
+    def _plan_batch(self, changes):
+        """[{id, label, source, ok, diff or error}] and whether all passed."""
+        items = {s["id"]: s for s in ks.collect(self.st.kit)}
+        out, good = [], True
+        for sid, value, expect in changes:
+            s = items.get(sid)
+            label = (s["label"] if s else sid)
+            try:
+                s2, _, _, _, v, diff = ks.plan_edit(self.st.kit, sid, value, expect, self.st.platform)
+                out.append({"id": sid, "label": label, "source": s2["source"], "ok": True, "diff": diff, "value": v})
+            except (ks.Refused, ks.Invalid) as ex:
+                good = False
+                out.append({"id": sid, "label": label, "source": s["source"] if s else "", "ok": False, "error": str(ex)})
+        return out, good
+
+    def _batch(self, path, body):
+        try:
+            changes = self._changes(body)
+        except ValueError as ex:
+            return self._json(400, {"ok": False, "error": str(ex)})
+        try:
+            plan, good = self._plan_batch(changes)
+        except OSError as ex:
+            return self._json(500, {"ok": False, "error": f"couldn't read: {ex}"})
+        files = sorted({p["source"] for p in plan if p["ok"]})
+        if path == "/api/batch/preview":
+            msg = (f"Saving writes {len(files)} file(s) ({', '.join(files)}), backs each up, takes a configuration "
+                   "snapshot first, and commits where the file is in Kit's history." if good else
+                   "Fix the changes marked above first; nothing has been saved.")
+            return self._json(200, {"ok": good, "items": plan, "message": msg})
+        if path != "/api/batch/apply":
+            return self._json(404, {"ok": False, "error": "not found"})
+        if not good:
+            return self._json(400, {"ok": False, "error": "nothing was saved: some changes aren't allowed",
+                                    "results": [{"label": p["label"], "ok": p["ok"], "error": p.get("error", "")}
+                                                for p in plan if not p["ok"]]})
+        snap, warn = take_snapshot(self.st, f"before saving {len(changes)} change(s) in the settings page")
+        results, saved = [], 0
+        labels = {p["id"]: p["label"] for p in plan}
+        for sid, value, expect in changes:
+            try:
+                ks.apply_edit(self.st.kit, sid, value, expect, self.st.platform, rebuild=False)
+                results.append({"label": labels.get(sid, sid), "ok": True})
+                saved += 1
+            except (ks.Refused, ks.Invalid, OSError) as ex:
+                results.append({"label": labels.get(sid, sid), "ok": False, "error": str(ex)})
+        if saved and getattr(self.server, "rebuild", True):
+            ks.rebuild_dashboard(self.st.kit)
+        undo = f" To undo: Snapshots, then restore {snap}." if snap else ""
+        if saved == len(changes):
+            return self._json(200, {"ok": True, "results": results, "snapshot": snap,
+                                    "message": f"Saved {saved} change(s).{undo} {warn}".strip()})
+        return self._json(409, {"ok": False, "results": results, "snapshot": snap,
+                                "error": f"Saved {saved} of {len(changes)}; the rest were refused.{undo} {warn}".strip()})
+
+    def _snapshots(self, path, body):
+        sid = body.get("id", "")
+        if not isinstance(sid, str):
+            return self._json(400, {"ok": False, "error": "id must be text"})
+        try:
+            if path == "/api/snapshots/take":
+                note = body.get("note", "")
+                if not isinstance(note, str):
+                    return self._json(400, {"ok": False, "error": "note must be text"})
+                r = kcfg.snapshot(self.st.kit, note=note or "taken from the settings page")
+                ks.log_edit(self.st.kit, {"source": kcfg.SNAP_REL, "name": "snapshot", "section": "", "secret": False},
+                            "", r["id"], "taken" if r["new"] else "unchanged")
+                return self._json(200, {"ok": True, "id": r["id"], "new": r["new"],
+                                        "message": f"Snapshot {r['id']} taken." if r["new"] else
+                                        f"Nothing changed since snapshot {r['id']}; kept that one."})
+            kcfg.check_id(self.st.kit, sid)
+            if path == "/api/snapshots/diff":
+                return self._json(200, {"ok": True, "diff": kcfg.diff(self.st.kit, sid, "current")})
+            if path == "/api/snapshots/restore-preview":
+                plan = kcfg.plan_restore(self.st.kit, sid)
+                n = len(plan["changes"])
+                return self._json(200, {"ok": True, "diff": plan["diff"], "changes": n,
+                                        "message": (f"{n} file(s) would change. A snapshot of the current state is "
+                                                    "taken first, so this can be undone." if n else
+                                                    "The configuration already matches this snapshot.")})
+            if path == "/api/snapshots/restore":
+                if body.get("confirm") is not True:
+                    return self._json(400, {"ok": False, "error": "confirm the restore"})
+                r = kcfg.restore(self.st.kit, sid)
+                ks.log_edit(self.st.kit, {"source": kcfg.SNAP_REL, "name": "restore", "section": "", "secret": False},
+                            r.get("before") or "", sid, ", ".join(r["written"]) or "nothing to restore")
+                if r["written"] and getattr(self.server, "rebuild", True):
+                    ks.rebuild_dashboard(self.st.kit)
+                return self._json(200, r)
+        except kcfg.Error as ex:
+            return self._json(400, {"ok": False, "error": str(ex)})
+        except (OSError, ValueError) as ex:
+            return self._json(500, {"ok": False, "error": f"couldn't read or write the snapshot: {ex}"})
+        return self._json(404, {"ok": False, "error": "not found"})
 
     def _setup_mark(self, body):
         qid, how = body.get("id", ""), body.get("how", "")

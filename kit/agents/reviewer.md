@@ -90,6 +90,13 @@ through Kit.
    - **Fact sheet.** If the project has a `facts.md`, run
      `python3 ~/Claude/Agents/kit/.install/shared/bin/kit-facts check <project> "<file>"`. Every
      CONFLICT or STALE line is a finding: the draft disagrees with a figure the project agreed.
+   - **Acronyms.** Run `python3 ~/Claude/Agents/kit/.install/shared/bin/kit-acronyms check <project> "<file>"`.
+     An acronym never spelled out, or spelled out after its first use, is a minor finding with its proposed
+     meaning and source as the fix; one with no known meaning is a question for the owner, never a guess.
+   - **Page budget.** If the project's `facts.md` sets page budgets (rows with the unit `pages`), run
+     `python3 ~/Claude/Agents/kit/.install/shared/bin/kit-pages check <project> "<file>"`. A document over its
+     budget is a should-fix finding, with its largest sections as the places to cut. Word's count is as of
+     the last save, so say so.
 6. **Earlier versions.** If the project's `reviews/` folder holds an earlier review of this
    document, or the project's folder holds an earlier version, compare: mark each earlier finding
    fixed, partly fixed, or open, and flag new text that wasn't reviewed before.

@@ -17,12 +17,25 @@ reassignments, other updates (the updated time moved: a comment or work note), a
 it's cut to one short line, with email addresses masked, before it goes into the brief, and the short text gets
 numbers and counts only. The first check sets the baseline and lists what's open.
 
-Input: a JSON array of objects with number, title, state, priority, assigned_to, updated, and url (others are
-ignored), or an object holding such an array under "tickets", "result", or "records". KIT_DIR overrides the Kit
+Routing (the "Routing" lines at the end of the section, each with a suggested next step drafted as text; Kit never
+sends it and never changes a ticket):
+  - unassigned: an open ticket with no one assigned for more than TICKET_UNASSIGNED_DAYS days (default 3), counted
+    from its opened date, else from when the watcher first saw it unassigned
+  - bounced: an open ticket whose assignment group (or, without one, its assignee) changed TICKET_BOUNCE_MOVES
+    times or more (default 2) in the history the watcher keeps day to day
+  - misrouted: an open ticket whose title matches a rule in the owner's routing map but whose assignment group
+    isn't the one the rule expects. The map is TICKET_ROUTING_FILE (default memory/context/ticket-routing.md, else
+    .json); a Markdown line "- SQL Server, MSSQL -> Database - SQL Server" or "- /postgres(ql)?/ -> Database -
+    PostgreSQL" is one rule (see kit/templates/ticket-routing.md). No map, no misrouting check.
+  kit-tickets routing [--json]   the routing findings as of the last check, without a new one
+
+Input: a JSON array of objects with number, title, state, priority, assigned_to, assignment_group, opened,
+updated, and url (others are ignored), or an object holding such an array under "tickets", "result", or "records". KIT_DIR overrides the Kit
 folder (for tests).
 """
 import argparse
 import json
+import os
 import pathlib
 import re
 import sys
@@ -32,7 +45,8 @@ import kit_daily as kd  # noqa: E402
 
 TODAY_FILE = kd.KIT / "briefs/tickets-today.json"
 SNAP = kd.KIT / ".install/cache/tickets-snapshot.json"
-FIELDS = ("number", "title", "state", "priority", "assigned_to", "updated", "url")
+FIELDS = ("number", "title", "state", "priority", "assigned_to", "assignment_group", "opened", "updated", "url")
+NOBODY = re.compile(r"^(|-|none|nobody|unassigned|\(empty\)|null)$", re.I)
 CLOSED = re.compile(r"^(closed|resolved|cancel+ed|complete[d]?|done)\b", re.I)
 SHOWN = 12
 MAX_TICKETS = 500
@@ -59,7 +73,8 @@ def normalise(data):
         if not isinstance(t, dict):
             continue
         alias = {"short_description": "title", "assigned": "assigned_to", "assignee": "assigned_to",
-                 "sys_updated_on": "updated", "updated_on": "updated", "link": "url"}
+                 "sys_updated_on": "updated", "updated_on": "updated", "link": "url", "group": "assignment_group",
+                 "sys_created_on": "opened", "opened_at": "opened", "created": "opened", "created_on": "opened"}
         t = {alias.get(k, k): v for k, v in t.items()}
         num = one_line(t.get("number"), 40)
         if not re.fullmatch(r"[A-Za-z0-9_.-]{2,40}", num):
@@ -79,9 +94,187 @@ def load_snapshot():
         return None, None
 
 
-def save_snapshot(tickets):
+def load_history():
+    try:
+        h = json.loads(SNAP.read_text(encoding="utf-8-sig")).get("history")
+        return h if isinstance(h, dict) else {}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def save_snapshot(tickets, history=None):
     SNAP.parent.mkdir(parents=True, exist_ok=True)
-    kd.write(SNAP, json.dumps({"checked": kd.now().isoformat(timespec="minutes"), "tickets": tickets}, indent=1) + "\n")
+    data = {"checked": kd.now().isoformat(timespec="minutes"), "tickets": tickets}
+    if history is not None:
+        data["history"] = history
+    kd.write(SNAP, json.dumps(data, indent=1) + "\n")
+
+
+# ---------------------------------------------------------------- routing
+
+def config_value(key, default=""):
+    v = os.environ.get(key)
+    if v is None:
+        m = re.search(r"^" + re.escape(key) + r'="?([^"\n]*)"?', kd.read(kd.CONFIG), re.M)
+        v = m.group(1) if m else ""
+    return v.strip() or default
+
+
+def config_int(key, default):
+    try:
+        return max(int(config_value(key, str(default))), 0)
+    except ValueError:
+        return default
+
+
+def unassigned(t):
+    return bool(NOBODY.match((t.get("assigned_to") or "").strip()))
+
+
+def owner_of(t):
+    """Where a ticket sits: its assignment group, else its assignee."""
+    return (t.get("assignment_group") or "").strip() or (t.get("assigned_to") or "").strip()
+
+
+def update_history(history, old, new, today):
+    """Per open ticket: first_seen, unassigned_since, the groups (or assignees) it has moved through (the last ten),
+    and moves, the number of changes seen."""
+    out = {}
+    for n, t in new.items():
+        if not is_open(t):
+            continue
+        h = dict(history.get(n) or {})
+        h.setdefault("first_seen", today.isoformat())
+        if unassigned(t):
+            h.setdefault("unassigned_since", today.isoformat())
+        else:
+            h.pop("unassigned_since", None)
+        groups = [g for g in (h.get("groups") or []) if isinstance(g, str)]
+        if not groups and old.get(n) and owner_of(old[n]):
+            groups = [owner_of(old[n])]          # history starts with yesterday's snapshot
+        cur = owner_of(t)
+        moves = int(h.get("moves") or 0)
+        if cur and groups and groups[-1].lower() != cur.lower():
+            moves += 1
+        if cur and (not groups or groups[-1].lower() != cur.lower()):
+            groups.append(cur)
+        h["groups"], h["moves"] = groups[-10:], moves
+        out[n] = h
+    return out
+
+
+def routing_path():
+    p = config_value("TICKET_ROUTING_FILE", "")
+    if p:
+        path = pathlib.Path(os.path.expanduser(p))
+        return path if path.is_absolute() else kd.KIT / path
+    md = kd.CONTEXT / "ticket-routing.md"
+    return md if md.exists() else kd.CONTEXT / "ticket-routing.json"
+
+
+def load_rules(path=None):
+    """[(label, regex, group)] from the routing map; [] when there's none. Markdown: one "- A, B -> Group" line per
+    rule (a /regex/ pattern, else the words matched whole, in any case); JSON: [{"match": [...], "group": "..."}] or
+    {"rules": [...]}."""
+    path = pathlib.Path(path) if path else routing_path()
+    text = kd.read(path)
+    rules = []
+
+    def add(pats, group):
+        group = " ".join(str(group or "").split())[:80]
+        if not group:
+            return
+        for pat in pats:
+            pat = str(pat).strip().strip("`").strip()
+            if not pat:
+                continue
+            try:
+                rx = (re.compile(pat[1:-1], re.I) if len(pat) > 2 and pat[0] == "/" and pat[-1] == "/"
+                      else re.compile(r"(?<!\w)" + re.escape(pat) + r"(?!\w)", re.I))
+            except re.error:
+                continue
+            rules.append((pat, rx, group))
+
+    if path.suffix.lower() == ".json":
+        try:
+            data = json.loads(text or "[]")
+        except ValueError:
+            return []
+        for r in (data.get("rules") if isinstance(data, dict) else data) or []:
+            if isinstance(r, dict):
+                m = r.get("match") or r.get("patterns") or []
+                add([m] if isinstance(m, str) else m, r.get("group") or r.get("expect"))
+        return rules
+    body = text.splitlines()
+    heads = [i for i, ln in enumerate(body) if re.match(r"^##\s+Rules\s*$", ln, re.I)]
+    if heads:   # with a "## Rules" heading, only the lines under it are rules
+        start = heads[0] + 1
+        end = next((i for i in range(start, len(body)) if body[i].startswith("## ")), len(body))
+        body = body[start:end]
+    for line in body:
+        m = re.match(r"^\s*[-*]\s+(?!\*\*)(.+?)\s*(?:->|→)\s*(.+?)\s*$", line)
+        if m:
+            add(re.split(r"\s*,\s*", m.group(1)) if "/" not in m.group(1) else [m.group(1)], m.group(2))
+    return rules
+
+
+def age_days(t, h, today):
+    for v in (t.get("opened"), (h or {}).get("unassigned_since"), (h or {}).get("first_seen")):
+        d = kd.parse_date(v or "")
+        if d:
+            return (today - d).days
+    return 0
+
+
+def routing(new, history, rules, today, days, moves):
+    """[{kind, number, title, detail, action}] for open tickets: unassigned, then misrouted, then bounced."""
+    out = []
+    for n, t in sorted(new.items()):
+        if not is_open(t):
+            continue
+        h = history.get(n) or {}
+        hit = next(((lab, g) for lab, rx, g in rules if rx.search(t.get("title") or "")), None)
+        group = (t.get("assignment_group") or "").strip()
+        age = age_days(t, h, today)
+        idle = unassigned(t) and age > days
+        wrong = bool(hit and group and hit[1].lower() not in group.lower() and group.lower() not in hit[1].lower())
+        if wrong:   # one finding per ticket: misrouted says how long it has sat unassigned, too
+            out.append({"kind": "misrouted", "number": n, "title": t.get("title") or "",
+                        "detail": f"with {group}, but '{hit[0]}' tickets go to {hit[1]} (your routing map)"
+                                  + (f"; no one assigned for {age} days" if idle else ""),
+                        "action": f"Ask {group} to reassign {n} to {hit[1]}, quoting what the request is for."})
+        elif idle:
+            out.append({"kind": "unassigned", "number": n, "title": t.get("title") or "",
+                        "detail": f"no one assigned for {age} days ({group or 'no group'})"
+                                  + (f"; it looks like one for {hit[1]}" if hit and not group else ""),
+                        "action": f"Ask the {group + ' ' if group else 'service desk '}queue manager to assign {n}"
+                                  + (f", or to route it to {hit[1]}" if hit and not group else "") + "."})
+        if moves > 0 and int(h.get("moves") or 0) >= moves:
+            path = " -> ".join(kd.clip(g, 40) for g in (h.get("groups") or [])[-4:])
+            out.append({"kind": "bounced", "number": n, "title": t.get("title") or "",
+                        "detail": f"moved {h['moves']} times ({path})",
+                        "action": f"Ask the current group to keep {n}, or its manager to settle where it belongs."})
+    order = {"unassigned": 0, "misrouted": 1, "bounced": 2}
+    out.sort(key=lambda r: (order[r["kind"]], r["number"]))
+    return out
+
+
+def routing_lines(found):
+    if not found:
+        return []
+    lines = ["Routing"]
+    for r in found[:SHOWN]:
+        lines.append(f"[work] {r['number']} {r['kind']}: {r['detail']}. {kd.clip(r['title'], 70)}")
+        lines.append(f"[work]   Suggested next step (a draft; nothing is sent): {r['action']}")
+    if len(found) > SHOWN:
+        lines.append(f"[work] and {len(found) - SHOWN} more (kit-tickets routing)")
+    return lines
+
+
+def find_routing(tickets, history):
+    today = kd.now().date()
+    return routing(tickets, history, load_rules(), today,
+                   config_int("TICKET_UNASSIGNED_DAYS", 3), config_int("TICKET_BOUNCE_MOVES", 2))
 
 
 def is_open(t):
@@ -153,12 +346,33 @@ def cmd_diff(a):
         return 1
     old, _ = load_snapshot()
     lines, counts = section(old or {}, new, old is None)
+    history = update_history(load_history(), old or {}, new, kd.now().date())
+    found = find_routing(new, history)
+    if found:
+        texts = [ln for ln in lines if ln.startswith("Text:")]
+        lines = [ln for ln in lines if not ln.startswith("Text:")] + routing_lines(found)
+        nums = list(dict.fromkeys(r["number"] for r in found))
+        lines += [t + f"; routing: {len(found)} ({', '.join(nums[:4])})" for t in texts]
+    counts["routing"] = {k: sum(1 for r in found if r["kind"] == k) for k in ("unassigned", "misrouted", "bounced")}
     if a.json:
-        print(json.dumps({"lines": lines, **counts}, indent=2))
+        print(json.dumps({"lines": lines, **counts, "routing_findings": found}, indent=2))
     else:
         print("\n".join(lines))
     if not a.no_save:
-        save_snapshot(new)
+        save_snapshot(new, history)
+    return 0
+
+
+def cmd_routing(a):
+    tickets, checked = load_snapshot()
+    if tickets is None:
+        print("kit-tickets: no check yet (TICKET_WATCH in the config turns on the morning check)")
+        return 0
+    found = find_routing(tickets, load_history())
+    if a.json:
+        print(json.dumps({"checked": checked, "routing": found}, indent=2))
+    else:
+        print("\n".join(routing_lines(found)) or f"kit-tickets: no routing problems as of {checked}")
     return 0
 
 
@@ -186,8 +400,10 @@ def main(argv):
     d.add_argument("--json", action="store_true")
     s = sub.add_parser("show")
     s.add_argument("--json", action="store_true")
+    r = sub.add_parser("routing")
+    r.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
-    return {"diff": cmd_diff, "show": cmd_show}[a.cmd](a)
+    return {"diff": cmd_diff, "show": cmd_show, "routing": cmd_routing}[a.cmd](a)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+"""kit-pages: the page-budget check. Is each version of a document inside the page count agreed for it?
+
+  kit-pages check PROJECT [DOC ...] [--max N] [--render] [--json] [--write]
+                              every .docx and .pdf in the project's drafts/ (or the DOCs named: files in the project
+                              or its drafts/ folder, or paths), each against its budget: pages, budget, over or
+                              within, and for one over budget its largest sections by word count, the places to cut
+  kit-pages budgets PROJECT [--json]
+                              the page budgets the project's facts.md sets
+  kit-pages count FILE ... [--max N] [--render] [--json]
+                              page counts for any files, outside a project
+
+PROJECT is a folder under <library root>/artifacts/ (the library root in memory/context/library.md), or a path to
+one. Budgets are rows in the project's facts.md with the unit "pages" (kit-facts keeps the sheet):
+
+  kit-facts set PROJECT "Pages executive" 4 --unit pages --alias "*-executive*" --by Owner --write
+
+The aliases are file-name patterns; with none, the key's words (without "pages") must all be in the file name.
+--max N sets one budget for every document instead.
+
+Page counts: a PDF's from pdfinfo or qpdf when installed, else from the file's page tree. A .docx's is the count
+Word stored at its last save (docProps/app.xml), so save in Word before checking; --render counts a PDF made with
+LibreOffice instead, only when LibreOffice is already installed. Nothing is installed, Word is never driven, and
+no document is changed. --write saves the report in the project's reviews/ folder.
+
+kit-review-loop score takes 5 points off for each draft over its budget. Exit status: 0 all within (or no budget),
+1 any document over budget, 2 a usage problem. Work content.
+"""
+import argparse
+import json
+import pathlib
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import kit_daily as kd  # noqa: E402
+import kit_doctext as dtx  # noqa: E402
+import kit_pages as kp  # noqa: E402
+
+PROG = "kit-pages"
+
+
+def render_report(title, rows):
+    lines = [f"# Page budget: {title}", "", f"Checked {kd.today().strftime('%d-%b-%Y')}. Word's count is as of the "
+             "document's last save; save in Word first, or use --render with LibreOffice.", "",
+             "| Document | Pages | Budget | Status | Counted from |", "|---|---|---|---|---|"]
+    for r in rows:
+        st = {"over": f"OVER by {r['over_by']}", "within": "within", "no budget": "no budget",
+              "unknown": "unknown"}[r["status"]]
+        lines.append(f"| {r['name']} | {r['pages'] if r['pages'] is not None else '?'} | "
+                     f"{r['budget'] if r['budget'] is not None else '-'} | {st} | {r['how']} |")
+    for r in rows:
+        if r["status"] == "over" and r.get("largest_sections"):
+            lines += ["", f"## {r['name']}: {r['pages']} pages, budget {r['budget']} ({r['budget_from']})", "",
+                      "Largest sections, the places to cut first:", ""]
+            lines += [f"- {s['section']}: {s['words']:,} words" for s in r["largest_sections"]]
+    return "\n".join(lines) + "\n"
+
+
+def emit(rows, a, title, project=None):
+    if a.json:
+        print(json.dumps(rows, indent=2))
+    else:
+        text = render_report(title, rows)
+        print(text, end="")
+        if getattr(a, "write", False) and project:
+            print(f"\nSaved: {dtx.save_report(project, title, 'pages', text)}")
+    return 1 if any(r["status"] == "over" for r in rows) else 0
+
+
+def cmd_check(a):
+    project = dtx.project_dir(a.project)
+    docs = [dtx.find_doc(project, d) for d in a.docs] if a.docs else kp.paged_drafts(project)
+    if not docs:
+        raise dtx.Stop(f"no .docx or .pdf in {project / 'drafts'}")
+    if not a.max and not kp.budgets(project):
+        print(f"{PROG}: no page budgets in {project / 'facts.md'} (rows with the unit 'pages'); counting only. "
+              "Add one with kit-facts set PROJECT \"Pages executive\" 4 --unit pages --alias \"*-executive*\" --write",
+              file=sys.stderr)
+    return emit(kp.check(project, docs, a.max, a.render), a, project.name, project)
+
+
+def cmd_budgets(a):
+    project = dtx.project_dir(a.project)
+    bl = kp.budgets(project)
+    if a.json:
+        print(json.dumps([{"key": b.key, "max": b.max, "patterns": b.patterns, "words": b.words} for b in bl], indent=2))
+        return 0
+    if not bl:
+        print(f"No page budgets in {project / 'facts.md'}.")
+        return 0
+    for b in bl:
+        match = ", ".join(b.patterns) if b.patterns else "file names with: " + " ".join(b.words)
+        print(f"  {b.key}: at most {b.max} pages ({match})")
+    return 0
+
+
+def cmd_count(a):
+    files = []
+    for f in a.files:
+        p = pathlib.Path(f).expanduser()
+        if not p.is_file():
+            raise dtx.Stop(f"no file {f}")
+        files.append(p.resolve())
+    return emit(kp.check(None, files, a.max, a.render), a, "files")
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog=PROG, description="Check documents against their page budgets.")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    c = sub.add_parser("check")
+    c.add_argument("project")
+    c.add_argument("docs", nargs="*")
+    c.add_argument("--max", type=int)
+    c.add_argument("--render", action="store_true")
+    c.add_argument("--json", action="store_true")
+    c.add_argument("--write", action="store_true")
+    b = sub.add_parser("budgets")
+    b.add_argument("project")
+    b.add_argument("--json", action="store_true")
+    n = sub.add_parser("count")
+    n.add_argument("files", nargs="+")
+    n.add_argument("--max", type=int)
+    n.add_argument("--render", action="store_true")
+    n.add_argument("--json", action="store_true")
+    a = ap.parse_args(argv)
+    if getattr(a, "max", None) is not None and a.max < 1:
+        print(f"{PROG}: --max must be 1 or more", file=sys.stderr)
+        return 2
+    try:
+        return {"check": cmd_check, "budgets": cmd_budgets, "count": cmd_count}[a.cmd](a)
+    except dtx.Stop as e:
+        print(f"{PROG}: {e}", file=sys.stderr)
+        return e.code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

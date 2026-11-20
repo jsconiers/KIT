@@ -200,13 +200,18 @@ EDITABLE_CONFIG = {
     "DEMAND_REFRESH": ("onoff",), "DEMAND_REGISTER_DIR": ("path",),
     "DEMAND_REFRESH_MAX": ("int", 1, 500), "DEMAND_REFRESH_MIN_LEFT": ("int", 0, 240),
     "REG_WATCH_WHEN": ("choice", ("first-monday", "every-run")), "REG_WATCH_MIN_LEFT": ("int", 0, 240),
-    "BACKUP_KEEP": ("int", 1, 365),
+    "BACKUP_KEEP": ("int", 1, 365), "SNAPSHOT_KEEP": ("int", 1, 500),
     "OUTLOOK_RETRY_WAITS": ("waits",), "OUTLOOK_CHECK": ("onoff",),
+    "OUTLOOK_RECOVER": ("choice", ("off", "notify", "restart")), "OUTLOOK_DEEP_TIMEOUT": ("int", 5, 120),
+    "OUTLOOK_QUIT_WAIT": ("int", 5, 600), "OUTLOOK_RESTART_SETTLE": ("int", 5, 600),
+    "CALENDAR_CACHE": ("onoff",), "CALENDAR_CACHE_DAYS": ("int", 1, 31), "CALENDAR_CACHE_KEEP": ("int", 1, 60),
+    "CALENDAR_CACHE_TIMEOUT": ("int", 5, 600),
     "CONNECTOR_CHECK": ("onoff",), "CONNECTOR_CHECK_TIMEOUT": ("int", 5, 1800), "CONNECTOR_FAIL_STREAK": ("int", 1, 30),
     "COST_BUDGET_MONTHLY": ("float", 0, 100000, True), "COST_WARN_PCT": ("int", 1, 100),
     "COST_STOP_PCT": ("int", 1, 200), "COST_ESSENTIAL_MODES": ("modes",),
     "COST_ALERT_PROJECTION": ("float", 0.1, 5, True), "COST_SPIKE_FACTOR": ("float", 1, 100),
     "DEGRADED_MODE": ("onoff",),
+    "USAGE_LIMIT_MONTHLY_USD": ("float", 0, 100000, True), "USAGE_LIMIT_GUARD": ("onoff",),
     "RUN_TIMEOUT": ("int", 60, 14400, True), "RUN_TIMEOUT_WEEKLY": ("int", 60, 14400, True),
     "RUN_TIMEOUT_WORKLIST": ("int", 60, 14400, True), "RUN_TIMEOUT_EOD": ("int", 30, 14400, True),
     "RUN_LOCK_WAIT": ("int", 0, 14400, True),
@@ -216,6 +221,8 @@ EDITABLE_CONFIG = {
     "REHEARSE_TIMEOUT": ("int", 60, 14400), "PREREAD_TIMEOUT": ("int", 60, 14400),
     "REVIEW_LOOP_TIMEOUT": ("int", 60, 14400), "READINESS_THRESHOLD": ("int", 1, 100),
     "TICKET_MAX": ("int", 1, 100), "TICKET_DAYS": ("int", 1, 60),
+    "TICKET_UNASSIGNED_DAYS": ("int", 0, 90), "TICKET_BOUNCE_MOVES": ("int", 0, 20), "TICKET_ROUTING_FILE": ("path",),
+    "QUEUE_DUP_THRESHOLD": ("float", 0.5, 1, True),
     "MCP_WATCH": ("onoff",), "MCP_WATCH_LONG_HOURS": ("int", 1, 168),
     "ARCH_DIGEST": ("onoff",), "ARCH_DIGEST_WHEN": ("choice", ("first-week", "every-run")),
     "ARCH_DIGEST_TIMEOUT": ("int", 10, 3600),
@@ -229,6 +236,223 @@ EDITABLE_CONFIG = {
     "EXCEPTIONS_WARN_DAYS": ("int", 1, 365),
     "PREFLIGHT_CONNECTORS": ("names",), "CONNECTION_CHECK": ("onoff",), "CONNECTION_WAIT": ("int", 0, 3600),
 }
+
+# ---------------------------------------------------------------------------------------------------------------
+# How the settings page presents each setting: the page's groups, then one line per run config key with its group,
+# a plain-English label, and a line of help (and a default where config.example doesn't give one). The type, and
+# whether the page may change it at all, stays in EDITABLE_CONFIG above (the allowlist); a key listed here but not
+# there shows read-only. A key in neither shows in Advanced under its raw name, so nothing is ever hidden.
+# To add a setting: one line here, and one in EDITABLE_CONFIG if the page may change it.
+
+GROUPS = [
+    ("delivery", "Delivery", "Where the brief, alerts, and texts reach you."),
+    ("briefs", "Briefs & schedule", "What the scheduled runs do, and when."),
+    ("todos", "To-dos & sync", "Which apps your to-dos sync with, and the queue's checks."),
+    ("connectors", "Connectors", "Outlook, PPM Express, ServiceNow, and the checks before each run."),
+    ("budget", "Budget & limits", "What Kit may spend, time limits, and retries."),
+    ("documents", "Documents", "The library, templates, writing, diagrams, and reviews."),
+    ("agents", "Agents & reviews", "What Kit's staff of agents read: standards, compliance, estimating, labs."),
+    ("privacy", "Privacy & retention", "What leaves this computer, backups, and records retention."),
+    ("advanced", "Advanced", "Everything else, including keys the page has no description for."),
+]
+GROUP_IDS = [g for g, _, _ in GROUPS]
+
+# KEY: (group, label, help[, default]).
+META = {
+    "OWNER_NAME": ("delivery", "Your name", "The name Kit uses for you in briefs, drafts, and the queue."),
+    "DELIVERY": ("delivery", "Brief delivery (all items)", "Where the morning brief goes when work and personal go the same way."),
+    "DELIVERY_PERSONAL": ("delivery", "Brief delivery: personal items", "Overrides Brief delivery for personal items."),
+    "DELIVERY_WORK": ("delivery", "Brief delivery: work items", "Overrides Brief delivery for work items; only Microsoft 365 channels."),
+    "DELIVERY_EMAIL_TO": ("delivery", "Email address for drafts", "The address the Outlook draft is addressed to (you)."),
+    "IMESSAGE_TO": ("delivery", "Text messages to", "Your phone number or Apple ID for iMessage texts."),
+    "IMESSAGE_TO_ALT": ("delivery", "Text messages: second address", "Another number or Apple ID Kit may text."),
+    "TEXTBACK": ("delivery", "Text Kit commands", "Lets you text \"kit ...\" to yourself to ask Kit or change its lists."),
+    "TEXTBACK_ASK": ("delivery", "Text Kit questions", "Lets a texted question start a read-only model run."),
+    "TEXTBACK_MAX_PER_HOUR": ("delivery", "Texts answered per hour", "A cap on how many texted commands Kit answers in an hour."),
+    "PHONE_APPROVALS": ("delivery", "Approvals from the phone", "Whether approval codes can arrive from the phone."),
+    "SKIP_DAYS": ("briefs", "Days with no brief", "Weekdays (1 Monday to 7 Sunday) when the morning run doesn't run."),
+    "WRAP_WORKDAYS": ("briefs", "End-of-day wrap days", "Weekdays the end-of-day wrap runs."),
+    "EOD": ("briefs", "End-of-day wrap", "A short wrap of the day at its end."),
+    "EOD_MODEL": ("briefs", "End-of-day wrap uses the model", "Off writes the wrap from Kit's files alone, with no model call."),
+    "WRAP_CALENDAR_SIDE": ("briefs", "Wrap's calendar", "Which calendar the wrap reads."),
+    "WRAP_CALENDAR_CMD": ("briefs", "Wrap's calendar command", "The command the wrap runs to read the calendar."),
+    "CALENDAR_JSON_CMD": ("briefs", "Calendar command", "The command the degraded brief runs to read today's calendar."),
+    "DEGRADED_MODE": ("briefs", "Brief without the model", "When the model can't run, write a shorter brief from Kit's files."),
+    "DEMAND_REFRESH": ("briefs", "Weekly demand refresh", "The weekly review refreshes the demand register from ServiceNow."),
+    "DEMAND_REGISTER_DIR": ("briefs", "Demand register folder", "Where the demand register is kept."),
+    "DEMAND_REFRESH_MAX": ("briefs", "Demands per refresh", "The most demands one refresh reads."),
+    "DEMAND_REFRESH_MIN_LEFT": ("briefs", "Minutes needed for the refresh", "Skip the refresh if less run time than this is left."),
+    "DEMAND_SERVER": ("briefs", "Demand refresh connector", "The connector the demand refresh calls."),
+    "DEMAND_TOOLS": ("briefs", "Demand refresh tools", "The connector tools the demand refresh may call."),
+    "REG_WATCH": ("briefs", "Regulatory watch", "The weekly review's web search for regulatory changes."),
+    "REG_WATCH_WHEN": ("briefs", "Regulatory watch: when", "First Monday of the month, or every weekly review."),
+    "REG_WATCH_MIN_LEFT": ("briefs", "Minutes needed for the watch", "Skip the watch if less run time than this is left."),
+    "ARCH_DIGEST": ("briefs", "Monthly architecture digest", "The first weekly review of the month drafts last month's digest."),
+    "ARCH_DIGEST_WHEN": ("briefs", "Digest: when", "First week of the month, or every run."),
+    "ARCH_DIGEST_TIMEOUT": ("briefs", "Digest time limit (s)", "Seconds the digest may take."),
+    "MONTH_REPORT_MODES": ("briefs", "Monthly report: runs counted", "Which runs the monthly report counts."),
+    "TICKET_WATCH": ("briefs", "Ticket watcher", "The brief's \"Your tickets\" section, from ServiceNow, read-only."),
+    "TICKET_SERVER": ("briefs", "Ticket watcher connector", "The connector the ticket watcher searches."),
+    "TICKET_TOOLS": ("briefs", "Ticket watcher tools", "The connector tools the ticket watcher may call."),
+    "TICKET_QUERY": ("briefs", "Ticket watcher search", "What the ticket watcher searches for."),
+    "TICKET_MAX": ("briefs", "Tickets per brief", "The most tickets the brief lists."),
+    "TICKET_DAYS": ("briefs", "Ticket look-back (days)", "How far back the ticket watcher looks."),
+    "TICKET_UNASSIGNED_DAYS": ("briefs", "Unassigned ticket warning (days)", "Flag a ticket still unassigned after this many days."),
+    "TICKET_ROUTING_FILE": ("briefs", "Ticket routing rules", "The file that says which queue each kind of ticket belongs in."),
+    "PPMX_PULSE": ("briefs", "PPM Express weekly pulse", "A weekly line on your PPM Express work, read-only."),
+    "PPMX_PULSE_DAY": ("briefs", "Pulse day", "The weekday (1 Monday to 7 Sunday) the pulse runs."),
+    "PPMX_PULSE_SCOPE": ("briefs", "Pulse scope", "\"all\", \"mine\", or portfolio and program names."),
+    "PPMX_PULSE_TIMEOUT": ("briefs", "Pulse time limit (s)", "Seconds the pulse may take."),
+    "PPMX_TASK_DUE_FIELD": ("briefs", "PPM Express due-date field", "The task field that holds the due date."),
+    "REMINDERS_BACKEND": ("todos", "To-do app (all items)", "Where your to-dos sync when work and personal go the same way."),
+    "TODOS_PERSONAL": ("todos", "To-do app: personal", "Overrides the to-do app for personal items."),
+    "TODOS_WORK": ("todos", "To-do app: work", "Overrides the to-do app for work items; Outlook only."),
+    "QUEUE_DUP_THRESHOLD": ("todos", "Duplicate to-do warning", "How alike a new to-do must be to an open one before todo warns."),
+    "WAITING_MAX_DAYS": ("todos", "Waiting items: nudge after (days)", "An item waiting on someone this long gets a nudge drafted."),
+    "MONITOR_WAITING": ("todos", "Watch waiting items", "Check the waiting list in each run."),
+    "OUTLOOK_CHECK": ("connectors", "Check Outlook before runs", "Make sure classic Outlook answers before a run relies on it."),
+    "OUTLOOK_RETRY_WAITS": ("connectors", "Outlook retry waits (s)", "Seconds to wait between tries when Outlook is slow, e.g. \"30 90\"."),
+    "OUTLOOK_RECOVER": ("connectors", "Outlook recovery", "What Kit does when Outlook is running but hung."),
+    "OUTLOOK_DEEP_TIMEOUT": ("connectors", "Outlook calendar check time limit", "Seconds the calendar part of the Outlook check may take before Outlook counts as hung (default 20)."),
+    "OUTLOOK_QUIT_WAIT": ("connectors", "Outlook restart: wait to close", "Seconds to wait for a hung Outlook to close during a restart (default 60)."),
+    "OUTLOOK_RESTART_SETTLE": ("connectors", "Outlook restart: wait to settle", "Seconds to wait after reopening Outlook before checking it again (default 45)."),
+    "CALENDAR_CACHE": ("briefs", "Keep a calendar copy for the brief", "Save each good calendar read so a brief on an Outlook-down morning still has meetings, marked stale."),
+    "CALENDAR_CACHE_DAYS": ("briefs", "Calendar copy: days ahead", "How many days from today the calendar copy command covers (default 1)."),
+    "CALENDAR_CACHE_KEEP": ("briefs", "Calendar copy: days kept", "How many days of saved calendar copies to keep (default 14)."),
+    "CALENDAR_CACHE_TIMEOUT": ("briefs", "Calendar copy: time limit", "Seconds the calendar copy may take before it's skipped."),
+    "USAGE_LIMIT_GUARD": ("budget", "Usage-limit guard", "Stand the scheduled runs down while Claude's usage limit holds, with one notice and a brief from Kit's own files."),
+    "TICKET_BOUNCE_MOVES": ("connectors", "Ticket bounced after N moves", "Flag a ticket moved between groups this many times (default 2; 0 turns it off)."),
+    "CONNECTOR_CHECK": ("connectors", "Morning connector check", "One PASS/FAIL line per connector at the top of the brief."),
+    "CONNECTOR_CHECK_TIMEOUT": ("connectors", "Connector check time limit (s)", "Seconds the connector check may take."),
+    "CONNECTOR_FAIL_STREAK": ("connectors", "Alert after failed checks", "Alert when a connector fails this many mornings in a row."),
+    "PREFLIGHT_CONNECTORS": ("connectors", "Sign-in checks before runs", "Connectors whose sign-in the preflight checks."),
+    "CONNECTION_CHECK": ("connectors", "Internet check", "Check the internet connection before a model run."),
+    "CONNECTION_WAIT": ("connectors", "Wait for the internet (s)", "How long to wait for a connection before a degraded brief."),
+    "CONNECTION_URL": ("connectors", "Internet check address", "The address the internet check tries."),
+    "MCP_WATCH": ("connectors", "Connector session watchdog", "Notice stale or signed-out connector sessions."),
+    "MCP_WATCH_LONG_HOURS": ("connectors", "Long session after (hours)", "A connector session older than this is called long."),
+    "PPMX_BASE_URL": ("connectors", "PPM Express address", "Where the PPM Express connector connects (kit-ppmx setup)."),
+    "PPMX_MY_NAME": ("connectors", "Your name in PPM Express", "How PPM Express names you."),
+    "PPMX_TOKEN_ENV": ("connectors", "PPM Express token variable", "The environment variable holding the token (its name only)."),
+    "PPMX_TOKEN_KEYCHAIN": ("connectors", "PPM Express token Keychain entry", "The Keychain entry holding the token (its name only)."),
+    "MONITOR_GUARD": ("connectors", "Connector guard monitor", "Check the connector guard's integrity in each run."),
+    "GUARD_NORESULT_HOURS": ("connectors", "Guard: call with no result after (hours)", "When a logged call with no result counts as a problem."),
+    "GUARD_WINDOW_DAYS": ("connectors", "Guard monitor window (days)", "How many days of the audit log the monitor reads."),
+    "COST_BUDGET_MONTHLY": ("budget", "Monthly budget (USD)", "What Kit's scheduled runs may spend in a month; empty for no budget."),
+    "COST_WARN_PCT": ("budget", "Warn at (% of budget)", "The brief says how much is used from this share on."),
+    "COST_STOP_PCT": ("budget", "Stop at (% of budget)", "Runs other than the essential ones skip from this share on."),
+    "COST_ESSENTIAL_MODES": ("budget", "Runs that always go ahead", "Run kinds that still run at the stop level."),
+    "COST_ALERT_PROJECTION": ("budget", "Projection alert", "Alert when the month is projected over this multiple of the budget."),
+    "COST_SPIKE_FACTOR": ("budget", "Spike alert", "Alert when a day costs this many times the usual."),
+    "USAGE_LIMIT_MONTHLY_USD": ("budget", "API usage limit (USD a month)", "Your account's monthly API limit, so Kit slows down before it's hit."),
+    "RUN_TIMEOUT": ("budget", "Morning run time limit (s)", "Seconds the morning run may take."),
+    "RUN_TIMEOUT_WEEKLY": ("budget", "Weekly review time limit (s)", "Seconds the weekly review may take."),
+    "RUN_TIMEOUT_WORKLIST": ("budget", "Work list time limit (s)", "Seconds the work-list run may take."),
+    "RUN_TIMEOUT_EOD": ("budget", "End-of-day time limit (s)", "Seconds the end-of-day wrap may take."),
+    "RUN_LOCK_WAIT": ("budget", "Wait for another run (s)", "How long a run waits when another is still going."),
+    "RETRY_ON": ("budget", "Retry after a passing failure", "Retry once after an overload, rate limit, or network error."),
+    "RETRY_DELAY": ("budget", "Retry delay (s)", "Seconds before the retry."),
+    "RELIABILITY_MIN_PCT": ("budget", "Run reliability floor (%)", "Warn when fewer runs than this succeed in a week."),
+    "RUN_ALERTS": ("budget", "Run failure alerts", "Alert when runs fail repeatedly."),
+    "RUN_ALERTS_TIMEOUT": ("budget", "Run alerts time limit (s)", "Seconds the alerts check may take."),
+    "RUN_FAIL_STREAK": ("budget", "Alert after failed runs", "Alert after this many failed runs in a row."),
+    "REHEARSE_TIMEOUT": ("budget", "Rehearsal time limit (s)", "Seconds a review rehearsal may take."),
+    "PREREAD_TIMEOUT": ("budget", "Pre-read time limit (s)", "Seconds a pre-read may take."),
+    "REVIEW_LOOP_TIMEOUT": ("budget", "Review loop time limit (s)", "Seconds each review in the loop may take."),
+    "MONITOR_TIMEOUT": ("budget", "Monitor time limit (s)", "Seconds each monitor may take."),
+    "LIBRARY_UNINDEXED_MAX": ("documents", "Unindexed documents allowed", "Warn when more documents than this aren't indexed."),
+    "LIBRARY_INDEX_MAX_DAYS": ("documents", "Index age warning (days)", "Warn when the library index is older than this."),
+    "LIBRARY_SYNC_MAX_DAYS": ("documents", "Sync age warning (days)", "Warn when a synced library hasn't synced in this long."),
+    "MONITOR_LIBRARY": ("documents", "Watch the library", "Check the library in each run."),
+    "MONITOR_DRIFT": ("documents", "Watch for drifted copies", "Check for same-named documents that differ."),
+    "READINESS_THRESHOLD": ("documents", "Ready for ARB at", "The readiness score a draft needs to be called ready."),
+    "TEAMMAP_COVERAGE": ("documents", "Team coverage list", "The file listing who knows which system."),
+    "TEAMMAP_MAX_LOAD": ("documents", "Team member overloaded at", "Hours of assigned work that count as overloaded."),
+    "TEAMMAP_MAX_ITEMS": ("documents", "Team member overloaded at (items)", "Assigned items that count as overloaded."),
+    "MONITOR_EXCEPTIONS": ("agents", "Watch standards exceptions", "Check for exceptions coming up for renewal."),
+    "EXCEPTIONS_WARN_DAYS": ("agents", "Exception warning (days)", "Warn this many days before an exception expires."),
+    "REHEARSE_MODEL": ("agents", "Rehearsal model", "The model a review rehearsal uses (kit-models)."),
+    "PREREAD_MODEL": ("agents", "Pre-read model", "The model a pre-read uses (kit-models)."),
+    "REVIEW_LOOP_MODEL": ("agents", "Review loop model", "The model the review loop uses (kit-models)."),
+    "TEXTBACK_MODEL": ("agents", "Text answers model", "The model texted questions use."),
+    "TEXTBACK_PARSE_MODEL": ("agents", "Text commands model", "The model that reads texted commands."),
+    "BACKUP_KEEP": ("privacy", "Backups kept", "How many daily backups to keep."),
+    "BACKUP_DIR": ("privacy", "Backup folder", "Where the encrypted backups go (kit-backup)."),
+    "BACKUP_ENCRYPT": ("privacy", "Encrypt backups", "Whether backups are encrypted."),
+    "BACKUP_KEY_ENV": ("privacy", "Backup key variable", "The environment variable holding the backup key (its name only)."),
+    "BACKUP_KEY_KEYCHAIN": ("privacy", "Backup key Keychain entry", "The Keychain entry holding the backup key (its name only)."),
+    "SNAPSHOT_KEEP": ("privacy", "Configuration snapshots kept", "How many kit-config snapshots to keep (default 30)."),
+    "ONEDRIVE_PUBLISH_DIR": ("privacy", "OneDrive publish folder", "Where kit-publish puts what you share."),
+    "ONEDRIVE_ALLOWED_PREFIX": ("privacy", "OneDrive allowed path", "Publishing is allowed only under this path."),
+    "PUBLISH_PERSONAL": ("privacy", "Publish personal items", "Whether anything personal may be published (normally off)."),
+    "ALLOW_TOOLS": ("advanced", "Extra tools for the morning run", "Permission rules the unattended morning run gets."),
+    "ALLOW_TOOLS_WEEKLY": ("advanced", "Extra tools for the weekly review", "Permission rules the unattended weekly review gets."),
+    "BLOCK_TOOLS": ("advanced", "Tools the runs may never use", "Permission rules the unattended runs are denied."),
+}
+for _k in ("MORNING", "WEEKLY", "WORKLIST", "EOD", "SYNC", "BACKUP"):
+    META.setdefault(f"RUN_WINDOW_{_k}", ("briefs", f"Catch-up window: {_k.lower()} (min)",
+                                         f"If the {_k.lower()} run was missed, run it if it's no later than this "
+                                         "many minutes; \"off\" never catches up."))
+
+# Setup files and JSON configs, by group.
+SETUP_GROUPS = {
+    "briefs": ("calendar", "meetings", "oneonone", "triage", "status", "worklist", "letters", "timeoff", "reviews"),
+    "todos": ("demands", "intake"),
+    "connectors": ("connectors", "audit", "graph"),
+    "documents": ("library", "writing", "diagrams", "decisions", "knowledge", "precedent", "project-types",
+                  "onboarding", "changeboard"),
+    "agents": ("agents", "standards", "compliance", "costs", "estimating", "poc", "labs", "training", "future-tech",
+               "exploration", "expertise"),
+    "privacy": ("retention", "sharing"),
+}
+JSON_GROUPS = {"connector-guard.json": "connectors", "models.json": "agents", "sharing-policy.json": "privacy",
+               "sharing-db.json": "privacy", "retention.json": "privacy", "drawio-styles.json": "documents",
+               "diagram-lint-rules.json": "documents", "vsdx-finish.json": "documents"}
+
+
+def group_of(s):
+    """The settings page's group for a setting."""
+    if s["kind"] == "config":
+        m = META.get(s["name"])
+        return m[0] if m and m[0] in GROUP_IDS else "advanced"
+    if s["kind"] == "setup":
+        stem = pathlib.PurePosixPath(s["source"]).stem
+        return next((g for g, names in SETUP_GROUPS.items() if stem in names), "advanced")
+    if s["kind"] == "json":
+        name = pathlib.PurePosixPath(s["source"]).name
+        return JSON_GROUPS.get("models.json" if s["source"].startswith("models") else name, "advanced")
+    return "advanced"
+
+
+def label_of(s):
+    if s["kind"] == "config":
+        m = META.get(s["name"])
+        return m[1] if m else s["name"]
+    return s["name"]
+
+
+def help_of(s):
+    if s["kind"] == "config":
+        m = META.get(s["name"])
+        if m and m[2]:
+            return m[2]
+    return s["description"]
+
+
+def default_of(s, cat=None):
+    """The value 'Reset to default' writes, or None when there's no default the page can write."""
+    if s["kind"] == "config":
+        m = META.get(s["name"])
+        if m and len(m) > 3:
+            return m[3]
+        c = (cat or {}).get(s["name"])
+        if c is None:
+            return None
+        return c["example"] if c.get("example") is not None else (c.get("default") or "")
+    if s["kind"] == "setup":
+        return s.get("shipped")
+    return None
+
 
 BY_HAND = "Edit .install/shared/morning/config by hand, or ask Kit in a session (Claude Code asks before it edits .install)."
 # Why a run config key is read-only here, and how to change it (first match wins).
@@ -253,13 +477,13 @@ CONFIG_READONLY = [
 def config_area(key):
     for pat, area in (
             (r"^(OWNER_NAME|DELIVERY|IMESSAGE|TEXTBACK|REMINDERS_BACKEND|TODOS_|EOD|WRAP_|DEGRADED_MODE|ARCH_DIGEST|"
-             r"REG_WATCH|PHONE_APPROVALS|CALENDAR_JSON_CMD)", "delivery and briefs"),
+             r"REG_WATCH|PHONE_APPROVALS|CALENDAR_JSON_CMD|CALENDAR_CACHE)", "delivery and briefs"),
             (r"^(CONNECTOR_|DEMAND_|PPMX_|PREFLIGHT_|CONNECTION_|MONITOR_GUARD|GUARD_|OUTLOOK_)", "connectors and guard"),
             (r"^(LIBRARY_|MONITOR_LIBRARY)", "library and documents"),
             (r"^(MONITOR_EXCEPTIONS|EXCEPTIONS_)", "compliance"),
             (r"(_MODEL$|^REHEARSE_|^PREREAD_|^REVIEW_LOOP_)", "agents and models"),
             (r"^(ONEDRIVE_|PUBLISH_PERSONAL)", "sharing"),
-            (r"^(SKIP_DAYS|RUN_|RETRY_|RELIABILITY_|COST_|BLOCK_TOOLS|ALLOW_TOOLS|MONITOR_|WAITING_)", "scheduling")):
+            (r"^(SKIP_DAYS|RUN_|RETRY_|RELIABILITY_|COST_|USAGE_LIMIT_|BLOCK_TOOLS|ALLOW_TOOLS|MONITOR_|WAITING_)", "scheduling")):
         if re.search(pat, key):
             return area
     return "other"
@@ -318,7 +542,8 @@ def config_settings(kit):
         out.append(_setting(
             id=f"config|{key}", kind="config", area=config_area(key), name=key, raw=raw, secret=secret,
             source=source, line=line, description=desc, status=status, editable=editable, note=note,
-            type=spec or ("text",), section=""))
+            type=spec or ("text",), section="",
+            default=(c["example"] if c.get("example") is not None else (c.get("default") or "")) if c else None))
     return out
 
 
@@ -469,7 +694,8 @@ def setup_settings(kit):
                 id=f"setup|{path.name}|{f['section']}|{f['field']}|{f['n']}", kind="setup", area=setup_area(path.name),
                 name=f["field"], section=f["section"], raw=f["value"], first=f["first"], secret=secret,
                 source=f"memory/context/{path.name}", line=f["start"] + 1, description=desc, status=status,
-                editable=not (ro or f["nested"] or secret), note=note, type=field_type(path.name, f["field"])))
+                editable=not (ro or f["nested"] or secret), note=note, type=field_type(path.name, f["field"]),
+                default=(sh["value"] if sh and not looks_secret(sh["value"]) else None)))
     return out
 
 
@@ -549,7 +775,7 @@ def json_settings(kit):
 def _setting(**kw):
     s = {"id": "", "kind": "", "area": "other", "name": "", "section": "", "raw": "", "first": "", "secret": False,
          "source": "", "line": None, "description": "", "status": "set", "editable": False, "note": "",
-         "type": ("text",)}
+         "type": ("text",), "default": None}
     s.update(kw)
     s["value"] = MASK if s["secret"] else mask_text(s["raw"])
     if s["kind"] == "setup" and s["status"] == "not set" and not s["secret"]:
@@ -568,6 +794,8 @@ def collect(kit=None):
         raw="managed by the installer", source="~/.claude/settings.json", status="set", editable=False,
         description="The allow, ask, and deny rules Kit adds to Claude Code (kit_setup.py activate).",
         note="Never edited here: kit_setup.py activate adds them and Claude Code asks before any change."))
+    for s in items:
+        s["group"], s["label"], s["help"] = group_of(s), label_of(s), help_of(s)
     order = {a: i for i, a in enumerate(AREAS)}
     kinds = {"config": 0, "setup": 1, "json": 2, "info": 3}
     return sorted(items, key=lambda s: (order.get(s["area"], 99), kinds.get(s["kind"], 9),
@@ -576,8 +804,13 @@ def collect(kit=None):
 
 def public(s):
     """A setting as the page and the JSON output may show it: no raw value for a masked one."""
-    d = {k: v for k, v in s.items() if k not in ("raw", "first")}
+    d = {k: v for k, v in s.items() if k not in ("raw", "first", "default")}
     d["type"] = list(s["type"])
+    d["changed"] = s["status"] == "set"
+    d["default"] = None
+    if s["editable"] and s.get("default") is not None and not looks_secret(s["default"]):
+        d["default"] = mask_text(s["default"])
+        d["can_reset"] = s["default"] != s["raw"] and _valid(s, s["default"])
     if s["editable"]:
         d["edit_value"] = s["raw"]
         d["expect"] = fingerprint(s["raw"])
@@ -598,6 +831,14 @@ def options(s):
     if t[0] == "todo":
         return [a for a in TODO_APPS if not (t[1] in ("work", "all") and a in OUTSIDE_M365)]
     return None
+
+
+def _valid(s, value):
+    try:
+        validate(s, value)
+        return True
+    except Invalid:
+        return False
 
 
 def fingerprint(raw):

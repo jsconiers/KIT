@@ -31,6 +31,20 @@ notify() {
 
 # 1. Claude Code: one tiny headless call, the same path the scheduled runs use. It's a paid call, so
 # it goes in the cost ledger (kit-cost, mode "preflight") like every scheduled run.
+# While a usage limit is recorded (kit_limits.py), the call is skipped until the reset; when the reset
+# time is unknown, it runs once a day to test whether access is back (check --probe).
+LIMITS="$KIT/.install/shared/kit_limits.py"
+LIMIT_STATE="ok"
+if [ -f "$LIMITS" ] && [ "${USAGE_LIMIT_GUARD:-on}" != "off" ]; then
+  LIMIT_STATE=$(python3 "$LIMITS" check --probe 2>> "$LOG")
+  LIMIT_STATE=${LIMIT_STATE%% *}
+fi
+if [ "$LIMIT_STATE" = "limited" ]; then
+  echo "$(stamp) login check skipped: Claude usage limit recorded (access returns $(python3 "$LIMITS" when 2>/dev/null))" >> "$LOG"
+  python3 "$LIMITS" notice > "$LOGDIR/.preflight-limit.txt" 2>/dev/null
+  [ -s "$LOGDIR/.preflight-limit.txt" ] && notify "$LOGDIR/usage-limit-notified" "$(cat "$LOGDIR/.preflight-limit.txt")"
+  rm -f "$LOGDIR/.preflight-limit.txt"
+else
 OUTF=$(mktemp "${TMPDIR:-/tmp}/kit-preflight.XXXXXX")
 (cd /tmp && perl -e 'alarm shift; exec @ARGV' 120 claude -p "Reply with the single word OK." \
       --model haiku --max-turns 1 --output-format json < /dev/null > "$OUTF" 2> "$OUTF.err")
@@ -38,10 +52,21 @@ RC=$?
 COST="$KIT/.install/shared/bin/kit-cost"
 [ -f "$COST" ] && python3 "$COST" record --mode preflight --rc "$RC" --json-file "$OUTF" --log /dev/null 2>> "$LOG"
 OUT=$(cat "$OUTF" "$OUTF.err" 2>/dev/null)
+LIMIT_HIT=""
+if [ -f "$LIMITS" ] && [ "${USAGE_LIMIT_GUARD:-on}" != "off" ] && [ $RC -ne 0 ]; then
+  LIMIT_HIT=$(python3 "$LIMITS" detect --source preflight "$OUTF" "$OUTF.err" 2>> "$LOG")
+fi
 rm -f "$OUTF" "$OUTF.err"
 FIRST=$(print -r -- "$OUT" | head -1 | cut -c1-160)
-if [ $RC -eq 0 ] && print -r -- "$OUT" | grep -q 'OK'; then
+if [ -n "$LIMIT_HIT" ]; then
+  echo "$(stamp) Claude usage limit reached ($LIMIT_HIT): scheduled runs stand down until it resets" >> "$LOG"
+  python3 "$LIMITS" notice > "$LOGDIR/.preflight-limit.txt" 2>/dev/null
+  [ -s "$LOGDIR/.preflight-limit.txt" ] && notify "$LOGDIR/usage-limit-notified" "$(cat "$LOGDIR/.preflight-limit.txt")"
+  rm -f "$LOGDIR/.preflight-limit.txt"
+elif [ $RC -eq 0 ] && print -r -- "$OUT" | grep -q 'OK'; then
   echo "$(stamp) login ok" >> "$LOG"
+  [ -f "$LIMITS" ] && [ -s "$LOGDIR/usage-limit.json" ] && python3 "$LIMITS" success --source preflight 2>> "$LOG" \
+    && echo "$(stamp) usage limit cleared" >> "$LOG"
   if [ -f "$LOGDIR/login-lapsed" ]; then
     rm -f "$LOGDIR/login-lapsed"
     echo "$(stamp) login restored" >> "$LOG"
@@ -51,6 +76,7 @@ elif print -r -- "$OUT" | grep -q -i -E 'not logged in|/login|oauth|invalid api 
   notify "$LOGDIR/login-lapsed" "Kit · Claude Code is logged out, so Kit's scheduled runs will fail. To fix it at the computer: open Terminal, run claude, and type /login."
 else
   echo "$(stamp) login check inconclusive (rc $RC): $FIRST" >> "$LOG"
+fi
 fi
 
 # 2. Connectors that need the owner's sign-in now and then (OAuth), from PREFLIGHT_CONNECTORS.

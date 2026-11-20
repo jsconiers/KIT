@@ -14,7 +14,9 @@
 # With ARCH_DIGEST="on", the first weekly review of each month also has kit-digest draft last month's
 # architecture digest for your edit (no model call); off by default.
 # Nothing runs while Kit is paused (kit-pause). Before the morning and weekly runs, kit-outlook
-# checks that Outlook answers (set OUTLOOK_CHECK="off" in the config to skip it).
+# checks that Outlook answers, calendar included (set OUTLOOK_CHECK="off" in the config to skip it), and
+# with OUTLOOK_RECOVER="restart" restarts a hung Outlook once a day; kit-calcache keeps a copy of the
+# calendar for the mornings Outlook doesn't answer (CALENDAR_CACHE="off" to skip it).
 # Every run records its estimated cost in .install/logs/cost.jsonl (kit-cost). With
 # COST_BUDGET_MONTHLY set, runs other than COST_ESSENTIAL_MODES skip once COST_STOP_PCT of the
 # budget is used, and the brief says how much is used from COST_WARN_PCT on.
@@ -41,6 +43,10 @@
 # clears alerts for failing or overdue scheduled runs and for cost (see its header and kit-alerts).
 # Degraded mode (DEGRADED_MODE, default on): at the budget's stop level, and whenever the morning
 # model run fails or times out, kit-degraded writes the brief from Kit's files with no model call.
+# Usage-limit guard (USAGE_LIMIT_GUARD, default on): when a run fails because Claude's usage limit is
+# reached ("You will regain access on ..."), kit_limits.py records it in .install/logs/usage-limit.json;
+# until the reset, model runs skip (one notice per lapse) and the morning brief is written by
+# kit-degraded. A known reset clears itself; an unknown one is tested once a day by preflight.sh.
 # Connection check (CONNECTION_CHECK, default on; CONNECTION_WAIT seconds, default 300): when the
 # API can't be reached, wait for the network, then skip the model run instead of retrying for an
 # hour. The morning run still writes its degraded brief, and the run is logged as failed.
@@ -190,19 +196,59 @@ if [ -f "$KIT/.install/shared/bin/kit-cost" ]; then
     exit 0
   fi
 fi
+# Usage-limit guard (kit_limits.py): while Claude's usage limit holds, no model run can succeed, so
+# the runs stand down (one notice per lapse) and the morning brief goes to kit-degraded instead.
+LIMITS="$KIT/.install/shared/kit_limits.py"
+LIMIT_REASON=""
+limit_notice() {
+  [ -f "$LOGDIR/usage-limit-notified" ] && return 0
+  python3 "$LIMITS" notice > "$LOGDIR/usage-limit-notice.txt" 2>> "$LOG"
+  [ -s "$LOGDIR/usage-limit-notice.txt" ] && deliver "$LOGDIR/usage-limit-notice.txt" nobrief >> "$LOG" 2>&1 \
+    && date > "$LOGDIR/usage-limit-notified"
+}
+if [ "${USAGE_LIMIT_GUARD:-on}" != "off" ] && [ -f "$LIMITS" ]; then
+  LIMIT_LINE=$(python3 "$LIMITS" check --mode "$MODE" 2>> "$LOG")
+  if [ "${LIMIT_LINE%% *}" = "limited" ]; then
+    LIMIT_REASON="Claude usage limit reached; access returns $(python3 "$LIMITS" when 2>/dev/null)"
+    echo "== $(date) $MODE: $LIMIT_REASON (${LIMIT_LINE#limited })" >> "$LOG"
+    limit_notice
+    if [ "$MODE" != "morning" ] || [ "${DEGRADED_MODE:-on}" = "off" ] || [ ! -f "$KIT/.install/shared/bin/kit-degraded" ]; then
+      echo "== $(date) $MODE run skipped: usage limit (kit-cost limit)" >> "$LOG"
+      run_alerts
+      exit 0
+    fi
+  fi
+fi
 # Degraded mode: at the stop level the morning brief is written from Kit's files, with no model call.
-DEGRADED_REASON=""
-if [ "$MODE" = "morning" ] && [ "$COST_LEVEL" = "stop" ] && [ "${DEGRADED_MODE:-on}" != "off" ] \
+DEGRADED_REASON="$LIMIT_REASON"
+if [ -z "$DEGRADED_REASON" ] && [ "$MODE" = "morning" ] && [ "$COST_LEVEL" = "stop" ] && [ "${DEGRADED_MODE:-on}" != "off" ] \
    && [ -f "$KIT/.install/shared/bin/kit-degraded" ]; then
   DEGRADED_REASON="$COST_PCT of this month's budget is used (stop at ${COST_STOP_PCT:-95}%)"
 fi
 if [ "$MODE" = "morning" ] || [ "$MODE" = "weekly" ]; then
-  # Outlook self-recovery: check Outlook answers, retrying if it's slow (never starts or quits it).
-  # If it still doesn't answer, the brief marks calendar and mail stale instead of skipping them.
+  # Outlook self-recovery: check Outlook answers, calendar included, retrying if it's slow. It never starts
+  # Outlook; with OUTLOOK_RECOVER="restart" (the owner's opt-in) it restarts a hung Outlook, at most once a
+  # day (see kit-outlook --help). If it still doesn't answer, the brief marks calendar and mail stale.
   OUTLOOK_STATUS=""
   if [ "${OUTLOOK_CHECK:-on}" != "off" ] && [ -f "$KIT/.install/shared/bin/kit-outlook" ]; then
-    python3 "$KIT/.install/shared/bin/kit-outlook" check --retry --write briefs/outlook.txt >> "$LOG" 2>&1
+    python3 "$KIT/.install/shared/bin/kit-outlook" check --retry --recover --write briefs/outlook.txt >> "$LOG" 2>&1
     OUTLOOK_STATUS=$(cut -d' ' -f1 briefs/outlook.txt 2>/dev/null)
+    echo "== $(date) Outlook check: $(cat briefs/outlook.txt 2>/dev/null)" >> "$LOG"
+  fi
+  # Calendar cache (CALENDAR_CACHE, default on): while the calendar answers, keep a copy for the mornings it
+  # doesn't (kit-calcache; .install/cache/, owner-only, 14 days). When Outlook is hung, the cached events
+  # go to the model run (and kit-degraded) labelled "may be stale" instead of no calendar.
+  rm -f briefs/calendar-cache.txt
+  if [ "${CALENDAR_CACHE:-on}" != "off" ] && [ -f "$KIT/.install/shared/bin/kit-calcache" ]; then
+    case "$OUTLOOK_STATUS" in
+      not-responding|hung|blocked|error)
+        python3 "$KIT/.install/shared/bin/kit-calcache" brief > briefs/calendar-cache.txt 2>> "$LOG"
+        [ -s briefs/calendar-cache.txt ] || rm -f briefs/calendar-cache.txt ;;
+      not-running) ;;
+      *)
+        perl -e 'alarm shift; exec @ARGV' $(( ${CALENDAR_CACHE_TIMEOUT:-90} + 15 )) \
+          python3 "$KIT/.install/shared/bin/kit-calcache" save >> "$LOG" 2>&1 ;;
+    esac
   fi
   python3 "$KIT/.install/shared/doctor.py" --brief > briefs/health.txt 2>&1
   [ "$MODE" = "weekly" ] && AUDIT=--weekly || AUDIT=--daily
@@ -281,8 +327,11 @@ fi
 PROMPT_TEXT=$(sed "s/{{OWNER}}/${OWNER_NAME:-the owner}/g" "$PROMPT")
 if [ "$MODE" = "morning" ] || [ "$MODE" = "weekly" ]; then
   case "$OUTLOOK_STATUS" in
-    not-responding|blocked|error)
-      PROMPT_TEXT+=$'\n\n'"Outlook check before this run: $(cut -d' ' -f4- briefs/outlook.txt). Don't call the Outlook calendar or mail commands. In the brief, put this line under both the Calendar and the Mail headings: \"Stale: $(cut -d' ' -f4- briefs/outlook.txt)\" Add \"Outlook: restart it\" as the second line of every short text." ;;
+    not-responding|hung|blocked|error)
+      PROMPT_TEXT+=$'\n\n'"Outlook check before this run: $(cut -d' ' -f4- briefs/outlook.txt). Don't call the Outlook calendar or mail commands. In the brief, put this line under both the Calendar and the Mail headings: \"Stale: $(cut -d' ' -f4- briefs/outlook.txt)\" Add \"Outlook: restart it\" as the second line of every short text."
+      if [ -s briefs/calendar-cache.txt ]; then
+        PROMPT_TEXT+=" For the Calendar section, use these events from Kit's saved copy of the calendar (briefs/calendar-cache.txt) instead of calling the calendar: list them under the Stale line, keep their label as written, and count them in the short texts as \"Meetings (saved calendar, may be stale)\":"$'\n'"$(cat briefs/calendar-cache.txt)"
+      fi ;;
   esac
   # Records retention: show active legal holds at the top of the brief.
   if [ -f "$KIT/.install/shared/bin/kit-retention" ]; then
@@ -291,6 +340,12 @@ if [ "$MODE" = "morning" ] || [ "$MODE" = "weekly" ]; then
   fi
   [ -n "$ALERT_LINES" ] && PROMPT_TEXT+=$'\n\n'"Open alerts (kit-alerts): put each of these lines, as written, near the top of the brief (below the connector line, if there is one), and add \"Alerts: \" plus the number open to the health problems at the top of the text:"$'\n'"$ALERT_LINES"
   [ -n "$CONNECT_LINE" ] && PROMPT_TEXT+=$'\n\n'"Connector check before this run (kit-connect test): put this line, as written, at the top of the brief (below the Audit issue section, if there is one), and if any server says FAIL, add \"Connectors: \" plus the failing server names to the health problems at the top of the text: $CONNECT_LINE"
+fi
+# Usage-limit early warning (USAGE_LIMIT_MONTHLY_USD): kit-cost prints one line when this month's spend
+# or its projection nears the per-user API limit.
+if [ -f "$KIT/.install/shared/bin/kit-cost" ]; then
+  LIMIT_WARN=$(python3 "$KIT/.install/shared/bin/kit-cost" limit --brief 2>/dev/null)
+  [ -n "$LIMIT_WARN" ] && PROMPT_TEXT+=$'\n\n'"Usage limit: add this line, as written, to the health section of what you write and to the health problems at the top of the text: $LIMIT_WARN"
 fi
 case "$COST_LEVEL" in
   warn|stop)
@@ -449,6 +504,14 @@ run_claude() {
   rc=$?
   cat "$RUNERR" >> "$LOG"
   [ "$rc" -eq 142 ] && TIMED_OUT=1 && echo "== $(date) $MODE run hit its time limit ($((TIMEOUT / 60)) min) and was stopped" >> "$LOG"
+  # A usage-limit failure is recorded so the next runs stand down instead of failing in turn.
+  if [ -f "$LIMITS" ] && [ "${USAGE_LIMIT_GUARD:-on}" != "off" ] && [ -z "$TIMED_OUT" ] \
+     && { [ "$rc" -ne 0 ] || grep -qE '"is_error": *true' "$RUNOUT" 2>/dev/null; }; then
+    if LIMIT_HIT=$(python3 "$LIMITS" detect --source "$MODE" "$RUNERR" "$RUNOUT" 2>> "$LOG"); then
+      echo "== $(date) $MODE: Claude usage limit reached ($LIMIT_HIT); later runs stand down until it resets" >> "$LOG"
+      LIMIT_REASON="Claude usage limit reached; access returns $(python3 "$LIMITS" when 2>/dev/null)"
+    fi
+  fi
   if [ -f "$KIT/.install/shared/bin/kit-cost" ]; then
     python3 "$KIT/.install/shared/bin/kit-cost" record --mode "$MODE" --rc "$rc" --json-file "$RUNOUT" --log "$LOG" 2>> "$LOG" \
       || cat "$RUNOUT" >> "$LOG"
@@ -461,6 +524,7 @@ run_claude() {
 # API) and wrote no text. Never after a timeout, or a refusal over permissions or policy.
 transient_reason() {
   local blob p hit; blob="$(cat "$RUNERR" "$RUNOUT" 2>/dev/null)"
+  [ -n "$LIMIT_REASON" ] && return 1   # a usage limit doesn't lift in two minutes
   print -r -- "$blob" | grep -qiE 'permission|not allowed|denied|refus|policy' && return 1
   # Most specific first, so the log names the actual cause.
   for p in 'overload(ed)?' 'rate.?limit(ed)?' 'too many requests' '(^|[^0-9])(429|500|502|503|504|529)([^0-9]|$)' \
@@ -506,6 +570,13 @@ else
 fi
 rm -f "$RUNOUT" "$RUNERR"
 [ -n "$OFFLINE" ] && rc=1
+if [ -f "$LIMITS" ]; then
+  if [ -z "$DEGRADED_REASON" ] && [ "$rc" -eq 0 ] && [ -z "$LIMIT_REASON" ] && [ -s "$LOGDIR/usage-limit.json" ]; then
+    python3 "$LIMITS" success --source "$MODE" 2>> "$LOG" && echo "== $(date) usage limit cleared (the $MODE run succeeded)" >> "$LOG"
+  elif [ -n "$LIMIT_REASON" ] && [ -z "$DEGRADED_REASON" ]; then
+    limit_notice
+  fi
+fi
 echo "== $(date) end $MODE rc=$rc" >> "$LOG"
 
 # Degraded fallback: if the morning run wrote no short text (it failed, timed out, or the budget
@@ -513,14 +584,15 @@ echo "== $(date) end $MODE rc=$rc" >> "$LOG"
 if [ "$MODE" = "morning" ] && [ "${DEGRADED_MODE:-on}" != "off" ] && [ -f "$KIT/.install/shared/bin/kit-degraded" ]; then
   DR="$DEGRADED_REASON"
   if [ -z "$DR" ] && { [ -n "$TIMED_OUT" ] || [ ! -s "$TEXT" ]; }; then
-    if [ -n "$TIMED_OUT" ]; then DR="the model run hit its $((TIMEOUT / 60))-minute limit"
+    if [ -n "$LIMIT_REASON" ]; then DR="$LIMIT_REASON"
+    elif [ -n "$TIMED_OUT" ]; then DR="the model run hit its $((TIMEOUT / 60))-minute limit"
     elif [ "$rc" -ne 0 ]; then DR="the model run failed (exit $rc)"
     else DR="the model run finished without writing the brief"; fi
     rm -f "$TEXT" "${TEXT%.txt}-work.txt" "${TEXT%.txt}-personal.txt"   # never deliver a stopped run's text
   fi
   if [ -n "$DR" ]; then
     DARGS=(--reason "$DR")
-    case "$OUTLOOK_STATUS" in not-responding|blocked|error) DARGS+=(--no-calendar) ;; esac
+    case "$OUTLOOK_STATUS" in not-responding|hung|blocked|error) DARGS+=(--no-calendar) ;; esac   # the saved copy fills in
     python3 "$KIT/.install/shared/bin/kit-degraded" "${DARGS[@]}" >> "$LOG" 2>&1 \
       && echo "== degraded brief written ($DR)" >> "$LOG"
   fi

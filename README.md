@@ -113,7 +113,7 @@ The installer links these into `~/.local/bin` (all in `shared/bin/`):
 
 | Tool | What it does |
 |---|---|
-| `todo` | Your to-do list from the shell; shares `QUEUE.md`. Also sprints (`todo sprint ...`). |
+| `todo` | Your to-do list from the shell; shares `QUEUE.md`. Also sprints (`todo sprint ...`). Won't add an item that's already open (`--force` adds it anyway); `todo dupes` lists likely pairs to merge |
 | `kit-queue` | Queue hygiene: stale items, likely duplicates, the trend; applies verdicts you approve |
 | `kit-meetprep` | A prep pack per upcoming meeting: roles, related items, documents, what to decide, and a design review's pre-read |
 | `kit-triage` | Suggests reply, decide, delegate, read later, or ignore per inbox message; never acts |
@@ -130,7 +130,8 @@ The installer links these into `~/.local/bin` (all in `shared/bin/`):
 | `kit-library` | Catalogs folders you choose (collections): tags, full-text and scripture search, scanned PDFs read on the Mac; delivers finished work to an output folder, mirrored to a synced folder if you like (Claude Code asks before mirror and fetch; work and confidential material is never mirrored) |
 | `kit-textback` | macOS: text Kit from your phone ("kit today", "kit find ..."); changes come back with a code to confirm |
 | `kit-letter` | A Word letter from plain text: `build` leaves room for a pen signature; `sign` adds your saved signature, and Claude Code asks you each time |
-| `kit-settings` | How briefs reach you and which app your to-dos sync with, work and personal; `show --all` lists every setting (run config, setup fields, JSON configs) with its source, status, and description; `ui` opens a local page to change the safe ones |
+| `kit-settings` | How briefs reach you and which app your to-dos sync with, work and personal; `show --all` lists every setting (run config, setup fields, JSON configs) with its source, status, and description; `ui` opens a local page to change the safe ones, grouped by area with search, plain-English help, and one Review & save step that takes a snapshot first |
+| `kit-config` | Configuration snapshots: `snapshot`, `list`, `diff`, and `restore` Kit's settings (never credentials); restore previews first and snapshots the current state, so it can be undone. Taken automatically before every settings save, install, and update |
 
 **Architecture work**
 
@@ -142,6 +143,8 @@ The installer links these into `~/.local/bin` (all in `shared/bin/`):
 | `kit-signoff` | Sign-off ledger: who approved which version of each IA or GDS (by role), when, and how, with each approved file's SHA-256; `status` per document (approved, still needed, edited since approval) and `check FILE` (is this exactly the approved copy?) |
 | `kit-diagtext` | Diagram-to-text check: a figure caption naming another version of the diagram, a protocol or port the text gives differently from the line's label, a count the diagram doesn't draw ("6 nodes" vs 4), components in the text's component table missing from the diagram, and diagram components the text never names. Ranked, each with the section and the diagram's page and element id. Reads draw.io, Visio, and the diagrammer's -spec.json; `PROJECT` checks the newest draft against diagrams/; `--write` saves the report in reviews/ |
 | `kit-dedupe` | Repetition and consistency check: statements repeated across sections (word for word or nearly), with which to keep and which to cut, and figures that disagree: costs, counts, milestone dates, and Q-IDs open in one place and closed in another or defined twice. `--write` saves the report in the project's reviews/ |
+| `kit-acronyms` | Acronyms a draft never spells out, or spells out too late, each with a proposed meaning and where it came from (the draft, the project, glossaries, the templates); unknown ones as questions; `--table` gives a paste-ready acronyms table. Never changes the draft |
+| `kit-pages` | Page budgets: each version of a document against its budget in `facts.md` (`kit-facts set PROJECT "Pages executive" 4 --unit pages --alias "*-executive*" --write`), and the sections to cut when it's over; the readiness score takes points off for an overrun |
 | `kit-facts` | Per-project fact sheet (`PROJECT/facts.md`): the agreed numbers and names (cost, rollback time, sponsor) with unit, aliases, source, date, and who agreed (by role). `set ... --write` keeps the old value as superseded; `check PROJECT DOC` / `check-all PROJECT` reports CONFLICT (a different value) and STALE (a superseded one) |
 | `kit-drift` | SharePoint and OneDrive copy drift: same-named documents (version, " - Copy", "(1)" ignored) whose contents differ across libraries or folders, newest first; and template copies left in project folders (placeholder names like DOC-###, or byte- or text-identical to a template). `--since`, `--json`, `--check`. Skips cloud-only files without downloading them. Read-only |
 | `kit-docs` | Rebuilds your internal documents about Kit from a manifest (`docs-build.json`): `plan`, `build` (steps, PDF, qpdf, checks, page counts, copies, a result table; `--archive`, `--stamp` only when all passed), `bump V` (version labels, never revision rows), `status` (which docs are behind the code) |
@@ -205,13 +208,14 @@ The installer links these into `~/.local/bin` (all in `shared/bin/`):
 | `kit-backup` | Checked archive of Kit's folder and history to a folder you choose (local or shared), encrypted on request; `verify`, `restore` |
 | `kit-audit-export` | A dated evidence pack of Kit's controls for a compliance or security review; `--controls` organises it by control for an audit request, with gaps listed |
 | `kit-retention` | Retention rules with legal holds; reports, and only moves files with `--yes` |
-| `kit-outlook` | Checks Outlook answers before a run, retrying; never starts it |
-| `kit-degraded` | The morning brief from Kit's files with no model call (budget stop, failed or timed-out run) |
+| `kit-outlook` | Checks Outlook answers before a run, calendar included, retrying; reports a hung Outlook, and with `OUTLOOK_RECOVER="restart"` restarts it once a day. Never starts an Outlook that wasn't open |
+| `kit-calcache` | The saved calendar copy the brief falls back to when Outlook is down, marked stale; `show` and `brief` print what it has for a day |
+| `kit-degraded` | The morning brief from Kit's files with no model call (budget stop, usage limit, failed or timed-out run), with the saved calendar copy when Outlook is down |
 | `kit-wrap` | The end-of-day wrap from Kit's files with no model call: what got done, what moves to the next working day, and that day's first meeting and what it needs (related to-dos, pending actions, a pre-read, where it is); hooks in `.install/wrap.d/` add your own sections |
 | `kit-reliability` | How reliably the scheduled runs work: success rate, duration, cost, and alerts, by run type |
-| `kit-cost` | What scheduled runs cost, by run and model, against an optional monthly budget |
+| `kit-cost` | What scheduled runs cost, by run and model, against an optional monthly budget; `limit` shows a recorded Claude usage limit (the scheduled runs stand down until its reset) and spend against `USAGE_LIMIT_MONTHLY_USD`; `limit clear` lets them go ahead early |
 | `kit-expiry` | Everything that expires (tokens, logins, domains, certificates), soonest first, from `expiry.json`; the health check warns before each is due. Connector tokens' dates come from their Keychain entries' metadata, by name only (`tokens --add` tracks every credential the connectors name), and the brief warns before Jira, Confluence, or PPM Express tokens lapse |
-| `kit-tickets` | The ticket watcher: with `TICKET_WATCH="on"`, the morning brief has the gateway search your service-management tickets read-only, and `kit-tickets diff` reports what changed since yesterday (new, state, priority, reassigned, updated, gone); `show` lists the last check |
+| `kit-tickets` | The ticket watcher: with `TICKET_WATCH="on"`, the morning brief has the gateway search your service-management tickets read-only, and `kit-tickets diff` reports what changed since yesterday (new, state, priority, reassigned, updated, gone); `show` lists the last check; `routing` lists tickets unassigned too long, bounced between groups, or in the wrong group by your routing map, each with a drafted next step |
 | `kit-mcp-watch` | The long-session token watchdog: hooks on your Claude Code sessions' MCP calls spot a connector whose session went stale or whose sign-in lapsed, tell Claude to stop retrying and ask you to reconnect (`/mcp`), and the brief lists them; `status` shows what it saw. It never blocks a call or reads a token |
 | `doctor.py --score` | The health score on the dashboard's badge (0 to 100: connectors, runs, audit, open setup questions) and where it lost points |
 | `kit-metrics` | One-page metrics view: spend, runs, queue trend, work lists, sprints, health |

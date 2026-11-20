@@ -10,6 +10,14 @@
   todo kit done 2               check off Kit's item 2
   todo touch 3                  mark your item 3 as looked at today (stamps "updated")
   todo edit 3 New wording       reword your item 3 (keeps its dates and sub-items; stamps "updated")
+  todo dupes                    list open items that look like duplicates of each other (changes nothing)
+
+Duplicates: an item that matches an open one in the same section (same words once case, punctuation,
+dates, weekdays, the [work] tag, and filler words are set aside) isn't added. `todo` says which item it
+matches and exits 1; add --force to add it anyway. With --merge (the scheduled runs and the phone sync
+use it), the match gets "(seen again DD-Mmm-YYYY)" instead, and the merge is logged in
+.install/logs/queue-dupes.log. QUEUE_DUP_THRESHOLD in the config (default 0.8; "off" turns it off)
+sets how alike two items must be.
 
   todo sprint                   show the sprint
   todo sprint start <name> <start> <end>   start a sprint (dates like 19-Oct or 19-Oct-2026)
@@ -124,7 +132,27 @@ def show():
     print()
 
 
-def add(section, words, tag=""):
+def threshold():
+    try:
+        text = CONFIG.read_text() if CONFIG.exists() else ""
+    except OSError:
+        text = ""
+    return kq.dup_threshold(text)
+
+
+def dupes():
+    lines = QUEUE.read_text().splitlines()
+    pairs = kq.duplicate_pairs(lines, threshold() or kq.DUP_THRESHOLD)
+    if not pairs:
+        return print("No likely duplicates among the open items.")
+    print(f"{len(pairs)} likely duplicate pair(s); merge them with `todo edit` and `todo done`:")
+    for score, how, a, b in pairs:
+        print(f"  {a['section']} {a['n']} and {b['n']} ({how}, {score:.2f}):")
+        print(f"    {a['n']}. {a['title']}")
+        print(f"    {b['n']}. {b['title']}")
+
+
+def add(section, words, tag="", force=False, merge=False):
     due = parse_due(words[-1]) if len(words) > 1 else None
     title = " ".join(words[:-1] if due else words).strip()
     if not title:
@@ -133,6 +161,17 @@ def add(section, words, tag=""):
     h = heads(lines)
     if section not in h:
         sys.exit(f"QUEUE.md has no '## {section}' section.")
+    match = None if force else kq.find_duplicate(lines, section, title, threshold())
+    if match:
+        it, score, how = match
+        if merge:
+            lines = kq.note_seen_again(lines, it, TODAY)
+            save(lines)
+            kq.log_dup(KIT, f"merged into {section} {it['n']} ({how}, {score:.2f}): {title!r} -> {it['title']!r}")
+            return print(f"Already on the list for {section} as item {it['n']}: {it['title']} (noted it was seen again)")
+        print(f"Not added: it matches {section} item {it['n']} ({how}, {score:.2f}): {it['title']}\n"
+              f"Add it anyway with: todo --force ...", file=sys.stderr)
+        sys.exit(1)
     found = items(lines, section)
     at = found[-1][1] if found else h[section] + 1
     entry = (f"- [ ] **{title}**" + (f" {tag}" if tag else "") + (f": due {fmt(due)}" if due else "")
@@ -311,6 +350,12 @@ def main(argv):
         return print(__doc__)                     # help needs no QUEUE.md
     if not QUEUE.exists():
         sys.exit(f"Can't find {QUEUE}")
+    force = merge = False
+    while argv and argv[0] in ("--force", "--merge"):
+        force |= argv[0] == "--force"
+        merge |= argv[0] == "--merge"
+        argv = argv[1:]
+    merge |= os.environ.get("KIT_TODO_MERGE", "") in ("1", "on", "yes")
     section = owner()
     tag = ""
     if argv and argv[0].lower() == "kit":
@@ -323,6 +368,8 @@ def main(argv):
         return print(__doc__)
     if argv[0].lower() == "sprint":
         return sprint_cmd(argv[1:])
+    if argv[0].lower() == "dupes" and len(argv) == 1:
+        return dupes()
     if argv[0].lower() == "touch":
         if len(argv) != 2 or not argv[1].isdigit():
             sys.exit("Usage: todo touch <number>")
@@ -333,7 +380,7 @@ def main(argv):
         if len(argv) != 2 or not argv[1].isdigit():
             sys.exit("Usage: todo done <number>")
         return done(section, int(argv[1]))
-    return add(section, argv, tag)
+    return add(section, argv, tag, force=force, merge=merge)
 
 
 if __name__ == "__main__":

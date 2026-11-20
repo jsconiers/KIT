@@ -7,6 +7,7 @@ commit, and the idle and Stop shutdowns). Everything happens in a fake Kit folde
   python3 tests/test_settings.py
 """
 import hashlib
+import re
 import http.client
 import json
 import os
@@ -370,6 +371,96 @@ ok(code == 200 and not j["committed"] and "commit failed" in j["message"] and b"
 code, j = post("/api/apply", {"id": lib["id"], "value": "`~/Documents/Library` (work storage)"})
 ok(code == 200 and ks.kc.library_root(KIT) == pathlib.Path.home() / "Documents/Library",
    "a path written here reads back through kit_compliance's own parser", j)
+
+# The redesigned page: section list, cards, labels, badges, controls, and no secret.
+code, _, body = req("GET", "/", headers={"Cookie": COOKIE})
+ok(all(f'id="p-{g}"' in body for g in ("delivery", "budget", "documents")) and 'id="knav"' in body,
+   "the page has a section list and a panel per group")
+ok('id="kq"' in body and 'id="kchanged"' in body and 'id="kshow"' in body, "search, Only changed, and the Show filter")
+ok("Monthly budget (USD)" in body and "COST_BUDGET_MONTHLY" in body, "plain-English labels, with the raw key small")
+ok('type="checkbox" role="switch"' in body, "on/off settings are switches")
+ok('type="number"' in body and 'min="1" max="100"' in body, "numbers get a number box with their range")
+ok('class="kbadge changed"' in body and 'class="kbadge notset"' in body and 'class="kbadge ro"' in body,
+   "changed, not set, and read-only badges")
+ok('data-act="reset"' in body, "a Reset to default button where there's a default to go back to")
+ok('id="kbar"' in body and 'data-act="batch-preview"' in body, "the sticky unsaved-changes bar")
+ok('id="p-snapshots"' in body and 'id="p-review"' in body, "Snapshots and Review loop sections")
+ok("zz-test-value-123" not in body and "abcdefgh" not in body and "Dr. Who" not in body, "still no secret or personal value")
+ok(not re.search(r"<(script|link|img|iframe)[^>]*\s(src|href)=", body) and "@import" not in body
+   and "url(" not in body, "no external script, style, image, or link")
+ok(body.count("<script nonce=") == 1 and body.count("<style nonce=") == 1 and " style=" not in body,
+   "one nonce'd script and style, and no inline style attributes (the CSP would block them)")
+items_now = ks.collect(KIT)
+ok(all(s["group"] in ks.GROUP_IDS for s in items_now), "every setting has a page group")
+unk = next(s for s in items_now if s["name"] == "DUP_KEY")
+ok(unk["group"] == "advanced" and unk["label"] == "DUP_KEY", "a key with no description shows in Advanced by its raw name")
+ok(ks.public(next(s for s in items_now if s["name"] == "COST_WARN_PCT")).get("default") is not None,
+   "an editable setting reports its default")
+
+# Batch save: preview, refused batches, then one confirmed save with a snapshot first.
+cfg0 = CONFIG.read_bytes()
+s_warn = next(s for s in items_now if s["name"] == "COST_WARN_PCT")
+s_stop = next(s for s in items_now if s["name"] == "COST_STOP_PCT")
+batch = {"changes": [{"id": s_warn["id"], "value": "65", "expect": ks.fingerprint(s_warn["raw"])},
+                     {"id": s_stop["id"], "value": "90"}]}
+ok(post("/api/batch/preview", batch, X_CSRF_Token=None)[0] == 403, "batch: no CSRF token, 403")
+ok(post("/api/batch/apply", batch, Origin="http://evil.example")[0] == 403, "batch: another origin, 403")
+code, j = post("/api/batch/preview", batch)
+ok(code == 200 and j["ok"] and len(j["items"]) == 2 and all(x["ok"] for x in j["items"]) and
+   '+COST_WARN_PCT="65"' in j["items"][0]["diff"], "batch preview: a diff per change", j)
+ok(CONFIG.read_bytes() == cfg0, "batch preview writes nothing")
+bad = {"changes": batch["changes"] + [{"id": "config|COST_SPIKE_FACTOR", "value": "abc"}]}
+code, j = post("/api/batch/preview", bad)
+ok(code == 200 and not j["ok"] and not j["items"][2]["ok"] and "number" in j["items"][2]["error"],
+   "batch preview marks the invalid one", j)
+code, j = post("/api/batch/apply", bad)
+ok(code == 400 and not j["ok"] and CONFIG.read_bytes() == cfg0, "a batch with any invalid change saves nothing", j)
+code, j = post("/api/batch/apply", {"changes": [{"id": "config|ALLOW_TOOLS", "value": "Bash(*)"}]})
+ok(code == 400 and CONFIG.read_bytes() == cfg0, "a batch with a read-only setting saves nothing", j)
+code, j = post("/api/batch/apply", {"changes": [batch["changes"][0], batch["changes"][0]]})
+ok(code == 400 and "twice" in j.get("error", ""), "the same setting twice in a batch is refused")
+ok(post("/api/batch/apply", {"changes": []})[0] == 400 and
+   post("/api/batch/apply", {"changes": [{"id": 1, "value": "x"}]})[0] == 400, "malformed batches: 400")
+ok(post("/api/batch/apply", {"changes": [{"id": "x", "value": "1"}] * (ui.MAX_BATCH + 1)})[0] == 400, "too many changes: 400")
+import kit_config as kcfg  # noqa: E402
+n_snaps = len(kcfg.ids(KIT))
+code, j = post("/api/batch/apply", batch)
+txt = CONFIG.read_text()
+ok(code == 200 and j["ok"] and 'COST_WARN_PCT="65"' in txt and 'COST_STOP_PCT="90"' in txt, "batch apply saves both", j)
+ok(j.get("snapshot") and len(kcfg.ids(KIT)) == n_snaps + 1 and f'COST_WARN_PCT="{s_warn["raw"]}"' in
+   kcfg.snap_file(KIT, j["snapshot"], ks.CONFIG_REL), "a snapshot of the state before is taken first")
+ok("zz-test-value-123" not in kcfg.snap_file(KIT, j["snapshot"], ks.CONFIG_REL), "and it holds no credential")
+code, j = post("/api/batch/apply", batch)
+ok(code == 400 and not j["ok"], "an old batch is refused once its settings changed (the expect check)", j)
+
+# A single save takes a snapshot too.
+n_snaps = len(kcfg.ids(KIT))
+code, j = post("/api/apply", {"id": "config|COST_WARN_PCT", "value": "60"})
+ok(code == 200 and j.get("snapshot") and len(kcfg.ids(KIT)) == n_snaps + 1, "a single save takes a snapshot first", j)
+
+# Snapshots from the page: take, diff, restore preview, restore (confirm needed), undo.
+code, j = post("/api/snapshots/take", {"note": "from the test"})
+ok(code == 200 and j["ok"] and j["new"], "take a snapshot from the page", j)
+mark = j["id"]
+code, j = post("/api/snapshots/take", {"note": "again"})
+ok(code == 200 and not j["new"] and j["id"] == mark, "an unchanged state isn't snapshotted twice", j)
+ks.apply_edit(KIT, "config|COST_WARN_PCT", "55", rebuild=False)
+code, j = post("/api/snapshots/diff", {"id": mark})
+ok(code == 200 and '-COST_WARN_PCT="60"' in j["diff"] and '+COST_WARN_PCT="55"' in j["diff"], "diff against now", j)
+ok(post("/api/snapshots/diff", {"id": "../../etc"})[0] == 400 and post("/api/snapshots/diff", {"id": "20990101-000000"})[0] == 400,
+   "an unknown or path-like snapshot id is refused")
+code, j = post("/api/snapshots/restore-preview", {"id": mark})
+ok(code == 200 and j["changes"] == 1 and 'COST_WARN_PCT="55"' in CONFIG.read_text(), "restore preview writes nothing", j)
+ok(post("/api/snapshots/restore", {"id": mark})[0] == 400, "restore without confirm: 400")
+code, j = post("/api/snapshots/restore", {"id": mark, "confirm": True})
+ok(code == 200 and j["ok"] and 'COST_WARN_PCT="60"' in CONFIG.read_text() and 'FAKE_API_TOKEN="zz-test-value-123"' in
+   CONFIG.read_text(), "restore puts the value back and keeps the credential line", j)
+code, j = post("/api/snapshots/restore", {"id": j["before"], "confirm": True})
+ok(code == 200 and 'COST_WARN_PCT="55"' in CONFIG.read_text(), "the snapshot taken before a restore undoes it", j)
+code, _, body = req("GET", "/", headers={"Cookie": COOKIE})
+ok(mark in body and 'data-act="snap-restore"' in body, "the Snapshots section lists them")
+logtxt = (KIT / ".install/logs/settings-ui.log").read_text()
+ok("restore" in logtxt and "zz-test-value-123" not in logtxt, "restores are in the change log, without secrets")
 
 # Stop.
 code, j = post("/api/stop", {})

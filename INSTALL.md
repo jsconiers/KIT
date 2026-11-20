@@ -265,6 +265,8 @@ rule written with `~/` doesn't match a command spelled with the full home path.
 | `ALLOW_TOOLS`, `ALLOW_TOOLS_WEEKLY`, `BLOCK_TOOLS` | Extra tools a run may or may not use |
 | `COST_BUDGET_MONTHLY`, `COST_WARN_PCT`, `COST_STOP_PCT`, `COST_ESSENTIAL_MODES` | The monthly budget, its warn and stop levels, and the runs that continue at the stop level |
 | `OUTLOOK_CHECK`, `OUTLOOK_RETRY_WAITS`, `CALENDAR_JSON_CMD` | Outlook health check, retry waits, and an alternative calendar command |
+| `OUTLOOK_RECOVER` | What Kit does when Outlook is open but hung: `notify` (the default) or `restart` |
+| `USAGE_LIMIT_GUARD`, `USAGE_LIMIT_MONTHLY_USD` | Stand the runs down while Claude's usage limit holds; your per-user API limit for an early warning |
 | `PHONE_APPROVALS`, `PUBLISH_PERSONAL`, `ONEDRIVE_PUBLISH_DIR`, `ONEDRIVE_ALLOWED_PREFIX`, `IMESSAGE_TO`, `IMESSAGE_TO_ALT` | Phone approvals and publishing routes |
 | `RUN_WINDOW_WORKLIST`, `RUN_WINDOW_EOD`, `RUN_ALERTS_TIMEOUT` | Optional run-alert windows for the work list and wrap-up; the alert check's time limit |
 | `OWNER_NAME` | Your name as Kit uses it in briefs and agents |
@@ -395,6 +397,11 @@ endpoints, Claude Code's permission rules, and every credential. Undo a change f
 | `RUN_TIMEOUT`, `RUN_TIMEOUT_WEEKLY`, `RUN_TIMEOUT_WORKLIST` | 1200, 3000, 900 s | Time limit per run kind |
 | `RUN_LOCK_WAIT` | 1800 s | How long a run waits for another to finish before going ahead |
 | `OUTLOOK_CHECK`, `OUTLOOK_RETRY_WAITS` | on, "30 90" | Check Outlook answers before the morning and weekly runs |
+| `OUTLOOK_RECOVER` | notify | `off`, `notify`, or `restart`. Choose `restart` only if you accept that Kit may quit and reopen a hung Outlook unattended (at most once a day; a polite quit, then SIGTERM, never a force kill). Outlook keeps drafts as you type, but a reply in its own window that Outlook hasn't saved yet can be lost. macOS only |
+| `OUTLOOK_DEEP_TIMEOUT`, `OUTLOOK_QUIT_WAIT`, `OUTLOOK_RESTART_SETTLE` | 20, 60, 45 s | The calendar check's time limit, and the restart's waits |
+| `CALENDAR_CACHE`, `CALENDAR_CACHE_CMD`, `CALENDAR_CACHE_DAYS`, `CALENDAR_CACHE_KEEP` | on, empty, 1, 14 | The calendar copy the brief falls back to when Outlook is down; for a look-ahead set, for example, `CALENDAR_CACHE_CMD="~/Claude/Agents/kit/bin/kitmail calendar --from today --to +7 --json"` with `CALENDAR_CACHE_DAYS="7"` |
+| `USAGE_LIMIT_GUARD` | on | Stand the scheduled runs down while a Claude usage limit holds; the morning brief comes from `kit-degraded` |
+| `USAGE_LIMIT_MONTHLY_USD` | empty | Your per-user API limit in US dollars, for an early warning in the brief (`kit-cost limit`) |
 | `EOD` | on | End-of-day wrap on or off |
 | `EOD_MODEL` | off | "on" writes the wrap with Claude (prompt-eod.md) instead of kit-wrap |
 | `WRAP_CALENDAR_CMD` | empty | A command that prints one day's events as JSON, with `{day}` for the date; without it the wrap uses `CALENDAR_JSON_CMD`, which can't see past tomorrow (so Friday's wrap has no Monday meetings) |
@@ -405,6 +412,8 @@ endpoints, Claude Code's permission rules, and every credential. Undo a change f
 | `ONEDRIVE_PUBLISH_DIR` | empty | Folder inside your OneDrive where briefs are published for your phone; empty is off |
 | `PUBLISH_PERSONAL` | off | Include personal items when publishing |
 | `BACKUP_DIR`, `BACKUP_KEEP` | next to Kit, 14 | Where `kit-backup` writes (any local folder, network share, or synced folder), and how many to keep |
+| `SNAPSHOT_KEEP` | 30 | How many `kit-config` snapshots to keep. The installer takes one before it changes anything (once kit-config is installed), so `kit-config restore ID` undoes an install's settings changes |
+| `QUEUE_DUP_THRESHOLD` | 0.8 | How alike two open to-dos must be (0.5 to 1) for `todo` to call them duplicates |
 | `BACKUP_ENCRYPT` | off | Encrypt backups (needs a passphrase source below) |
 | `BACKUP_KEY_KEYCHAIN`, `BACKUP_KEY_ENV` | empty | Name of the Keychain entry (macOS) or environment variable holding the backup passphrase; never the passphrase itself |
 | `DEGRADED_MODE` | on | Write the morning brief without a model when the budget stops runs or the model run fails |
@@ -430,6 +439,7 @@ endpoints, Claude Code's permission rules, and every credential. Undo a change f
 | `MONTH_REPORT_MODES` | morning weekly worklist eod review-loop kit-run:* | The run kinds `kit-wins month` lists by name; every other run is one "other runs" line |
 | `TICKET_WATCH`, `TICKET_SERVER`, `TICKET_TOOLS`, `TICKET_QUERY` | off, empty | The morning ticket watcher: the gateway searches this connector with these read-only tools for your tickets (empty query: where you're the caller, requester, or assignee); `kit-tickets diff` reports what changed |
 | `TICKET_MAX`, `TICKET_DAYS` | 40, 14 | Most tickets the watcher checks, and how many days back a closed one still counts |
+| `TICKET_UNASSIGNED_DAYS`, `TICKET_BOUNCE_MOVES`, `TICKET_ROUTING_FILE` | 3, 2, memory/context/ticket-routing.md | The routing watch: unassigned too long, moved between groups too often, and the routing map for misrouted tickets (copy `kit/templates/ticket-routing.md` there and replace the examples with your groups) |
 | `MCP_WATCH`, `MCP_WATCH_LONG_HOURS` | on, 8 | The long-session token watchdog's hooks (`kit-mcp-watch`), and how many hours makes a session "long" in its advice |
 | `TEAMMAP_COVERAGE` | empty | Another coverage file for `kit-teammap` (empty: `briefs/team/coverage.json`) |
 | `TEXTBACK` | off | macOS only: answer texts you send yourself that start with "Kit" |

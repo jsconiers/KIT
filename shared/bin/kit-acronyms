@@ -1,0 +1,418 @@
+#!/usr/bin/env python3
+"""kit-acronyms: is every acronym in a draft spelled out where it's first used, and what does each one stand for?
+
+  kit-acronyms check PROJECT [DOC] [--json] [--table] [--write] [--all]
+                       one draft (a file in the project or its drafts/ folder, or a path; the latest in drafts/
+                       when none is named) against itself and the project's other documents
+  kit-acronyms check FILE [--json] [--table]
+                       a document outside a project (only the document, the template, and Kit's glossary are used)
+  kit-acronyms table PROJECT [DOC]
+                       only the ready-to-paste acronyms table: | Acronym | Meaning |, every acronym the draft uses
+
+Found: words of 2 to 6 capitals and digits with at least two capitals (API, S3 is not one, IPv6 is not one, APIs is
+API), outside code (`...`), all-capital headings and watermarks (DRAFT, CONFIDENTIAL), identifiers (IA-12,
+INC00123, Q-012), Roman numerals, and units (GB, TB, MHz). Add words to leave out to PROJECT/acronyms-ignore.txt
+(one per line).
+
+Each acronym gets one status:
+  missing      never spelled out in the draft. A meaning is proposed from, in order: the draft's own acronyms
+               table, the project's other documents, the project's glossary (glossary.md or acronyms.md in the
+               project), the IA and GDS templates' acronyms tables (the Templates folder in library.md, else Kit's
+               templates/), and Kit's memory/glossary.md (work terms; a personal section is skipped), each cited.
+               With none, it's a question for the owner.
+  late         spelled out, but after its first use: the report says where it's first used and where it's spelled out
+  table only   only in the draft's acronyms or glossary table, never in the text (spell it out at first use too)
+  ok           spelled out at first use ("Key Management Service (KMS)" or "KMS (Key Management Service)");
+               listed only with --all
+
+The report is ranked: questions first, then missing with a proposal, late, and table only, the most used first.
+Read-only: the draft is never changed (the owner applies the fixes, in place). --write saves the report in the
+project's reviews/ folder. Exit status: 0 nothing to fix, 1 something to fix, 2 a usage problem. Work content.
+"""
+import argparse
+import json
+import os
+import pathlib
+import re
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import kit_daily as kd  # noqa: E402
+import kit_doctext as dtx  # noqa: E402
+
+PROG = "kit-acronyms"
+KIT = pathlib.Path(os.path.expanduser(os.environ.get("KIT_DIR", "~/Claude/Agents/kit")))
+CAND = re.compile(r"(?<![\w-])([A-Z][A-Z0-9]{1,5})(s?)(?![\w])")
+FILLER = {"of", "and", "for", "the", "to", "in", "on", "a", "an", "&", "as", "at", "by", "with", "or", "via"}
+UNITS = {"GB", "TB", "MB", "KB", "PB", "EB", "GIB", "TIB", "MIB", "KIB", "MHZ", "GHZ", "KHZ", "MBPS", "GBPS",
+         "KBPS", "TBPS", "IOPS", "RPM", "MS", "NS", "US", "AM", "PM", "UTC", "GMT", "EST", "EDT", "PST", "PDT", "CET",
+         "BST", "USD", "EUR", "GBP", "KG", "KM"}
+STOP = {"DRAFT", "CONFIDENTIAL", "INTERNAL", "RESTRICTED", "PUBLIC", "FINAL", "NOTE", "NOTES", "TODO", "TBD", "TBC",
+        "FYI", "OK", "AND", "OR", "NOT", "THE", "FOR", "ALL", "NEW", "NONE", "YES", "NO", "WIP", "END"}
+ROMAN = re.compile(r"^[IVXLC]+$")
+ORDER = {"question": 0, "missing": 1, "late": 2, "table only": 3, "ok": 4}
+
+
+# ---------------------------------------------------------------- finding acronyms
+def strip_code(text):
+    return re.sub(r"`[^`]*`", " ", text)
+
+
+def shouting(text):
+    words = re.findall(r"[A-Za-z]{2,}", text)
+    return len(words) >= 3 and sum(w.isupper() for w in words) / len(words) >= 0.8
+
+
+def is_candidate(tok, ignore):
+    if sum(c.isupper() for c in tok) < 2 or tok in ignore or tok in STOP or tok.upper() in UNITS:
+        return False
+    if ROMAN.match(tok) and re.fullmatch(r"M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})", tok):
+        return False
+    return True
+
+
+def occurrences(blocks, ignore):
+    """[(acronym, block, start)] in reading order, leaving out identifiers, headings in capitals, and code."""
+    out = []
+    for b in blocks:
+        text = strip_code(b.text)
+        if shouting(text) and b.kind in ("heading", "para", "caption"):
+            continue
+        for m in CAND.finditer(text):
+            tok = m.group(1)
+            after = text[m.end():m.end() + 2]
+            if re.match(r"-?\d", after) or re.match(r"-[A-Z]{0,2}\d", text[m.end():m.end() + 4]):
+                continue        # IA-12, GDS-12, INC12345, Q-012
+            if not is_candidate(tok, ignore):
+                continue
+            out.append((tok, b, m.start()))
+    return out
+
+
+# ---------------------------------------------------------------- expansions
+def letters(acr):
+    return [c for c in acr.upper() if c.isalpha()]
+
+
+def initials_match(words, acr):
+    """Do these words spell the acronym? Filler words may be skipped; one word may give two letters (its first
+    letter and a later capital, as in PostgreSQL) and a hyphenated word gives one letter per part."""
+    want = letters(acr)
+    parts = []
+    for w in words:
+        parts += [p for p in re.split(r"[-/]", w) if p]
+
+    def go(i, j):
+        if j == len(want):
+            return i == len(parts)
+        if i == len(parts):
+            return False
+        w = parts[i]
+        lw = w.lower().strip(".,;:")
+        if lw in FILLER and go(i + 1, j):
+            return True
+        if not w or w[0].upper() != want[j]:
+            return False
+        if go(i + 1, j + 1):
+            return True
+        caps = [c for c in w[1:] if c.isupper()]   # PostgreSQL, JavaScript, NetOps
+        k = j + 1
+        for c in caps:
+            if k < len(want) and c == want[k]:
+                k += 1
+                if go(i + 1, k):
+                    return True
+            else:
+                break
+        return False
+    return go(0, 0)
+
+
+def tidy(words):
+    return " ".join(words).strip(" ,;:-").strip()
+
+
+def expansion_before(text, start, acr):
+    """'Key Management Service (KMS)': the words before '(' that spell the acronym."""
+    head = re.findall(r"[A-Za-z0-9][\w'./&-]*", text[:start])[-(len(acr) + 6):]
+    for k in range(min(len(head), len(acr) + 6), 0, -1):
+        cand = head[-k:]
+        if initials_match(cand, acr):
+            while cand and cand[0].lower() in FILLER:
+                cand = cand[1:]
+            return tidy(cand)
+    return None
+
+
+def expansion_after(inner, acr):
+    """'KMS (Key Management Service)': the words in the brackets that spell it."""
+    words = re.findall(r"[A-Za-z0-9][\w'./&-]*", inner)
+    if 1 <= len(words) <= len(acr) + 6 and initials_match(words, acr):
+        return tidy(words)
+    return None
+
+
+def expansions_in(blocks, acrs):
+    """{acr: [(meaning, block, start, how)]} for spelled-out forms, and {acr: (meaning, block)} from tables."""
+    found, table = {}, {}
+    pat = re.compile(r"\(\s*([A-Z][A-Z0-9]{1,5})s?\s*\)")
+    for b in blocks:
+        text = strip_code(b.text)
+        for m in pat.finditer(text):
+            a = m.group(1)
+            if a in acrs:
+                e = expansion_before(text, m.start(), a)
+                if e:
+                    found.setdefault(a, []).append((e, b, m.start(), "before"))
+        for m in re.finditer(r"(?<![\w-])([A-Z][A-Z0-9]{1,5})s?\s*\(([^()]{3,90})\)", text):
+            a = m.group(1)
+            if a in acrs:
+                e = expansion_after(m.group(2), a)
+                if e:
+                    found.setdefault(a, []).append((e, b, m.start(), "after"))
+        if b.kind == "row" and len(b.cells) >= 2:
+            a = b.cells[0].strip().rstrip("s") if b.cells[0].strip().endswith("s") and b.cells[0].strip()[:-1] in acrs \
+                else b.cells[0].strip()
+            mean = b.cells[1].strip()
+            if a in acrs and mean and not CAND.fullmatch(mean) and len(mean.split()) <= 12:
+                table.setdefault(a, (mean, b))
+        m = re.match(r"^\*{0,2}([A-Z][A-Z0-9]{1,5})\*{0,2}\s*(?::|—|–| - |=)\s*(.{3,120})$", text)
+        if m and m.group(1) in acrs and b.kind == "para":
+            table.setdefault(m.group(1), (m.group(2).split(" (")[0].strip(" ."), b))
+    return found, table
+
+
+# ---------------------------------------------------------------- outside sources
+def glossary_terms(path, skip_personal=False):
+    """{acr: meaning} from a glossary or acronyms file: '- **ABC**: meaning', '| ABC | meaning |', 'ABC: meaning'."""
+    out = {}
+    try:
+        text = pathlib.Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+    skipping = False
+    for line in text.splitlines():
+        s = line.strip()
+        h = re.match(r"^#{1,6}\s+(.*)", s)
+        if h:
+            skipping = skip_personal and bool(re.search(r"personal|family|home|health|money|trading", h.group(1), re.I))
+            continue
+        if skipping or (skip_personal and re.search(r"\(personal\)|\[personal\]", s, re.I)):
+            continue
+        m = (re.match(r"^[-*]\s+\*\*([A-Z][A-Z0-9]{1,5})s?\*\*\s*[:—–-]\s*(.+)$", s)
+             or re.match(r"^\|\s*\**([A-Z][A-Z0-9]{1,5})s?\**\s*\|\s*([^|]+?)\s*\|", s)
+             or re.match(r"^([A-Z][A-Z0-9]{1,5})s?\s*:\s+(.+)$", s))
+        if m and m.group(2).strip().lower() not in ("means", "meaning", "definition", "expansion", "term"):
+            mean = re.split(r"\s+\(|;", m.group(2).strip())[0].strip(" .")
+            if mean:
+                out.setdefault(m.group(1), mean)
+    return out
+
+
+def doc_table_terms(path):
+    """Acronyms a document defines in a table or spells out in its text: {acr: meaning}."""
+    try:
+        blocks = dtx.blocks(path)
+    except Exception:  # noqa: BLE001 - a source that can't be read is skipped
+        return {}
+    acrs = {t for t, _b, _s in occurrences(blocks, set())}
+    acrs |= {c.strip() for b in blocks if b.kind == "row" and b.cells for c in b.cells[:1] if CAND.fullmatch(c.strip())}
+    found, table = expansions_in(blocks, acrs)
+    out = {a: m for a, (m, _b) in table.items()}
+    for a, lst in found.items():
+        out.setdefault(a, lst[0][0])
+    return out
+
+
+def setup_field(label):
+    f = KIT / "memory/context/library.md"
+    text = f.read_text(errors="ignore") if f.exists() else ""
+    m = re.search(r"^- \*\*" + re.escape(label) + r":\*\*(.*?)(?=^- \*\*|\Z)", text, re.S | re.M)
+    t = re.search(r"`([^`]+)`", m.group(1)) if m else None
+    return pathlib.Path(os.path.expanduser(t.group(1))) if t else None
+
+
+def template_files():
+    roots = [p for p in (setup_field("Templates folder"), KIT / "templates") if p and p.is_dir()]
+    out = []
+    for r in roots:
+        for p in sorted(r.rglob("*")):
+            n = p.name.lower()
+            if p.is_file() and p.suffix.lower() in (".docx", ".md", ".dotx") and not n.startswith(("~$", ".")) \
+                    and re.search(r"\b(ia|gds|impact|design|template|acronym|glossary)", n):
+                out.append(p)
+    return out[:40]
+
+
+def sources(project, doc):
+    """[(label, {acr: meaning})] in the order proposals are taken from."""
+    out = []
+    if project:
+        others = [p for p in sorted(project.rglob("*"))
+                  if p.is_file() and p.suffix.lower() in dtx.DOC_SUFFIXES and p.resolve() != doc.resolve()
+                  and not p.name.startswith(("~$", ".")) and "reviews" not in p.relative_to(project).parts
+                  and p.name.lower() not in ("glossary.md", "acronyms.md", "facts.md", "acronyms-ignore.txt")][:60]
+        for p in others:
+            terms = doc_table_terms(p)
+            if terms:
+                out.append((f"project document {p.relative_to(project)}", terms))
+        for g in ("glossary.md", "acronyms.md"):
+            if (project / g).is_file():
+                out.append((f"project {g}", glossary_terms(project / g)))
+    for t in template_files():
+        terms = doc_table_terms(t) if t.suffix.lower() != ".dotx" else {}
+        if terms:
+            out.append((f"template {t.name}", terms))
+    g = KIT / "memory/glossary.md"
+    if g.is_file():
+        out.append(("Kit's glossary", glossary_terms(g, skip_personal=True)))
+    return out
+
+
+# ---------------------------------------------------------------- the check
+def where(b):
+    return b.where or b.section or "start"
+
+
+def check(doc, project=None, ignore=()):
+    blocks = dtx.blocks(doc)
+    occ = occurrences(blocks, set(ignore))
+    first, uses = {}, {}
+    for a, b, s in occ:
+        if b.kind == "row" and b.cells and b.cells[0].strip().rstrip("s") in (a, a + "s") and len(b.cells) >= 2 \
+                and s < len(b.cells[0]) + 1:
+            continue        # its own row in an acronyms table is a definition, not a use
+        uses[a] = uses.get(a, 0) + 1
+        first.setdefault(a, (b, s))
+    acrs = set(first)
+    found, table = expansions_in(blocks, acrs | {t for t, _b, _s in occ})
+    acrs = set(first)
+    srcs = None
+    results = []
+    for a in sorted(acrs, key=lambda x: (first[x][0].index, first[x][1])):
+        fb, fs = first[a]
+        text_exp = [e for e in found.get(a, []) if e[1].kind != "row"]
+        r = {"acronym": a, "uses": uses[a], "first_use": where(fb), "meaning": None, "source": None}
+        if text_exp:
+            e = min(text_exp, key=lambda x: (x[1].index, x[2]))
+            r["meaning"], r["source"] = e[0], "the draft, " + where(e[1])
+            r["spelled_out"] = where(e[1])
+            r["status"] = "ok" if (e[1].index, e[2]) <= (fb.index, fs) else "late"
+        elif a in table:
+            r["meaning"], r["source"], r["status"] = table[a][0], "the draft's table, " + where(table[a][1]), "table only"
+        else:
+            if srcs is None:
+                srcs = sources(project, doc)
+            hit = next(((lbl, t[a]) for lbl, t in srcs if a in t), None)
+            if hit:
+                r["status"], r["source"], r["meaning"] = "missing", hit[0], hit[1]
+            else:
+                r["status"] = "question"
+        results.append(r)
+    results.sort(key=lambda r: (ORDER[r["status"]], -r["uses"], r["acronym"]))
+    return results
+
+
+def report(doc, results, show_all=False):
+    todo = [r for r in results if r["status"] != "ok"]
+    n = {k: sum(1 for r in results if r["status"] == k) for k in ORDER}
+    lines = [f"# Acronyms: {doc.name}", "",
+             f"Checked {kd.today().strftime('%d-%b-%Y')}: {len(results)} acronyms; {n['question']} with no known "
+             f"meaning, {n['missing']} never spelled out, {n['late']} spelled out late, {n['table only']} only in "
+             f"a table, {n['ok']} fine. Nothing in the draft was changed.", ""]
+    if n["question"]:
+        lines += ["## Questions for the owner (no meaning found anywhere)", ""]
+        lines += [f"- **{r['acronym']}** ({r['uses']} use{'' if r['uses'] == 1 else 's'}; first at {r['first_use']}): what does it stand for?"
+                  for r in todo if r["status"] == "question"]
+        lines.append("")
+    groups = (("missing", "Never spelled out: spell out at first use"),
+              ("late", "Spelled out after first use: move the spelling-out to the first use"),
+              ("table only", "Only in the acronyms table: spell out at first use too"))
+    for key, title in groups:
+        rows = [r for r in todo if r["status"] == key]
+        if rows:
+            lines += [f"## {title}", "", "| Acronym | Uses | First use | Proposed | From |", "|---|---|---|---|---|"]
+            for r in rows:
+                first = r["first_use"] + (f" (spelled out at {r['spelled_out']})" if key == "late" else "")
+                lines.append(f"| {r['acronym']} | {r['uses']} | {first} | {r['meaning']} ({r['acronym']}) | "
+                             f"{r['source']} |")
+            lines.append("")
+    if show_all and n["ok"]:
+        lines += ["## Fine", ""] + [f"- {r['acronym']}: {r['meaning']}" for r in results if r["status"] == "ok"] + [""]
+    if not todo:
+        lines += ["Every acronym is spelled out at its first use.", ""]
+    return "\n".join(lines)
+
+
+def table(results):
+    rows = sorted(results, key=lambda r: r["acronym"])
+    out = ["| Acronym | Meaning |", "|---|---|"]
+    out += [f"| {r['acronym']} | {r['meaning'] or '(to confirm)'} |" for r in rows]
+    return "\n".join(out) + "\n"
+
+
+def ignore_list(project):
+    f = project / "acronyms-ignore.txt" if project else None
+    if not f or not f.is_file():
+        return set()
+    return {ln.strip() for ln in f.read_text(errors="ignore").splitlines() if ln.strip() and not ln.startswith("#")}
+
+
+def resolve(target, doc):
+    p = pathlib.Path(os.path.expanduser(target))
+    if p.is_file():
+        if doc:
+            raise dtx.Stop("give a project and a document, or one file")
+        return dtx.project_of(p), p.resolve()
+    project = dtx.project_dir(target)
+    if doc:
+        return project, dtx.find_doc(project, doc)
+    ds = dtx.drafts(project)
+    if not ds:
+        raise dtx.Stop(f"no drafts in {project / 'drafts'}")
+    return project, max(ds, key=lambda x: x.stat().st_mtime)
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog=PROG, description="Check that acronyms are spelled out at first use.")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    for name in ("check", "table"):
+        c = sub.add_parser(name)
+        c.add_argument("target", help="a project, or a file")
+        c.add_argument("doc", nargs="?")
+        if name == "check":
+            c.add_argument("--json", action="store_true")
+            c.add_argument("--table", action="store_true")
+            c.add_argument("--write", action="store_true")
+            c.add_argument("--all", action="store_true")
+    a = ap.parse_args(argv)
+    try:
+        project, doc = resolve(a.target, a.doc)
+        results = check(doc, project, ignore_list(project))
+    except dtx.Stop as e:
+        print(f"{PROG}: {e}", file=sys.stderr)
+        return e.code
+    except RuntimeError as e:
+        print(f"{PROG}: {e}", file=sys.stderr)
+        return 2
+    todo = any(r["status"] != "ok" for r in results)
+    if a.cmd == "table":
+        print(table(results), end="")
+        return 0
+    if a.json:
+        print(json.dumps({"document": str(doc), "acronyms": results}, indent=2))
+        return 1 if todo else 0
+    text = report(doc, results, a.all)
+    if a.table:
+        text += "\n## Acronyms table, ready to paste\n\n" + table(results)
+    print(text, end="")
+    if a.write:
+        if not project:
+            print(f"{PROG}: --write needs the document to be in a project", file=sys.stderr)
+            return 2
+        print(f"\nSaved: {dtx.save_report(project, doc.stem, 'acronyms', text)}")
+    return 1 if todo else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

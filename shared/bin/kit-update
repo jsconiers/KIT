@@ -659,6 +659,7 @@ def zip_update(args):
                 print("Nothing changed.")
                 return 0
 
+        pre_snapshot()
         # Keep the release for rollback, in a folder Kit owns, then run its installer.
         RELEASES.mkdir(parents=True, exist_ok=True)
         if not IS_WIN:
@@ -712,6 +713,21 @@ def zip_update(args):
         shutil.rmtree(base, ignore_errors=True)
 
 
+def pre_snapshot():
+    """A snapshot of Kit's configuration before an update changes anything, with the installed kit-config (when
+    there is one). It never stops the update."""
+    kc = pathlib.Path(os.path.expanduser("~/Claude/Agents/kit/.install/shared/bin/kit-config"))
+    if not kc.is_file():
+        return
+    try:
+        r = subprocess.run([sys.executable, str(kc), "snapshot", "--note", "before kit-update", "--quiet"],
+                           stdin=subprocess.DEVNULL, timeout=120)
+        if r.returncode:
+            print("kit-update: note: no configuration snapshot was taken")
+    except (OSError, subprocess.SubprocessError):
+        print("kit-update: note: no configuration snapshot was taken")
+
+
 def main(argv):
     sys.stdout.reconfigure(line_buffering=True)
     ap = argparse.ArgumentParser(prog="kit-update", description=__doc__,
@@ -763,6 +779,7 @@ def main(argv):
             print("Nothing changed.")
             return 0
 
+    pre_snapshot()
     backup = None
     if moving:
         backup = f"backup/pre-update-{datetime.datetime.now():%Y%m%d-%H%M%S}"

@@ -5,7 +5,69 @@ What changed in each Kit release. The installed version is in
 morning brief summarizes the new entries once. Format: [Keep a Changelog](https://keepachangelog.com),
 versions follow [semantic versioning](https://semver.org).
 
-## [Unreleased]
+## [1.8.1] - 2026-11-20
+
+### Added
+- Outlook auto-recovery: `kit-outlook` now checks the calendar as well as the version, because Outlook can give its
+  version and still hang on the calendar (what stopped kitmail on 18-20 Nov). That case gets a new `hung` status, with
+  the fix in the brief, the health checks, and a new dashboard banner. `OUTLOOK_RECOVER` is `off`, `notify` (the
+  default), or `restart`. `restart` is your opt-in: when Outlook is open but hung, Kit asks it to quit, then sends
+  SIGTERM if it won't (never SIGKILL), reopens it in the background, and checks again, at most once a day, with the
+  result logged. Kit never starts an Outlook that wasn't open. macOS only (tests/test_outlook_recover.py).
+- Calendar fallback cache, `kit-calcache`: while the calendar answers, the morning and weekly runs keep an owner-only
+  copy in `.install/cache/` for 14 days. On a morning when Outlook is hung, the model run and `kit-degraded` use the
+  newest copy that covers today, labelled "may be stale", or else last week's recurring meetings, labelled "likely
+  only", instead of no calendar. `CALENDAR_CACHE_CMD` and `CALENDAR_CACHE_DAYS` set a look-ahead;
+  `kit-degraded --no-calendar-cache` turns the fallback off. macOS and Windows (tests/test_calendar_cache.py).
+- The usage-limit guard (`shared/kit_limits.py`): when a run fails because Claude's usage limit is reached ("You will
+  regain access on ..."), Kit records the limit and its reset time in `.install/logs/usage-limit.json`. Until then the
+  scheduled model runs skip, you get one notice, and the morning brief comes from `kit-degraded`. A known reset clears
+  itself, an unknown one is tested once a day by the preflight check, and any successful run clears it. A usage-limit
+  failure is no longer retried. `USAGE_LIMIT_GUARD="off"` turns it off. macOS and Windows (tests/test_usage_limit.py).
+- `kit-cost limit [status|clear] [--json|--brief]`, with the new `USAGE_LIMIT_MONTHLY_USD`: the month's spend and
+  projection against your per-user API limit, and a brief warning from `COST_WARN_PCT` on. The health score takes 10
+  points off the runs part while a limit holds, and the dashboard shows a "Usage limit" banner.
+- Duplicate catcher at add time: `todo` won't add an item that matches an open one in the same section (case,
+  punctuation, dates, weekdays, the [work] tag, and filler words set aside); it names the match and exits 1, and
+  `--force` adds it anyway. The phone sync, run and connector alerts, `kit-dates`, and `kit-expiry` add with
+  `--merge`, which marks the open item "seen again" and logs it to `.install/logs/queue-dupes.log`. `todo dupes` lists
+  likely pairs. `QUEUE_DUP_THRESHOLD` (default 0.8) sets how alike two items must be (tests/test_queue_dupes.py).
+- Ticket routing watch: the ticket watcher adds a "Routing" list to "Your tickets": open tickets unassigned longer than
+  `TICKET_UNASSIGNED_DAYS` (3), moved between groups `TICKET_BOUNCE_MOVES` times (2), or misrouted by your routing map
+  (`TICKET_ROUTING_FILE`, default `memory/context/ticket-routing.md`; template in `kit/templates/ticket-routing.md`).
+  Each has a drafted next step; nothing is sent and no ticket is changed. The gateway now also returns
+  `assignment_group` and `opened`. `kit-tickets routing` shows the last findings (tests/test_ticket_routing.py).
+- `kit-acronyms`, the acronym check: each acronym in a draft is marked spelled out at first use, spelled out late,
+  only in the acronyms table, or never spelled out, with a proposed meaning from the draft, the project's other
+  documents, the project glossary, the IA and GDS templates' acronyms tables, and Kit's glossary (its personal section
+  skipped), each with its source; one with no known meaning becomes a question. `--json`, `--table` (a paste-ready
+  acronyms table), `--write` (to `reviews/`). The draft is never changed. The reviewer and the IA and GDS writers run
+  it (tests/test_acronyms.py).
+- `kit-pages`, the page-budget check: .docx and .pdf drafts against budgets in `facts.md` (rows with the unit `pages`,
+  aliases as file-name patterns) or `--max N`. PDF counts from pdfinfo or qpdf, else the file's page tree; a .docx
+  count is Word's as of its last save, or a LibreOffice render with `--render` if LibreOffice is installed. A document
+  over budget lists its largest sections as the places to cut, and the tool exits 1. `check`, `budgets`, `count`
+  (tests/test_pages.py). `kit-review-loop score` takes 5 points off for each draft over its page budget.
+- `kit-config`, configuration snapshots and restore: `snapshot [--note] [--force]`, `list`, `show ID`,
+  `diff ID [ID2|current]`, `restore ID [--yes] [--include-permissions]`, `prune [--keep N]`. A snapshot holds the run
+  config, the JSON configs, the setup files, the wizard's state, and Kit's own permission rules in
+  `~/.claude/settings.json`. Credentials are never stored: a credential's line or key is left out (only that line, so a comment
+  or prose line that merely looks credential-shaped doesn't cost the whole file), a restore keeps the current one, and files named like `.env`, `*.pem`, or `credentials` are skipped. Snapshots live in
+  `.install/snapshots/<id>/` (0700/0600, a SHA-256 per file); `SNAPSHOT_KEEP` keeps 30. A restore previews first and
+  snapshots the current state, so it can be undone; the owner's own permission rules are never touched. The settings
+  page, install.sh, install.ps1, and kit-update snapshot before they change anything (tests/test_kit_config.py).
+
+### Changed
+- `kit-settings ui` is redesigned: a section list by group (Delivery, Briefs & schedule, To-dos & sync, Connectors,
+  Budget & limits, Documents, Agents & reviews, Privacy & retention, Advanced) with counts and not-set badges; search
+  (`/`) and filters (not set, editable, read-only, only changed); plain-English labels and one-line help from one
+  table (`kit_settings.META`), with the raw key small; typed controls (switches, dropdowns, ranged numbers) with
+  inline validation; Undo and Reset to default per field; and Review & save, which shows every pending change and saves
+  them in one confirmed step after a snapshot (nothing is saved if any is invalid). A Snapshots section compares,
+  takes, and restores snapshots. Light and dark themes, no outside resources; every security check is unchanged
+  (tests/test_settings.py, now in CI).
+- A connector or run outage that comes back while its earlier queue item is still open goes on that item instead of
+  a new one.
 
 ### Fixed
 - `kit-dedupe` no longer flags figures that don't disagree: a count with a thousands separator is read whole

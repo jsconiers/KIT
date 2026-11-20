@@ -33,8 +33,9 @@
 # (a lock), a short text file written by the agent, a pluggable delivery step, a dashboard
 # refresh, and an auto-commit of the kit home when it is a git repo.
 #
-# Not ported: the Outlook check before a run (kit-outlook is macOS-only and reports "skipped"
-# here), so on Windows calendar and mail fail the old way if Outlook doesn't answer.
+# Not ported: the Outlook check and restart before a run (kit-outlook is macOS-only and reports "skipped"
+# here; OUTLOOK_RECOVER doesn't apply), so on Windows calendar and mail fail the old way if Outlook doesn't
+# answer, but the degraded brief falls back to the saved calendar (kit-calcache).
 #
 # To test a run without using up that day's run (mirrors the Mac test-run marker):
 #   New-Item -ItemType File "$env:USERPROFILE\Claude\Agents\kit\.install\platform\windows\morning\test-run"
@@ -422,11 +423,43 @@ if ($null -ne $pyc -and (Test-Path -LiteralPath $kitCost)) {
     }
 }
 
-# Degraded mode: at the stop level the morning brief is written from Kit's files, with no model call.
+# Usage-limit guard (kit_limits.py, USAGE_LIMIT_GUARD, default on): while Claude's usage limit holds, no
+# model run can succeed, so the runs stand down (one notice per lapse) and the morning brief goes to
+# kit-degraded instead. A known reset clears itself; an unknown one is tested once a day by preflight.ps1.
 $kitDegraded = Join-Path $KitHome ".install\shared\bin\kit-degraded"
 $DegradedOn = (Cfg "DEGRADED_MODE" "on") -ne "off"
-$DegradedReason = ""
-if ($Mode -eq "morning" -and $CostLevel -eq "stop" -and $DegradedOn -and (Test-Path -LiteralPath $kitDegraded)) {
+$kitLimits = Join-Path $KitHome ".install\shared\kit_limits.py"
+$LimitGuard = (Cfg "USAGE_LIMIT_GUARD" "on") -ne "off"
+$LimitReason = ""
+function Get-LimitWhen {
+    return "$(& $pyc.Exe @($pyc.Args + @($kitLimits, 'when')) 2>$null | Select-Object -First 1)"
+}
+function Send-LimitNotice {
+    $mark = Join-Path $LogDir "usage-limit-notified"
+    if (Test-Path -LiteralPath $mark) { return }
+    $n = Join-Path $LogDir "usage-limit-notice.txt"
+    $msg = "$(& $pyc.Exe @($pyc.Args + @($kitLimits, 'notice')) 2>$null | Select-Object -First 1)"
+    if ($msg.Trim() -eq "") { return }
+    Set-Content -LiteralPath $n -Encoding UTF8 -Value $msg
+    if (Send-Brief $n $false) { Set-Content -LiteralPath $mark -Encoding ASCII -Value "$(Get-Date)" }
+}
+if ($LimitGuard -and $null -ne $pyc -and (Test-Path -LiteralPath $kitLimits)) {
+    $limitLine = "$(& $pyc.Exe @($pyc.Args + @($kitLimits, 'check', '--mode', $Mode)) 2>$null | Select-Object -First 1)"
+    if ($limitLine.StartsWith("limited")) {
+        $LimitReason = "Claude usage limit reached; access returns $(Get-LimitWhen)"
+        Write-Log "== $(Get-Date) ${Mode}: $LimitReason"
+        Send-LimitNotice
+        if ($Mode -ne "morning" -or -not $DegradedOn -or -not (Test-Path -LiteralPath $kitDegraded)) {
+            Write-Log "== $(Get-Date) $Mode run skipped: usage limit (kit-cost limit)"
+            Invoke-RunAlerts
+            exit 0
+        }
+    }
+}
+
+# Degraded mode: at the stop level the morning brief is written from Kit's files, with no model call.
+$DegradedReason = $LimitReason
+if ($DegradedReason -eq "" -and $Mode -eq "morning" -and $CostLevel -eq "stop" -and $DegradedOn -and (Test-Path -LiteralPath $kitDegraded)) {
     $DegradedReason = "$CostPct of this month's budget is used (stop at $(Cfg 'COST_STOP_PCT' '95')%)"
 }
 
@@ -441,6 +474,18 @@ if ($Mode -eq "morning" -or $Mode -eq "weekly") {
         if (Test-Path -LiteralPath $audit) {
             $auditMode = if ($Mode -eq "weekly") { "--weekly" } else { "--daily" }
             & $py.Exe @($py.Args + @($audit, $auditMode)) *> $null
+        }
+        # Calendar cache (CALENDAR_CACHE, default on): keep a copy of the calendar while it answers, so
+        # kit-degraded still has one (labelled "may be stale") when Outlook doesn't. kit-calcache stops the
+        # calendar command after CALENDAR_CACHE_TIMEOUT seconds (90) and never fails the run. There's no
+        # Outlook check or restart on Windows (kit-outlook is macOS only).
+        $calcache = Join-Path $KitHome ".install\shared\bin\kit-calcache"
+        if ((Cfg "CALENDAR_CACHE" "on") -ne "off" -and (Test-Path -LiteralPath $calcache)) {
+            try {
+                & $py.Exe @($py.Args + @($calcache, "save")) 2>&1 | ForEach-Object { Write-Log "$_" }
+            } catch {
+                Write-Log "== calendar cache not saved: $_"
+            }
         }
     }
 }
@@ -571,6 +616,14 @@ if ($Mode -eq "morning" -or $Mode -eq "weekly") {
     }
     if ($ConnectLine -ne "") {
         $promptText += "`n`nConnector check before this run (kit-connect test): put this line, as written, at the top of the brief (below the Audit issue section, if there is one), and if any server says FAIL, add `"Connectors: `" plus the failing server names to the health problems at the top of the text: $ConnectLine"
+    }
+}
+# Usage-limit early warning (USAGE_LIMIT_MONTHLY_USD): kit-cost prints one line when this month's spend
+# or its projection nears the per-user API limit.
+if ($null -ne $pyc -and (Test-Path -LiteralPath $kitCost)) {
+    $limitWarn = "" + (& $pyc.Exe @($pyc.Args + @($kitCost, "limit", "--brief")) 2>$null | Select-Object -First 1)
+    if ($limitWarn.Trim() -ne "") {
+        $promptText += "`n`nUsage limit: add this line, as written, to the health section of what you write and to the health problems at the top of the text: $limitWarn"
     }
 }
 if ($CostLevel -eq "warn" -or $CostLevel -eq "stop") {
@@ -797,6 +850,15 @@ function Invoke-ClaudeOnce {
     } elseif (Test-Path -LiteralPath $RunOut) {
         Get-Content -LiteralPath $RunOut -ErrorAction SilentlyContinue | ForEach-Object { Write-Log "$_" }
     }
+    # A usage-limit failure is recorded so the next runs stand down instead of failing in turn.
+    $isErr = (Test-Path -LiteralPath $RunOut) -and ((Get-Content -LiteralPath $RunOut -Raw -ErrorAction SilentlyContinue) -match '"is_error":\s*true')
+    if ($LimitGuard -and $null -ne $pyc -and (Test-Path -LiteralPath $kitLimits) -and -not $script:TimedOut -and ($rc -ne 0 -or $isErr)) {
+        $hit = "$(& $pyc.Exe @($pyc.Args + @($kitLimits, 'detect', '--source', $Mode, $RunErr, $RunOut)) 2>$null | Select-Object -First 1)"
+        if ($LASTEXITCODE -eq 0 -and $hit -ne "") {
+            Write-Log "== $(Get-Date) ${Mode}: Claude usage limit reached ($hit); later runs stand down until it resets"
+            $script:LimitReason = "Claude usage limit reached; access returns $(Get-LimitWhen)"
+        }
+    }
 }
 function Get-TransientReason {
     # Auto-retry only for failures that look transient; never for refusals over permission or policy.
@@ -805,6 +867,7 @@ function Get-TransientReason {
         if (Test-Path -LiteralPath $f) { $blob += (Get-Content -LiteralPath $f -Raw -ErrorAction SilentlyContinue) + "`n" }
     }
     if ($blob -match '(?i)permission|not allowed|denied|refus|policy') { return "" }
+    if ($script:LimitReason -ne "") { return "" }   # a usage limit doesn't lift in two minutes
     foreach ($p in @('overload(ed)?', 'rate.?limit(ed)?', 'too many requests', '(?<![0-9])(429|500|502|503|504|529)(?![0-9])',
                      'service unavailable', 'temporarily unavailable', 'ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND',
                      'network (error|is unreachable)', 'connection (reset|refused|error)', 'api error')) {
@@ -891,6 +954,15 @@ if (-not $script:TimedOut -and -not $hasText1 -and (Cfg "RETRY_ON" "on") -ne "of
 }
 Remove-Item -LiteralPath $RunOut, $RunErr -Force -ErrorAction SilentlyContinue
 if ($Offline) { $rc = 1 }
+if ($null -ne $pyc -and (Test-Path -LiteralPath $kitLimits)) {
+    $limitFile = Join-Path $LogDir "usage-limit.json"
+    if ($DegradedReason -eq "" -and $rc -eq 0 -and $LimitReason -eq "" -and (Test-Path -LiteralPath $limitFile)) {
+        & $pyc.Exe @($pyc.Args + @($kitLimits, "success", "--source", $Mode)) 2>$null | Out-Null
+        Write-Log "== $(Get-Date) usage limit cleared (the $Mode run succeeded)"
+    } elseif ($LimitReason -ne "" -and $DegradedReason -eq "") {
+        Send-LimitNotice
+    }
+}
 
 Write-Log "== $(Get-Date) end $Mode rc=$rc"
 
@@ -900,7 +972,8 @@ if ($Mode -eq "morning" -and $DegradedOn -and (Test-Path -LiteralPath $kitDegrad
     $dr = $DegradedReason
     $hasText = (Test-Path -LiteralPath $Text) -and ((Get-Item -LiteralPath $Text).Length -gt 0)
     if ($dr -eq "" -and ($TimedOut -or -not $hasText)) {
-        if ($TimedOut) { $dr = "the model run hit its $([int]($Timeout / 60))-minute limit" }
+        if ($LimitReason -ne "") { $dr = $LimitReason }
+        elseif ($TimedOut) { $dr = "the model run hit its $([int]($Timeout / 60))-minute limit" }
         elseif ($rc -ne 0) { $dr = "the model run failed (exit $rc)" }
         else { $dr = "the model run finished without writing the brief" }
         foreach ($f in @($Text, ($Text -replace '\.txt$', '-work.txt'), ($Text -replace '\.txt$', '-personal.txt'))) {

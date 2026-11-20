@@ -94,6 +94,18 @@ TICKET_TOOLS=""
 TICKET_QUERY=""
 TICKET_MAX="40"
 TICKET_DAYS="14"
+# Ticket routing (part of the ticket watcher): a "Routing" list in "Your tickets" with a drafted next step for each
+# open ticket no one has been assigned for over TICKET_UNASSIGNED_DAYS days, bounced between groups
+# TICKET_BOUNCE_MOVES times or more (0 turns that off), or misrouted by your routing map, TICKET_ROUTING_FILE (empty:
+# memory/context/ticket-routing.md; template in kit/templates/ticket-routing.md). Nothing is sent or changed.
+# kit-tickets routing lists the last check's findings.
+TICKET_UNASSIGNED_DAYS="3"
+TICKET_BOUNCE_MOVES="2"
+TICKET_ROUTING_FILE=""
+# To-do duplicates: `todo` won't add an item that matches an open one in the same section (case, punctuation, dates,
+# and the [work] tag aside); scheduled runs and the phone sync note "seen again" on the open one instead.
+# QUEUE_DUP_THRESHOLD is how alike two items must be (0.5 to 1; "off" turns it off). todo dupes lists likely pairs.
+QUEUE_DUP_THRESHOLD="0.8"
 # The long-session token watchdog (MCP_WATCH, on by default): hooks on your Claude Code sessions' MCP calls notice a
 # connector whose session went stale or whose sign-in lapsed, ask you to reconnect it (/mcp), and the brief lists
 # them. MCP_WATCH="off" makes the hooks do nothing. A session open MCP_WATCH_LONG_HOURS or more is called long.
@@ -133,6 +145,31 @@ BACKUP_KEY_ENV=""
 # make it): seconds to wait between retries, and "off" to skip it on setups without Outlook.
 OUTLOOK_RETRY_WAITS="30 90"
 OUTLOOK_CHECK="on"
+# The check also asks for the next day's calendar events, with this many seconds' limit: Outlook can give
+# its version and still hang on the calendar, which is what stops kitmail.
+OUTLOOK_DEEP_TIMEOUT="20"
+# What Kit does when Outlook is open but hung, after the retries (kit-outlook --help):
+#   off      check only; the brief marks calendar and mail stale
+#   notify   the default: the brief, the dashboard, and the health checks say Outlook is hung and how to fix it
+#   restart  your opt-in: Kit quits Outlook (asks it to quit, then a polite SIGTERM if it won't; never a
+#            force-kill), reopens it in the background, and checks again, at most once a day. Outlook keeps
+#            drafts as you type, but a reply in its own window that Outlook hasn't saved yet can be lost.
+# Kit never starts Outlook when it wasn't open. Waits in seconds: for Outlook to close, and for it to load.
+OUTLOOK_RECOVER="notify"
+OUTLOOK_QUIT_WAIT="60"
+OUTLOOK_RESTART_SETTLE="45"
+
+# Calendar cache (kit-calcache): while the calendar answers, the morning and weekly runs keep a copy
+# (.install/cache/, owner-only) so a morning when Outlook is hung still has a calendar, labelled "may be
+# stale", or last week's recurring meetings, labelled as likely only. "off" turns it off.
+# CALENDAR_CACHE_CMD: the command to save (a JSON list of events), with a look-ahead if you like, for example
+#   CALENDAR_CACHE_CMD="~/Claude/Agents/kit/bin/kitmail calendar --from today --to +7 --json"
+# Empty uses CALENDAR_JSON_CMD. CALENDAR_CACHE_DAYS: how many days from today that command covers.
+CALENDAR_CACHE="on"
+CALENDAR_CACHE_CMD=""
+CALENDAR_CACHE_DAYS="1"
+CALENDAR_CACHE_KEEP="14"
+CALENDAR_CACHE_TIMEOUT="90"
 
 # Connector check before the morning brief (kit-connect test, with no read call, so no model cost):
 # one PASS/FAIL line per connector at the top of the brief. Seconds before it gives up, and "off"
@@ -153,6 +190,15 @@ COST_BUDGET_MONTHLY=""
 COST_WARN_PCT="80"
 COST_STOP_PCT="95"
 COST_ESSENTIAL_MODES="morning"
+# Usage-limit guard (shared/kit_limits.py; kit-cost limit shows it). When a run fails because Claude's
+# usage limit is reached ("You will regain access on ..."), the limit and its reset time are recorded in
+# .install/logs/usage-limit.json; until the reset the scheduled model runs skip, you get one notice, and
+# the morning brief is written without a model call (kit-degraded). A known reset clears itself; an
+# unknown one is tested once a day by the preflight check. "off" turns the guard off.
+USAGE_LIMIT_GUARD="on"
+# The per-user API usage limit set for you, in US dollars a month, if you know it (empty: no early
+# warning). The brief warns when this month's spend, or its projection, reaches COST_WARN_PCT of it.
+USAGE_LIMIT_MONTHLY_USD=""
 # Cost alerts (run_alerts.py, at the end of every scheduled run; kit-alerts shows them). With a budget:
 # one [work] item for you and a red Cost banner when the month's projection reaches
 # COST_ALERT_PROJECTION x the budget (a fraction such as 0.9; empty: COST_WARN_PCT of it), cleared
@@ -301,3 +347,6 @@ PREFLIGHT_CONNECTORS=""
 # network before skipping the model run.
 CONNECTION_CHECK="on"
 CONNECTION_WAIT="300"
+
+# Configuration snapshots kept by kit-config (default 30).
+#SNAPSHOT_KEEP="30"

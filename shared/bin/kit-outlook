@@ -1,27 +1,45 @@
 #!/usr/bin/env python3
-"""kit-outlook: check that classic Outlook answers before a run relies on it, retrying if it's slow (macOS only).
+"""kit-outlook: check that classic Outlook answers before a run relies on it, and recover it if it's hung (macOS only).
 
   kit-outlook                       check once now and say what's wrong, if anything
   kit-outlook check                 the same
   kit-outlook check --retry         if Outlook doesn't respond, wait and try again (30 s, then 90 s)
+  kit-outlook check --recover       after the retries, act on OUTLOOK_RECOVER (see below)
   kit-outlook check --write FILE    also write the result to FILE (the scheduled runs use
-                                    briefs/outlook.txt, which the brief and doctor.py read)
+                                    briefs/outlook.txt, which the brief, the dashboard, and doctor.py read)
   kit-outlook status FILE           print the result a run last wrote
 
-It never starts, quits, or restarts Outlook. If Outlook isn't running, it says so and stops. If
-Outlook is running but doesn't answer (AppleEvent timeout, error -1712), it retries; if Outlook
-still doesn't answer, the brief marks its calendar and mail sections stale and asks you to restart
-Outlook. Change the waits with OUTLOOK_RETRY_WAITS in .install/shared/morning/config, in seconds,
-for example OUTLOOK_RETRY_WAITS="30 90".
+Each check is one AppleScript call that asks two things: Outlook's version, and how many calendar events it
+has in the next day (with a shorter time limit, OUTLOOK_DEEP_TIMEOUT, 20 seconds by default). Outlook can
+answer the first and hang on the second, which is what stops kitmail's calendar call (AppleEvent timeout,
+error -1712), so a version answer alone no longer counts as "ok".
+
+Recovery, OUTLOOK_RECOVER in .install/shared/morning/config:
+  off       check only; the brief marks calendar and mail stale
+  notify    the default: the brief, the dashboard, and the health checks say Outlook is hung and how to fix
+            it (quit and reopen Outlook); nothing is touched
+  restart   your opt-in, and the setting is the approval: when Outlook is open but hung (not-responding or
+            hung, after the retries), Kit restarts it, at most once a day (.install/logs/outlook-restart-DATE):
+              1. asks Outlook to quit (AppleScript, 30-second limit) and waits up to OUTLOOK_QUIT_WAIT
+                 seconds (60) for it to close
+              2. if it's still open, sends the Outlook process alone a polite stop (SIGTERM) and waits again
+              3. if it's still open after that, gives up and asks you to Force Quit it: Kit never force-kills
+                 Outlook (no SIGKILL), so a window Outlook is still saving is never cut off
+              4. reopens Outlook in the background (open -g), waits OUTLOOK_RESTART_SETTLE seconds (45) for it
+                 to load, and checks again, with the retries
+            The result, and what Kit did, go in the result file and the run's log. Outlook keeps drafts as you
+            type, but a reply open in its own window that Outlook hasn't saved yet can be lost in step 2.
+Kit never starts Outlook when it wasn't open, in any mode.
 
 The result file has one line: a status word, the time, and a plain message. Status words:
-  ok              Outlook answered
+  ok              Outlook answered, calendar included
   not-running     Outlook isn't open; nothing was started
-  not-responding  Outlook is open but didn't answer, even after the retries
+  not-responding  Outlook is open but didn't answer at all, even after the retries
+  hung            Outlook is open and gives its version, but its calendar didn't answer in time
   blocked         macOS blocked Kit from controlling Outlook (Automation permission)
   error           something else went wrong; the message says what
-  skipped         not macOS: kit-outlook is macOS only, and Windows has no command for it (the Windows runs
-                  talk to Outlook through COM instead)
+  skipped         not macOS: kit-outlook is macOS only. The Windows runs talk to Outlook through COM, and this
+                  recovery isn't available there (N/A)
 
 Exit status: 0 for ok or skipped, 1 for anything else.
 """
@@ -38,27 +56,73 @@ CONFIG = KIT / ".install/shared/morning/config"
 BUNDLE = "com.microsoft.Outlook"
 PROCESS = "Microsoft Outlook"
 DEFAULT_WAITS = [30, 90]
-# Asks Outlook for its version, only if it's already running, and gives up after 20 seconds.
-PROBE = f'''
+RECOVER_MODES = ("off", "notify", "restart")
+STUCK = ("not-responding", "hung")
+
+
+def probe_script(deep_timeout):
+    """Version (20 s), then the next day's calendar events (deep_timeout s), only if Outlook is already running.
+    Prints VERSION|CAL:N, or VERSION|CAL-HUNG when the calendar part times out."""
+    return f'''
 if application id "{BUNDLE}" is running then
   with timeout of 20 seconds
-    tell application id "{BUNDLE}" to get version
+    tell application id "{BUNDLE}" to set v to version
   end timeout
+  try
+    with timeout of {deep_timeout} seconds
+      tell application id "{BUNDLE}"
+        set d to current date
+        set n to count (calendar events whose start time is greater than d and start time is less than (d + 1 * days))
+      end tell
+    end timeout
+    return (v as text) & "|CAL:" & (n as text)
+  on error errMsg number errNum
+    if errNum is -1712 then return (v as text) & "|CAL-HUNG"
+    return (v as text) & "|CAL-ERR:" & (errNum as text)
+  end try
 else
   return "NOT-RUNNING"
 end if
 '''
+
+
+QUIT = f'''
+with timeout of 30 seconds
+  tell application id "{BUNDLE}" to quit
+end timeout
+'''
 RESTART = "Outlook didn't respond; restart Outlook, then ask Kit to redo the calendar and mail."
 
 
-def waits():
-    raw = os.environ.get("OUTLOOK_RETRY_WAITS")
+def hung_msg(deep):
+    return (f"Outlook is open and answers, but its calendar didn't answer in {deep} seconds (it's hung). Quit and "
+            "reopen Outlook (Outlook > Quit Outlook, or Force Quit if it won't close), then ask Kit to redo the "
+            "calendar and mail.")
+
+
+def setting(name, default=None):
+    raw = os.environ.get(name)
     if raw is None and CONFIG.exists():
-        m = re.search(r'^OUTLOOK_RETRY_WAITS="([^"]*)"', CONFIG.read_text(errors="ignore"), re.M)
+        m = re.search(rf'^{name}="([^"]*)"', CONFIG.read_text(errors="ignore"), re.M)
         raw = m.group(1) if m else None
+    return default if raw is None else raw
+
+
+def number(name, default):
+    raw = setting(name)
+    return int(raw) if raw is not None and raw.strip().isdigit() else default
+
+
+def waits():
+    raw = setting("OUTLOOK_RETRY_WAITS")
     if raw is None:
         return DEFAULT_WAITS
     return [int(w) for w in raw.split() if w.isdigit()]
+
+
+def recover_mode():
+    m = (setting("OUTLOOK_RECOVER", "notify") or "notify").strip().lower()
+    return m if m in RECOVER_MODES else "notify"
 
 
 def running():
@@ -69,15 +133,22 @@ def probe():
     """One try. Returns (status, message)."""
     if not running():
         return "not-running", "Outlook isn't open, so Kit didn't use it. Open classic Outlook if you want calendar and mail."
+    deep = number("OUTLOOK_DEEP_TIMEOUT", 20)
     try:
-        p = subprocess.run(["osascript", "-"], input=PROBE, capture_output=True, text=True, timeout=40)
+        p = subprocess.run(["osascript", "-"], input=probe_script(deep), capture_output=True, text=True,
+                           timeout=40 + deep)
     except subprocess.TimeoutExpired:
         return "not-responding", RESTART
     out, err = p.stdout.strip(), p.stderr.strip()
     if p.returncode == 0:
         if out == "NOT-RUNNING":
             return "not-running", "Outlook closed during the check, so Kit didn't use it."
-        return "ok", f"Outlook {out} answered."
+        version, _, cal = out.partition("|")
+        if cal == "CAL-HUNG":
+            return "hung", hung_msg(deep)
+        if cal.startswith("CAL-ERR"):
+            return "ok", f"Outlook {version} answered (its calendar check gave error {cal[8:]}, so kitmail may still fail)."
+        return "ok", f"Outlook {version} answered."
     if "-1712" in err or "timed out" in err.lower():
         return "not-responding", RESTART
     if "-1743" in err or "Not authorized" in err:
@@ -93,13 +164,88 @@ def check(retry):
     tries = 1
     if retry:
         for w in waits():
-            if status != "not-responding":
+            if status not in STUCK:
                 break
             time.sleep(w)
             status, msg = probe()
             tries += 1
-    if status == "not-responding" and tries > 1:
+    if status in STUCK and tries > 1:
         msg = f"{msg} (no answer after {tries} tries)"
+    return status, msg
+
+
+def log(line):
+    d = KIT / ".install/logs"
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        with open(d / "outlook-recover.log", "a", encoding="utf-8") as f:
+            f.write(f"{datetime.datetime.now():%Y-%m-%d %H:%M:%S} {line}\n")
+    except OSError:
+        pass
+
+
+def wait_closed(seconds):
+    """True once Outlook's process is gone, checking every 2 seconds for up to `seconds`."""
+    end = time.monotonic() + seconds
+    while True:
+        if not running():
+            return True
+        if time.monotonic() >= end:
+            return False
+        time.sleep(min(2, max(0.0, end - time.monotonic())))
+
+
+def restart(retry):
+    """Quit Outlook (politely, then SIGTERM), reopen it in the background, and check again. Never SIGKILL.
+    Returns (status, message, what_happened)."""
+    now = f"{datetime.datetime.now():%H:%M}"
+    quit_wait = number("OUTLOOK_QUIT_WAIT", 60)
+    try:
+        subprocess.run(["osascript", "-"], input=QUIT, capture_output=True, text=True, timeout=40)
+    except subprocess.TimeoutExpired:
+        pass
+    how = "quit"
+    if not wait_closed(quit_wait):
+        log("Outlook didn't quit when asked; sending SIGTERM to the Outlook process")
+        subprocess.run(["pkill", "-TERM", "-x", PROCESS], capture_output=True)
+        how = "stopped"
+        if not wait_closed(quit_wait):
+            log("Outlook still open after SIGTERM; giving up (Kit never force-kills it)")
+            return ("not-responding", f"Outlook was hung and Kit tried to restart it at {now}, but it wouldn't close. "
+                    "Force Quit Outlook (Option-Command-Esc), reopen it, then ask Kit to redo the calendar and mail.",
+                    "would not close")
+    log(f"Outlook {how}; reopening it in the background")
+    subprocess.run(["open", "-g", "-b", BUNDLE], capture_output=True)
+    time.sleep(number("OUTLOOK_RESTART_SETTLE", 45))
+    status, msg = check(retry)
+    if status == "ok":
+        return "ok", f"Outlook was hung; Kit restarted it at {now} and it answers now. {msg}", "restarted, ok"
+    return status, f"{msg} (Kit restarted Outlook at {now}; it still doesn't answer)", f"restarted, still {status}"
+
+
+def recover(status, msg, retry):
+    """Act on OUTLOOK_RECOVER after a check. Returns (status, message)."""
+    mode = recover_mode()
+    if status not in STUCK or mode != "restart":
+        return status, msg
+    if not running():
+        return status, msg   # never start Outlook when it isn't open
+    stamp = KIT / f".install/logs/outlook-restart-{datetime.date.today().isoformat()}"
+    if stamp.exists():
+        return status, f"{msg} Kit already restarted Outlook once today, so it didn't again."
+    try:
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.write_text(f"{datetime.datetime.now():%Y-%m-%d %H:%M} {status}\n")
+    except OSError:
+        return status, msg
+    log(f"recovery started ({status}): {msg}")
+    status, msg, what = restart(retry)
+    log(f"recovery finished: {what}")
+    try:
+        with open(stamp, "a", encoding="utf-8") as f:
+            f.write(f"{datetime.datetime.now():%Y-%m-%d %H:%M} {what}\n")
+    except OSError:
+        pass
     return status, msg
 
 
@@ -126,10 +272,12 @@ def main(argv):
         if i + 1 >= len(args):
             sys.exit("kit-outlook: --write needs a file")
         out = pathlib.Path(args[i + 1]).expanduser()
-    if sys.platform != "darwin":
+    if sys.platform != "darwin" and not os.environ.get("KIT_OUTLOOK_ANY_OS"):
         status, msg = "skipped", "not macOS; Outlook is checked another way here."
     else:
         status, msg = check(retry)
+        if "--recover" in args:
+            status, msg = recover(status, msg, retry)
     line = f"{status} {datetime.datetime.now():%Y-%m-%d %H:%M} {msg}"
     if out:
         out.parent.mkdir(parents=True, exist_ok=True)

@@ -334,6 +334,18 @@ def cost_stop_alert_open():
         return False
 
 
+def outlook_banner():
+    """A banner when today's Outlook check (kit-outlook, briefs/outlook.txt) found Outlook open but hung."""
+    try:
+        parts = (KIT / "briefs/outlook.txt").read_text(errors="ignore").strip().split(" ", 3)
+    except OSError:
+        return ""
+    if len(parts) < 4 or parts[1] != dt.date.today().isoformat() or parts[0] not in ("hung", "not-responding"):
+        return ""
+    return (f'<div class="banner" role="alert"><strong>Outlook is hung</strong> {e(parts[3])} Calendar and mail in '
+            "today's brief are stale or from Kit's saved copy.</div>")
+
+
 def state_banners():
     """Banners for a paused Kit (kit-pause), active legal holds (kit-retention), connector outages
     (connector_health.py), failing scheduled runs and cost alerts (run_alerts.py), and the budget's
@@ -355,7 +367,12 @@ def state_banners():
         out += (f'<div class="banner" role="alert"><strong>Legal hold</strong> {e(names)}. Nothing in these '
                 'projects may be deleted, moved, or rewritten.</div>')
     out += connector_banner()
+    out += outlook_banner()
     out += alerts_banner()
+    limited = kit_health.usage_limit(KIT)
+    if limited:
+        out += (f'<div class="banner" role="alert"><strong>Usage limit</strong> {e(limited)}. Scheduled runs stand '
+                'down until then; the morning brief is written without a model call.</div>')
     try:
         if cost_stop_alert_open():
             return out

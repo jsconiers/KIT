@@ -202,6 +202,16 @@ def queue_add(kit, todo, title, reason, today, detail=None, who="connector_healt
     lines = kq.load(pathlib.Path(q))
     if any(it["title"] == title and it["parent"] is None for it in kq.open_items(lines)):
         return True
+    near = _near(kq, kit, lines, title)
+    if near:   # the same problem again under a new date ("failing since ..."): note it on the open item
+        it, score, how = near
+        lines = kq.note_seen_again(lines, it, today, who)
+        lines.insert(it["end"], f"  {detail}" if detail else
+                     f"  Last check {fmt(today)}: {short(reason, 100)}. Kit clears its alert when the check passes again.")
+        kq.write(lines, pathlib.Path(q))
+        kq.log_dup(kit, f"{who}: merged into {it['section']} {it['n']} ({how}, {score:.2f}): "
+                        f"{title!r} -> {it['title']!r}")
+        return True
     env = dict(os.environ, KIT_DIR=kit)
     r = subprocess.run([sys.executable, todo, "work", title], capture_output=True, text=True, env=env,
                        stdin=subprocess.DEVNULL, timeout=120)
@@ -218,6 +228,23 @@ def queue_add(kit, todo, title, reason, today, detail=None, who="connector_healt
     return True
 
 
+def _owner(kq, kit, lines):
+    try:
+        with open(os.path.join(kit, ".install/shared/morning/config"), encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        text = ""
+    return kq.owner_section(lines, kq.configured_owner(text)), text
+
+
+def _near(kq, kit, lines, title):
+    """The owner's open item `title` duplicates (kit_queue.find_duplicate), or None. Old kit_queue: None."""
+    if not hasattr(kq, "find_duplicate"):
+        return None
+    section, text = _owner(kq, kit, lines)
+    return kq.find_duplicate(lines, section, title, kq.dup_threshold(text)) if section else None
+
+
 def queue_note(kit, title, note, today):
     """Add a detail line to the open item with this title (if it's still open) and stamp it."""
     import kit_queue as kq
@@ -225,12 +252,15 @@ def queue_note(kit, title, note, today):
     if not q.exists():
         return False
     lines = kq.load(q)
-    for it in kq.open_items(lines):
-        if it["title"] == title and it["parent"] is None:
-            lines.insert(it["end"], f"  {note}")
-            lines[it["line"]] = kq.stamp(lines[it["line"]], today)
-            kq.write(lines, q)
-            return True
+    hit = next((it for it in kq.open_items(lines) if it["title"] == title and it["parent"] is None), None)
+    if hit is None:   # the alert was merged into an older item with another date
+        near = _near(kq, kit, lines, title)
+        hit = near[0] if near else None
+    if hit:
+        lines.insert(hit["end"], f"  {note}")
+        lines[hit["line"]] = kq.stamp(lines[hit["line"]], today)
+        kq.write(lines, q)
+        return True
     return False
 
 

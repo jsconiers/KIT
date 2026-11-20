@@ -7,8 +7,8 @@ repository; [DESIGN.md](../DESIGN.md) is the shorter reference that sits beside 
 
 | | |
 |---|---|
-| Describes | Kit 1.8.0 |
-| Date | 17-Nov-2026 |
+| Describes | Kit 1.8.1 |
+| Date | 20-Nov-2026 |
 | Audience | Maintainers, security reviewers, technical adopters |
 | Licence | All rights reserved; see [LICENSE](../LICENSE) |
 

@@ -225,6 +225,133 @@ def duplicates(items, ignore=(), threshold=0.85):
     return pairs
 
 
+# ---------------------------------------------------------------- duplicates at add time
+
+DUP_THRESHOLD = 0.8
+DAY_WORDS = r"(?:today|tomorrow|mon|tue|wed|thu|fri|sat|sun)(?:day|sday|nesday|rsday|urday)?"
+# Dates in any form an item carries: 04-Nov-2026, 04-Nov, 2026-11-04, Wed 04-Nov, 4 Nov.
+ANY_DATE = (r"\b(?:\d{1,2}-[A-Za-z]{3}(?:-\d{4})?|\d{4}-\d{2}-\d{2}|\d{1,2} [A-Z][a-z]{2}(?: \d{4})?|"
+            + DAY_WORDS + r")\b")
+
+
+def dup_tokens(title):
+    """The words that make an item what it is: no [work] tag, dates, weekdays, punctuation, or stop words."""
+    t = re.sub(r"\[work\]", " ", title or "", flags=re.I)
+    t = re.sub(r"\((?:added|updated|seen again)[^()]*\)", " ", t)
+    t = re.sub(ANY_DATE, " ", t, flags=re.I)
+    return tokens(t)
+
+
+def dup_threshold(config_text=None, default=DUP_THRESHOLD):
+    """QUEUE_DUP_THRESHOLD from the environment or the config text: a fraction (0.8), a percent (80), or
+    "off"/0 to turn the check off (returns None)."""
+    raw = os.environ.get("QUEUE_DUP_THRESHOLD")
+    if raw is None and config_text:
+        m = re.search(r'^QUEUE_DUP_THRESHOLD="?([^"\n]*)"?', config_text, re.M)
+        raw = m.group(1) if m else None
+    if raw is None or not raw.strip():
+        return default
+    if raw.strip().lower() in ("off", "no", "false", "0", "none"):
+        return None
+    try:
+        v = float(raw)
+    except ValueError:
+        return default
+    v = v / 100 if v > 1 else v
+    return v if 0 < v <= 1 else default
+
+
+def _idf(token_sets):
+    df = {}
+    for ts in token_sets:
+        for t in ts:
+            df[t] = df.get(t, 0) + 1
+    n = max(len(token_sets), 1)
+    return {t: math.log((n + 1) / (c + 0.5)) + 1.0 for t, c in df.items()}
+
+
+def similarity(ta, tb, idf):
+    """(score, how): IDF-weighted Jaccard, or 1.0 "contained" when every word of the shorter title (three
+    or more words) is in the other."""
+    if not ta or not tb:
+        return 0.0, ""
+    common = ta & tb
+    if not common:
+        return 0.0, ""
+    w = lambda ts: sum(idf.get(t, 1.0) for t in ts)  # noqa: E731
+    jac = w(common) / w(ta | tb)
+    short = ta if len(ta) <= len(tb) else tb
+    if len(short) >= 3 and short <= (tb if short is ta else ta):
+        return 1.0, "contained"
+    return round(jac, 2), "similar"
+
+
+def find_duplicate(lines, section, title, threshold=DUP_THRESHOLD):
+    """The open top-level item in `section` that `title` duplicates, as (item, score, how), or None.
+    Sub-items are left out; so are other sections."""
+    if threshold is None:
+        return None
+    new = dup_tokens(title)
+    if not new:
+        return None
+    cands = [it for it in open_items(lines) if it["section"] == section and it["parent"] is None]
+    sets = [dup_tokens(it["title"]) for it in cands]
+    idf = _idf(sets + [new])
+    best = None
+    for it, ts in zip(cands, sets):
+        score, how = similarity(new, ts, idf)
+        if score >= threshold and (best is None or score > best[1]):
+            best = (it, score, how)
+    return best
+
+
+def duplicate_pairs(lines, threshold=DUP_THRESHOLD):
+    """Near-duplicate pairs among open top-level items, per section, best first: (score, how, a, b)."""
+    if threshold is None:
+        return []
+    items_ = [it for it in open_items(lines) if it["parent"] is None]
+    sets = [dup_tokens(it["title"]) for it in items_]
+    idf = _idf(sets)
+    out = []
+    for a in range(len(items_)):
+        for b in range(a + 1, len(items_)):
+            if items_[a]["section"] != items_[b]["section"]:
+                continue
+            score, how = similarity(sets[a], sets[b], idf)
+            if score >= threshold:
+                out.append((score, how, items_[a], items_[b]))
+    out.sort(key=lambda p: -p[0])
+    return out
+
+
+def note_seen_again(lines, item, when=None, source=""):
+    """Mark an open item as asked for again: "(seen again DD-Mmm-YYYY[, source])" on its line, once a day,
+    and stamp it updated. Returns the new lines."""
+    d = fmt(when or today())
+    line = lines[item["line"]]
+    if f"seen again {d}" in line:
+        return lines
+    note = f"seen again {d}" + (f", {source}" if source else "")
+    if re.search(r"\(seen again [^()]*\)", line):
+        line = re.sub(r"\(seen again [^()]*\)", f"({note})", line)
+    else:
+        line = line.rstrip() + f" ({note})"
+    lines = list(lines)
+    lines[item["line"]] = stamp(line, when)
+    return lines
+
+
+def log_dup(kit, msg):
+    """One line in .install/logs/queue-dupes.log. Best-effort."""
+    try:
+        p = pathlib.Path(kit) / ".install/logs/queue-dupes.log"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("a", encoding="utf-8") as f:
+            f.write(f"{dt.datetime.now():%Y-%m-%d %H:%M} {msg}\n")
+    except OSError:
+        pass
+
+
 def week_of(d):
     return d - dt.timedelta(days=d.weekday())
 

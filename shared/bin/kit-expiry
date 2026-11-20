@@ -298,7 +298,7 @@ def queue_todo(item, d, left):
     if item.get("queued") == d.isoformat():
         return False
     due = "today" if left <= 0 else f"{d:%d-%b-%Y}"
-    args = ([sys.executable, str(TODO)] + (["work"] if is_work(item) else [])
+    args = ([sys.executable, str(TODO), "--merge"] + (["work"] if is_work(item) else [])
             + [f"Renew: {item['name']}", due])
     r = subprocess.run(args, capture_output=True, text=True, timeout=60)
     if r.returncode != 0:

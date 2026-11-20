@@ -16,6 +16,12 @@
                                     add a line for model use outside Claude Code's own runs (the
                                     kit-delegate tool and the kit-run runtime); without --cost the
                                     line counts as "not priced"
+  kit-cost limit [--json]           Claude's usage limit: whether one is recorded now (the runs stand down
+                                    until it resets), and this month's spend and projection against
+                                    USAGE_LIMIT_MONTHLY_USD
+  kit-cost limit --brief            one line for the brief when a limit is recorded, or spend or its
+                                    projection has reached COST_WARN_PCT of the limit; nothing otherwise
+  kit-cost limit clear              forget a recorded limit (after raising it, say), so the runs go ahead
 
 Each scheduled run (run.sh) asks Claude Code for JSON output and records its estimated cost and
 token counts in .install/logs/cost.jsonl, with the cost and tokens for each model the run used
@@ -28,6 +34,11 @@ Settings, in .install/shared/morning/config:
   COST_WARN_PCT         at this share of the budget, runs go ahead and the brief says so (80)
   COST_STOP_PCT         at this share, only the essential runs go ahead (95)
   COST_ESSENTIAL_MODES  run kinds that always go ahead, separated by spaces ("morning")
+  USAGE_LIMIT_MONTHLY_USD  the per-user API usage limit set for you, in US dollars, if you know it;
+                        the brief warns when this month's spend or its projection reaches
+                        COST_WARN_PCT of it. Empty means no early warning. Whatever it's set to, a
+                        run that fails on the limit is recorded (shared/kit_limits.py) and the runs
+                        stand down until access returns (USAGE_LIMIT_GUARD="off" turns that off).
 
 To undo: delete the COST_ lines from the config, and the ledger if you like; run.sh then records
 costs but never skips a run.
@@ -165,7 +176,12 @@ def status(month=None):
     level = "ok"
     if pct is not None:
         level = "stop" if pct >= stop else "warn" if pct >= warn else "ok"
+    limit = number("USAGE_LIMIT_MONTHLY_USD", 0.0)
+    lim_pct = round(spend / limit * 100, 1) if limit > 0 else None
+    lim_proj_pct = round(projection / limit * 100, 1) if limit > 0 else None
     return {"month": month, "runs": len(recs), "spend_usd": round(spend, 4),
+            "usage_limit_usd": limit or None, "usage_limit_pct": lim_pct,
+            "usage_limit_projected_pct": lim_proj_pct,
             "projection_usd": round(projection, 2), "budget_usd": budget or None,
             "pct_used": pct, "warn_pct": warn, "stop_pct": stop, "level": level,
             "essential": setting("COST_ESSENTIAL_MODES", "morning").split(), "records": recs}
@@ -261,6 +277,84 @@ def cmd_check(args):
         verdict = "" if not args.mode else ("; this run may go ahead" if allowed else "; this run should skip")
         print(f"{st['level']} {pct}{verdict}")
     return code
+
+
+def _limits():
+    """shared/kit_limits.py, next to this tool's bin/ folder (installed or in the repo)."""
+    here = pathlib.Path(__file__).resolve().parent.parent
+    for d in (here, KIT / ".install/shared"):
+        if (d / "kit_limits.py").exists():
+            sys.path.insert(0, str(d))
+            try:
+                import kit_limits
+                return kit_limits
+            except ImportError:
+                return None
+    return None
+
+
+def limit_status():
+    st = status()
+    lm = _limits()
+    rec = lm.active(KIT) if lm else None
+    out = {k: st[k] for k in ("month", "spend_usd", "projection_usd", "usage_limit_usd", "usage_limit_pct",
+                              "usage_limit_projected_pct", "warn_pct")}
+    out.update({"active": bool(rec), "recorded": rec, "returns": lm.when_text(rec) if (lm and rec) else None})
+    return out
+
+
+def limit_brief(ls):
+    if ls["active"]:
+        return (f"Claude usage limit reached; access returns {ls['returns']}. "
+                "Scheduled runs stand down until then (kit-cost limit).")
+    if not ls["usage_limit_usd"]:
+        return ""
+    warn = ls["warn_pct"]
+    if ls["usage_limit_pct"] >= warn:
+        return (f"Usage limit: {money(ls['spend_usd'])} of the {money(ls['usage_limit_usd'])} monthly API limit used "
+                f"({ls['usage_limit_pct']:g}%); runs stop when it's reached.")
+    if ls["usage_limit_projected_pct"] >= 100:
+        return (f"Usage limit: projected {money(ls['projection_usd'])} this month against the "
+                f"{money(ls['usage_limit_usd'])} API limit; at this pace runs stop before the month ends.")
+    if ls["usage_limit_projected_pct"] >= warn:
+        return (f"Usage limit: projected {money(ls['projection_usd'])} this month, "
+                f"{ls['usage_limit_projected_pct']:g}% of the {money(ls['usage_limit_usd'])} API limit.")
+    return ""
+
+
+def cmd_limit(args):
+    if args.action == "clear":
+        lm = _limits()
+        if not lm:
+            sys.exit("kit-cost: shared/kit_limits.py not found")
+        cleared = lm.clear("cleared by hand (kit-cost limit clear)", KIT)
+        print("Usage limit cleared; the scheduled runs go ahead." if cleared else "No usage limit was recorded.")
+        return 0
+    ls = limit_status()
+    if args.brief:
+        line = limit_brief(ls)
+        if line:
+            print(line)
+        return 0
+    if args.json:
+        print(json.dumps(ls))
+        return 2 if ls["active"] else 0
+    if ls["active"]:
+        r = ls["recorded"]
+        print(f"Usage limit reached: recorded {r.get('first_seen')} by the {r.get('source')} run.")
+        print(f"  Message: {r.get('reason')}")
+        print(f"  Access returns: {ls['returns']}")
+        print("  Until then only the morning brief runs, written without a model call. "
+              "To go ahead sooner (the limit was raised): kit-cost limit clear")
+    else:
+        print("Usage limit: none recorded; the scheduled runs go ahead.")
+    if ls["usage_limit_usd"]:
+        print(f"Monthly API limit {money(ls['usage_limit_usd'])}: {money(ls['spend_usd'])} used "
+              f"({ls['usage_limit_pct']:g}%), projected {money(ls['projection_usd'])} "
+              f"({ls['usage_limit_projected_pct']:g}%) for {ls['month']}")
+    else:
+        print("Monthly API limit: not set (USAGE_LIMIT_MONTHLY_USD in the config), so no early warning")
+    return 2 if ls["active"] else 0
 
 
 def cmd_record(args):
@@ -368,9 +462,13 @@ def main(argv):
     ru.add_argument("--output", type=int)
     ru.add_argument("--cost", type=float)
     ru.add_argument("--mode")
+    lim = sub.add_parser("limit")
+    lim.add_argument("action", nargs="?", choices=["status", "clear"], default="status")
+    lim.add_argument("--brief", action="store_true")
+    lim.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
     handler = {"report": cmd_report, "check": cmd_check, "record": cmd_record,
-               "record-usage": cmd_record_usage}.get(args.cmd, cmd_summary)
+               "record-usage": cmd_record_usage, "limit": cmd_limit}.get(args.cmd, cmd_summary)
     return handler(args)
 
 

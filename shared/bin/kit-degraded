@@ -7,12 +7,17 @@
   kit-degraded --reason "why" --no-calendar
                                          leave the calendar out (for example when Outlook is down)
   kit-degraded --reason "why" --print    print the brief instead of writing it
+  kit-degraded --reason "why" --no-calendar-cache
+                                         when the calendar is left out or doesn't answer, say so instead of
+                                         using the saved copy (kit-calcache)
 
 run.sh uses it when the budget's stop level is reached (DEGRADED_MODE="on", the default) and when
 the morning model run fails or times out, so a brief still arrives. It reads QUEUE.md, today's
 calendar (CALENDAR_JSON_CMD in Kit's config, unless --no-calendar or --calendar-json), and the
 files the run already wrote (briefs/health.txt, briefs/audit.txt), plus the pending proposals and
-phone approvals. It writes briefs/YYYY-MM-DD.md only if no brief exists for today, and the short
+phone approvals. When the calendar is left out (Outlook is hung) or its command fails, it uses the newest
+saved copy that covers today (kit-calcache, .install/cache/), labelled "may be stale", or last week's
+recurring meetings from it, labelled as likely only; --no-calendar-cache turns that off. It writes briefs/YYYY-MM-DD.md only if no brief exists for today, and the short
 texts (briefs/latest-text.txt, -work.txt, -personal.txt) only if the run didn't write them. The
 privacy rules match the model brief's short texts: personal to-dos are counted, never named, and
 nothing comes from memory/personal/. It never sends anything; delivery is run.sh's job.
@@ -29,6 +34,10 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import kit_daily as kd  # noqa: E402
+try:
+    import kit_calcache as kc  # noqa: E402  (the saved calendar; an older install may not have it)
+except ImportError:
+    kc = None
 
 WEEKDAYS = "Mon Tue Wed Thu Fri Sat Sun".split()
 WORK = "[work]"
@@ -93,6 +102,17 @@ def command_words(cmd):
 
 
 def calendar(args):
+    """(rows, note): rows is None when there's no calendar; note says why, or labels a cached calendar."""
+    cal, note = live_calendar(args)
+    if cal is not None or kc is None or not getattr(args, "calendar_cache", True):
+        return cal, note
+    evs, label, kind = kc.lookup(kd.KIT, kd.today())
+    if kind is None:
+        return None, note
+    return kc.rows(evs), label
+
+
+def live_calendar(args):
     if args.no_calendar:
         return None, "left out (Outlook check failed or --no-calendar)"
     raw = ""
@@ -177,6 +197,8 @@ def build(args):
                   "(counted, not named)")
     md.append(f"- Other open items: {td['other_work']} work, {td['other_personal']} personal")
     md += ["", "## Calendar today", ""]
+    if cal is not None and cal_note:
+        md.append(f"- Stale: {cal_note[:1].upper() + cal_note[1:]} (Outlook didn't answer this morning).")
     if cal is None:
         md.append(f"- Calendar {cal_note}.")
     elif not cal:
@@ -199,7 +221,7 @@ def build(args):
     meet = ""
     if cal:
         timed = [w for w, _ in cal if w != "all day"]
-        meet = f"Meetings: {len(cal)}" + (f", first {timed[0]}" if timed else "")
+        meet = f"Meetings: {len(cal)}" + (f", first {timed[0]}" if timed else "") + (" (saved calendar, may be stale)" if cal_note else "")
     n_work = len(td["overdue_work"]) + len(td["today_work"])
     n_pers = td["overdue_personal"] + td["today_personal"]
     work_lines = [f"To-dos: {len(td['overdue_work'])} overdue, {len(td['today_work'])} due today (work)"]
@@ -227,6 +249,8 @@ def main(argv):
     ap.add_argument("--reason", required=True, help="why there's no model run, for the banner")
     ap.add_argument("--calendar-json", help="a calendar JSON file instead of CALENDAR_JSON_CMD")
     ap.add_argument("--no-calendar", action="store_true", help="leave the calendar out")
+    ap.add_argument("--no-calendar-cache", dest="calendar_cache", action="store_false",
+                    help="don't fall back to the saved calendar (kit-calcache) when the calendar is out")
     ap.add_argument("--print", action="store_true", help="print the brief; write nothing")
     args = ap.parse_args(argv)
     brief, texts = build(args)

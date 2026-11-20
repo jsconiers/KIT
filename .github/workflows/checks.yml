@@ -58,16 +58,25 @@ jobs:
           python3 tests/test_mcp_launch.py
       - name: kit-review-loop tests (merge, feedback, and the readiness score offline, run with a fake claude)
         run: python3 tests/test_review_loop.py
+      - name: Settings page and configuration snapshot tests (kit-settings ui, kit-config)
+        run: |
+          python3 tests/test_settings.py
+          python3 tests/test_kit_config.py
       - name: Review loop page, dashboard Reviews panel, and health badge tests
         run: |
           python3 tests/test_review_ui.py
           python3 tests/test_health_score.py
+      - name: Usage-limit guard tests (detector, reset parsing, kit-cost limit, run.sh and preflight standing down)
+        run: |
+          python3 tests/test_usage_limit.py
       - name: Sprint tools tests (monthly report, traceability workbook, token expiry, ticket watcher, MCP watchdog, release)
         run: |
           python3 tests/test_wins_month.py
           python3 tests/test_trace_xlsx.py
           python3 tests/test_expiry_tokens.py
           python3 tests/test_tickets.py
+          python3 tests/test_ticket_routing.py
+          python3 tests/test_queue_dupes.py
           python3 tests/test_mcp_watch.py
           python3 tests/test_release.py
           python3 tests/test_signoff.py
@@ -86,6 +95,12 @@ jobs:
           python3 tests/test_selfeval.py
           python3 tests/test_360.py
           python3 tests/test_timeoff.py
+          python3 tests/test_acronyms.py
+          python3 tests/test_pages.py
+      - name: Outlook recovery and calendar cache tests
+        run: |
+          python3 tests/test_outlook_recover.py
+          python3 tests/test_calendar_cache.py
       - name: kit-update tests (reinstall when the install lags; landed patches with rebuilt documents)
         run: python3 tests/test_kit_update.py
       - name: kit-update zip tests (release zips checked as untrusted, installed, kept, pruned)

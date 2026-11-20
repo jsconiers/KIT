@@ -36,7 +36,8 @@ questions go in the note. Settings (shared/morning/config): REVIEW_LOOP_TIMEOUT 
 merge and feedback make no model call and never overwrite a decisions file that has a decision in it.
 
 The score. It starts at 100 and loses 12 points per open must-fix finding, 4 per should-fix, and 1 per nit,
-and 15 for each of the four reviews with no note. A finding is open unless its note marks it fixed or closed,
+and 15 for each of the four reviews with no note, and 5 for each draft over its page budget in facts.md
+(kit-pages). A finding is open unless its note marks it fixed or closed,
 or the latest decisions file (as new as the notes) rejected it. Ready for ARB needs all four notes, no open
 must-fix, notes newer than the latest draft in drafts/ (or --draft), and a score of READINESS_THRESHOLD (in
 shared/morning/config; 80 by default) or more. With no open must-fix and every note there it's "almost";
@@ -679,6 +680,7 @@ def cmd_feedback(a):
 # ---- readiness score and status ---------------------------------------------------------------------------
 POINTS = {"must fix": 12, "should fix": 4, "nit": 1}
 MISSING_POINTS = 15
+PAGE_POINTS = 5      # per draft over its page budget in facts.md (kit-pages)
 
 
 def threshold():
@@ -711,6 +713,15 @@ def latest_draft(proj):
     return max(files, key=lambda x: (versions(x.name), x.stat().st_mtime)) if files else None
 
 
+def page_overruns(proj):
+    """Drafts over their page budget in facts.md (kit_pages); none when the project sets no budget."""
+    try:
+        import kit_pages
+        return kit_pages.over_budget(proj)
+    except Exception:  # noqa: BLE001 - the page check must never break the score
+        return []
+
+
 def readiness(proj, draft=None):
     notes = latest_notes(proj)
     dec = latest_decisions(proj)
@@ -736,7 +747,9 @@ def readiness(proj, draft=None):
         for k, (f, _t) in notes.items():
             if f.stat().st_mtime < draft.stat().st_mtime:
                 stale.append(SOURCE[k])
-    score = 100 - sum(POINTS[r] * n for r, n in counts.items()) - MISSING_POINTS * len(missing)
+    over = page_overruns(proj)
+    score = 100 - sum(POINTS[r] * n for r, n in counts.items()) - MISSING_POINTS * len(missing) \
+        - PAGE_POINTS * len(over)
     score = max(0, min(100, score))
     need = threshold()
     if not missing and not counts["must fix"] and not stale and score >= need:
@@ -752,6 +765,8 @@ def readiness(proj, draft=None):
         why.append("no note from: " + ", ".join(missing))
     if stale:
         why.append("older than the draft: " + ", ".join(stale))
+    if over:
+        why.append("over the page budget: " + ", ".join(f"{o['name']} ({o['pages']}/{o['budget']})" for o in over))
     if verdict != "ready" and not why:
         why.append(f"score under {need}")
     headline = {"ready": f"Ready for ARB: {score}/100",
@@ -759,6 +774,7 @@ def readiness(proj, draft=None):
                 "not ready": f"Not ready: {score}/100 ({'; '.join(why)})"}[verdict]
     return {"project": proj.name, "folder": str(proj), "score": score, "verdict": verdict, "headline": headline,
             "threshold": need, "open": counts, "rejected_left_out": dropped, "missing": missing, "stale": stale,
+            "pages_over": [{k: o[k] for k in ("name", "pages", "budget", "over_by")} for o in over],
             "draft": str(draft) if draft else None, "decisions": str(dec) if dec else None,
             "notes": {SOURCE[k]: str(notes[k][0]) for k in AGENTS if k in notes},
             "findings": [{k: f[k] for k in ("rank", "source", "id", "location", "finding")} for f in open_rows]}
@@ -782,6 +798,8 @@ def cmd_score(a):
         print(f"  {src}: {pathlib.Path(path).name}")
     for src in r["missing"]:
         print(f"  {src}: no note (-{MISSING_POINTS})")
+    for o in r.get("pages_over", []):
+        print(f"  {o['name']}: {o['pages']} pages, budget {o['budget']} (-{PAGE_POINTS}; kit-pages check shows where to cut)")
     if r["stale"]:
         print(f"  Older than the draft ({pathlib.Path(r['draft']).name}): {', '.join(r['stale'])}. Run the loop again.")
     print(f"  Ready for ARB needs all four notes, no must fix, notes newer than the draft, and {r['threshold']}+.")

@@ -86,7 +86,7 @@ grep -q "start morning" "$LOG" && ok "lock: run proceeds after clearing" || bad 
 # ---- degraded mode ---------------------------------------------------------------------------
 rm -rf "$KIT/.install/logs/.run.lock"
 mkdir -p "$KIT/.install/shared/bin"
-cp "$HERE/shared/bin/kit-degraded" "$KIT/.install/shared/bin/"; cp "$HERE/shared/kit_daily.py" "$KIT/.install/shared/"
+cp "$HERE/shared/bin/kit-degraded" "$KIT/.install/shared/bin/"; cp "$HERE/shared/kit_daily.py" "$HERE/shared/kit_calcache.py" "$KIT/.install/shared/"
 BRIEF="$KIT/briefs/$(date +%Y-%m-%d).md"
 printf 'OUTLOOK_CHECK="off"\n' > "$M/config"
 fresh; rm -f "$BRIEF"; FAKE_FAIL=1 run morning

@@ -187,7 +187,9 @@ launchd/Task Scheduler -> run.sh <mode>
   paused?  -> skip and log
   test-run marker or not done today? -> continue
   budget guard (kit-cost check): stop -> skip non-essential modes
-  kit-outlook check (morning, weekly) -> stale notice if Outlook doesn't answer
+  usage-limit guard (kit_limits): a recorded limit before its reset -> skip; morning -> kit-degraded
+  kit-outlook check --recover (morning, weekly) -> version and calendar probe; hung -> notify or restart (opt-in)
+  kit-calcache save when Outlook answers; stale calendar copy in the prompt when it doesn't
   doctor --brief, kit-audit (morning, weekly)
   connector_health.py -> kit-connect test --json (morning; time-limited, no model cost)
   demand_refresh.py (weekly, DEMAND_REFRESH on) -> brief + guard-allowed read tools for the demand tracker
@@ -429,6 +431,14 @@ settings are incomplete, or when time is short.
 | Review drafts (`kit-selfeval`, `kit-360`) | Local files only, no model call. kit-selfeval reuses kit-wins for the log and groups by the goals in reviews.md; kit-360 uses only recorded evidence, growth areas only from coaching or concern notes, output 0600 in feedback/, never committed |
 | Time-off pack (`kit-timeoff`) | Queue, the last PPM Express pulse snapshot (no live call), and kitcal read only; a missing source is noted and skipped. Only [work] items reach the delegate notes and handoff brief. `--handoff` is one closed Claude call (Read, Glob, Grep; personal, journal, and feedback denied); kit-timeoff saves its answer |
 | Release cutting (`kit-release`) | From a clean clone: checks, edits VERSION, the CHANGELOG heading, and the docs' version rows, commits, tags, `git archive`s the zip into `dist/` with the commit in its comment, checks the zip the way `kit-update --zip` expects, and writes its SHA-256; puts the edits back if the commit fails; never pushes. |
+| Outlook recovery (`kit-outlook --recover`) | A small escalation ladder: probe the calendar with a short time limit, retry, then notify or, with the owner's opt-in, restart: a polite quit, then SIGTERM, never SIGKILL, once a day, never starting an Outlook that wasn't open |
+| Calendar cache (`kit_calcache`) | Each copy records the dates it covers; the label says how old the data is, and when it's only last week's pattern. Titles and times only, owner-only files, never leave the machine |
+| Usage-limit guard (`kit_limits`) | Next to the budget guard, for a limit the API or plan sets that no retry gets past. `kit_limits` is the only writer of `usage-limit.json`; the runs check it before any model call, feed failed output to it, and clear it on success; preflight is the only place that spends a call to test an unknown reset, once a day; health and the dashboard only read it |
+| Duplicate catcher (`kit_queue.find_duplicate`) | IDF-weighted Jaccard over normalised title words within one section, or full containment of a title of three or more words. A person adding by hand gets a refusal; unattended writers merge, so the queue shrinks and an explicit add is never silently dropped |
+| Ticket routing (`kit-tickets`) | From the snapshot plus a day-to-day history (first seen, unassigned since, group path), with no extra connector calls. The routing map is owner-kept data, and next steps are text only, in line with the read-only gateway |
+| Acronyms and page budgets (`kit-acronyms`, `kit-pages`) | Join `kit-diagtext`, `kit-dedupe`, and `kit-facts` on the `kit_doctext` reader; read-only on documents, `--write` only to `reviews/`. Page budgets live in the fact sheet with the other agreed figures; `kit_pages` is a module so the readiness score can deduct without a process. Meanings are proposed, never applied, so the owner edits shared documents in place |
+| Configuration snapshots (`kit_config`) | A covered-file list, credentials stripped by key, value, and file name, a manifest with hashes, dedupe against the latest snapshot, and a restore that merges the current credentials back. Kit's permission rules are those in `kit_setup` ALLOW/ASK plus its manifest; restoring them is opt-in |
+| Settings page (`kit_settings_ui`, `kit_settings_page`) | Split into a server (auth, CSRF, the allowlist, validation, batch and snapshot endpoints) and a renderer. Presentation metadata (`META`, `GROUPS`) is kept apart from the edit allowlist (`EDITABLE_CONFIG`), so the security boundary stays on its own; a key in neither shows under Advanced by its raw name. A batch save is all or nothing, after one snapshot |
 | Personal rhythm (`kit-dates`, `kit-touch`, `kit-feedback`, `kit-meetload`) | Local lists and calendar reads that feed brief lines; nothing is sent; the feedback log is owner-only and never committed, exported, or texted. |
 
 ## 8. Model routing and kit-run

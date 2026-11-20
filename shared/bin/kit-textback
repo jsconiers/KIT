@@ -369,9 +369,14 @@ def cmd_todo(args, ctx):
         words = words[1:]
     if words and words[0].lower() == "to":
         words = words[1:]
+    force = bool(words) and words[0].lower() == "force"   # "kit todo force ...": add even if it looks like a duplicate
+    if force:
+        words = words[1:]
     if not words:
         return "What should I add? Like: kit todo call the bank fri"
-    rc, out, err = run(tool("todo") + words)
+    rc, out, err = run(tool("todo") + (["--force"] if force else []) + words)
+    if rc != 0 and "Not added: it matches" in (err or ""):
+        return err.splitlines()[0] + ". To add it anyway, text: kit todo force " + " ".join(words)
     return out or err or "Couldn't add it."
 
 

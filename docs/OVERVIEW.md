@@ -6,8 +6,8 @@ how to start. For depth, see the [design guide](DESIGN-GUIDE.md); for installing
 
 | | |
 |---|---|
-| Describes | Kit 1.8.0 |
-| Date | 17-Nov-2026 |
+| Describes | Kit 1.8.1 |
+| Date | 20-Nov-2026 |
 | Audience | Architects, team leads, and reviewers deciding whether to adopt Kit |
 | Licence | All rights reserved; see [LICENSE](../LICENSE) |
 

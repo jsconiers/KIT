@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+"""kit-calcache: keep a copy of the calendar so the brief still has one when Outlook doesn't answer.
+
+  kit-calcache save [--file FILE] [--days N]
+        run the calendar command and save what it prints to .install/cache/calendar-YYYY-MM-DD.json
+        (owner-only), replacing today's earlier copy, and drop copies older than CALENDAR_CACHE_KEEP days
+        (14). The command is CALENDAR_CACHE_CMD in Kit's config, else CALENDAR_JSON_CMD; --file saves a
+        JSON file instead. --days (default CALENDAR_CACHE_DAYS, 1) is how many days from today the command
+        covers. Exit 1, saving nothing, when the command fails or prints something that isn't a JSON list.
+  kit-calcache show [--date YYYY-MM-DD] [--json]
+        today's (or that day's) events from the newest copy that covers it, with its label
+  kit-calcache brief [--date YYYY-MM-DD]
+        the same as lines for the brief: the label, then "- HH:MM  title" per event. Prints nothing
+        when no copy helps.
+
+The morning and weekly runs save a copy after Outlook's check passes (CALENDAR_CACHE="off" turns it off),
+and when Outlook is hung they give the model run, and kit-degraded, the cached events with their "may be
+stale" label instead of no calendar. How a copy is chosen is in shared/kit_calcache.py. The copies hold
+meeting titles and times only as the calendar command printed them, stay on this computer, and never
+leave it.
+"""
+import argparse
+import datetime as dt
+import json
+import os
+import pathlib
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import kit_calcache as kc  # noqa: E402
+import kit_daily as kd  # noqa: E402
+
+
+def setting(name, default=""):
+    if os.environ.get(name) is not None:
+        return os.environ[name]
+    m = re.search(rf'^{name}="([^"]*)"', kd.read(kd.CONFIG), re.M)
+    return m.group(1) if m else default
+
+
+def command_words(cmd):
+    """As kit-degraded: Windows paths keep their backslashes, and a bare command is found through PATHEXT."""
+    if os.name != "nt":
+        return [os.path.expanduser(p) for p in shlex.split(cmd)]
+    words = [w[1:-1] if len(w) > 1 and w[0] == w[-1] and w[0] in "\"'" else w for w in shlex.split(cmd, posix=False)]
+    words = [os.path.expanduser(w) for w in words]
+    if words and not os.path.dirname(words[0]):
+        words[0] = shutil.which(words[0]) or words[0]
+    return words
+
+
+def number(raw, default):
+    return int(raw) if str(raw).strip().isdigit() else default
+
+
+def cmd_save(args):
+    if args.file:
+        raw = kd.read(args.file)
+    else:
+        cmd = setting("CALENDAR_CACHE_CMD").strip() or setting("CALENDAR_JSON_CMD").strip()
+        if not cmd:
+            print("kit-calcache: no calendar command set (CALENDAR_CACHE_CMD or CALENDAR_JSON_CMD); nothing saved")
+            return 1
+        try:
+            r = subprocess.run(command_words(cmd), capture_output=True, text=True,
+                               timeout=number(setting("CALENDAR_CACHE_TIMEOUT"), 90))
+        except (OSError, ValueError, subprocess.TimeoutExpired) as e:
+            print(f"kit-calcache: the calendar command didn't answer ({type(e).__name__}); nothing saved")
+            return 1
+        if r.returncode != 0:
+            print(f"kit-calcache: the calendar command failed (exit {r.returncode}); nothing saved")
+            return 1
+        raw = r.stdout
+    try:
+        events = json.loads(raw or "")
+        days = args.days if args.days is not None else number(setting("CALENDAR_CACHE_DAYS"), 1)
+        path = kc.save(kd.KIT, events, days=days, now=kd.now(), keep=number(setting("CALENDAR_CACHE_KEEP"), 14))
+    except ValueError as e:
+        print(f"kit-calcache: the calendar output wasn't a JSON list ({e}); nothing saved")
+        return 1
+    print(f"kit-calcache: saved {len(events)} event(s) to {path}")
+    return 0
+
+
+def day_of(args):
+    return dt.date.fromisoformat(args.date) if args.date else kd.today()
+
+
+def cmd_show(args):
+    evs, label, kind = kc.lookup(kd.KIT, day_of(args))
+    if args.json:
+        print(json.dumps({"kind": kind, "label": label, "events": evs}, indent=2))
+        return 0
+    if kind is None:
+        print("No saved calendar covers that day.")
+        return 1
+    print(label[:1].upper() + label[1:] + ":")
+    for when, title in kc.rows(evs) or [("", "nothing on the calendar")]:
+        print(f"- {when}  {title}".rstrip() if when else f"- {title}")
+    return 0
+
+
+def cmd_brief(args):
+    evs, label, kind = kc.lookup(kd.KIT, day_of(args))
+    if kind is None:
+        return 0
+    print(f"Calendar {label}:")
+    for when, title in kc.rows(evs) or [("", "nothing on the calendar that day")]:
+        print(f"- {when}  {title}" if when else f"- {title}")
+    return 0
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="kit-calcache", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("save")
+    s.add_argument("--file")
+    s.add_argument("--days", type=int)
+    for name in ("show", "brief"):
+        p = sub.add_parser(name)
+        p.add_argument("--date")
+        if name == "show":
+            p.add_argument("--json", action="store_true")
+    args = ap.parse_args(argv)
+    return {"save": cmd_save, "show": cmd_show, "brief": cmd_brief}[args.cmd](args)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

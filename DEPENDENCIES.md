@@ -62,6 +62,8 @@ For installing and configuring, see INSTALL.md; for how the pieces fit, see DESI
 | `kit-diagtext` | Python 3.8; pdftotext only for a PDF document | Same code | Compare figures with the text by eye |
 | `kit-dedupe` | Python 3.8; pdftotext only for a PDF | Same code | Read for repeats and disagreeing figures by hand |
 | `kit-facts` | Python 3.8; the library root (or a project path) | Same code | Keep the agreed numbers in a table and search drafts yourself |
+| `kit-acronyms` | Python 3.8; pdftotext only for a PDF | Same code | Search the draft for capitals and check each first use by hand |
+| `kit-pages` | Python 3.8; pdfinfo or qpdf optional (a PDF's own page tree otherwise); LibreOffice only for --render | Same code | Read the page count in Word or a PDF viewer |
 | `kit-precedent --closest` | Python 3.8; library root; kit-library catalog optional | Same code | Search the indexes by hand |
 | `kit-drift` | Python 3.8; synced folders on disk | Same code (no dataless flag; zero-byte placeholders still skipped) | Compare file names and dates by hand |
 | `kit-docs` | Python 3.8; a manifest; your build scripts; optional qpdf and pdfinfo; git (status) | Same code | Run each build script and convert the PDFs by hand |
