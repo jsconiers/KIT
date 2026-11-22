@@ -163,8 +163,9 @@ xlsx(tmp / "kdp.xlsx", [
 rc, o, e = run("royalties", "import", str(tmp / "kdp.xlsx"))
 led = json.loads((kit / "author/royalties/ledger.json").read_text()) if (kit / "author/royalties/ledger.json").exists() else {}
 check(rc == 0 and "Imported kdp.xlsx (kdp): 3 total(s) for 2026-10; $99.72 in USD." in o, "import a KDP workbook", o + e)
-check(oct((kit / "author/royalties/ledger.json").stat().st_mode & 0o777) == "0o600"
-      and oct((kit / "author/royalties").stat().st_mode & 0o777) == "0o700", "the ledger is owner-only")
+check((oct((kit / "author/royalties/ledger.json").stat().st_mode & 0o777) == "0o600"
+       and oct((kit / "author/royalties").stat().st_mode & 0o777) == "0o700") if os.name == "posix" else True,
+      "the ledger is owner-only")
 check({(r["format"], r["currency"]) for r in led.get("rows", [])} == {("ebook", "USD"), ("ebook", "GBP"), ("paperback", "USD")}
       and next(r for r in led["rows"] if r["format"] == "ebook" and r["currency"] == "USD")["units"] == 11,
       "formats from the sheet names; net units", led)
