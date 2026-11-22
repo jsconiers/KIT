@@ -4,6 +4,10 @@
   kit-stakeholders PROJECT           print the map for <library root>/artifacts/PROJECT
   kit-stakeholders PROJECT --write   save it as the project's stakeholders.md (or a dated draft beside it)
   kit-stakeholders PROJECT --json    the roles, signals, and sources as JSON
+  kit-stakeholders PROJECT --raci [--write|--json]
+                                     a RACI matrix: the project's deliverables down the side, its roles
+                                     across, from the same map; --write saves raci.md (or a dated draft
+                                     beside it)
   kit-stakeholders --list            list the projects in the library
   kit-stakeholders ... --root DIR    use a library root other than the one in library.md
 
@@ -20,6 +24,18 @@ option to include names. Influence and interest come from simple signals and are
 owner, responsible, or a managing role = medium; frequent action owner (2+) or the requester = high
 interest. --write never overwrites an existing stakeholders.md: it writes stakeholders-draft-<date>.md
 beside it for a person to merge. Local files only; nothing is sent.
+
+The RACI matrix (--raci) puts the usual architecture deliverables down the side (impact assessment, design
+specification, architecture review, security review, change request, build and test, cutover, operational
+handover) and the roles the map found across. Each cell is inferred from the roles there are, with one
+Accountable per deliverable (the first of the roles that usually sign it off), and marked with a star
+("R*"). What the project's documents record wins and has no star: a RACI table's cells (its rows that name
+another activity become rows of their own), and the intake note's sign-offs (a design sign-off makes that
+role Accountable for the design specification). Checks follow the matrix: a deliverable with no
+Accountable role or with two, one with no Responsible role, and roles with no part in any deliverable.
+Take the star off a cell once someone confirms it; the next run then reads it as recorded. raci.md keeps a
+note of what Kit wrote, so only what someone changed there counts: the unstarred letters Kit copied from the
+intake note or another document are read from that document, never back from raci.md.
 """
 import argparse
 import json
@@ -313,7 +329,10 @@ def read_raci(pdir, m):
     for f in sorted(pdir.rglob("*")):
         if f.suffix.lower() not in (".md", ".txt") or f.name.startswith("stakeholders") or not f.is_file():
             continue
-        lines = kd.read(f).splitlines()
+        text = kd.read(f)
+        if RACI_MARK in text:                       # Kit's own matrix: its records are copies of ones read here
+            continue
+        lines = text.splitlines()
         for h, rows, start in tables(lines):
             hl = [c.lower() for c in h]
             before = " ".join(lines[max(0, start - 4):start]).lower()
@@ -321,12 +340,12 @@ def read_raci(pdir, m):
             if "raci" in hl and any(roles_in(r[0]) for r in rows):           # roles down the side
                 rc = hl.index("raci")
                 for row in rows:
-                    if RACI_CELL.match(row[rc].upper().strip() or "-"):
+                    if "*" not in row[rc] and RACI_CELL.match(row[rc].upper().strip() or "-"):
                         for role in roles_in(row[0]):
                             m.put(role, src, raci=re.sub(r"[^RACI]", "", row[rc].upper()), signoff="A" in row[rc].upper())
                             n += 1
                 continue
-            body = [c for r in rows for c in r[1:] if c.strip()]
+            body = [c.replace("*", "").strip() for r in rows for c in r[1:] if c.strip()]
             if not body or sum(1 for c in body if RACI_CELL.match(c.upper())) < 0.6 * len(body):
                 continue
             if "raci" not in before and "raci" not in " ".join(hl) and not any(roles_in(c) for c in h[1:]):
@@ -334,7 +353,7 @@ def read_raci(pdir, m):
             for row in rows:
                 acct, cons = [], []
                 for i, c in enumerate(row[1:], 1):
-                    letters = re.sub(r"[^RACI]", "", c.upper())
+                    letters = "" if "*" in c else re.sub(r"[^RACI]", "", c.upper())   # R* is inferred: not a record
                     if not letters or i >= len(h):
                         continue
                     for role in roles_in(h[i]):
@@ -509,6 +528,244 @@ def render(project, m, tmpl):
     return "\n".join(out).rstrip() + "\n"
 
 
+# ------------------------------------------------------------------ the RACI matrix (--raci)
+RACI_MARK = "<!-- kit-stakeholders raci -->"
+DRAFTED = re.compile(r"<!-- kit-stakeholders drafted (\{.*\}) -->")
+ARCHITECTS = ["Solution architect", "Application architect", "Architect", "Enterprise architect"]
+BUILDERS = ["Engineer", "Developer", "Platform engineer", "Infrastructure engineer", "Network engineer",
+            "Site reliability engineer", "Database administrator", "System administrator", "Test lead", "Tester"]
+# (deliverable, what names it in a gate or a recorded RACI row, and who usually holds each letter, in order of
+# preference). Only roles the map found are used; the first present A role is the one Accountable.
+DELIVERABLES = [
+    ("Impact assessment (IA)", r"\bia\b|impact assessment",
+     {"A": ["Demand manager", "Programme manager", "Project manager", "Business owner", "Sponsor"],
+      "R": ARCHITECTS,
+      "C": ["Infrastructure architect", "Security architect", "Network architect", "Data architect", "Cloud architect",
+            "Information security", "Engineering lead", "Operations lead", "Service owner", "System owner", "Risk",
+            "Compliance"],
+      "I": ["Requester", "Sponsor", "Executive sponsor", "Steering committee", "PMO"]}),
+    ("Design specification (GDS)", r"\bgds\b|design spec|design document|solution design|detailed design|\bhld\b|"
+                                   r"\blld\b|design approval|design sign",
+     {"A": ["Design authority", "Architecture review board", "Enterprise architect", "Head of architecture"],
+      "R": ["Solution architect", "Application architect", "Architect", "Infrastructure architect", "Cloud architect",
+            "Data architect", "Network architect"],
+      "C": ["Security architect", "Information security", "Engineering lead", "Operations lead", "Service owner",
+            "System owner", "Database administrator", "Platform engineer"],
+      "I": ["Project manager", "Programme manager", "Requester", "Test lead"]}),
+    ("Architecture review", r"architecture review|\barb\b|review board",
+     {"A": ["Architecture review board", "Design authority", "Enterprise architect", "Head of architecture"],
+      "R": ["Solution architect", "Application architect", "Architect"],
+      "C": ["Enterprise architect", "Security architect", "Information security", "Infrastructure architect",
+            "Data architect"],
+      "I": ["Project manager", "Programme manager", "Requester", "Engineering lead"]}),
+    ("Security review", r"security|threat model|pen(?:etration)? test",
+     {"A": ["Information security", "Risk owner", "Security architect"],
+      "R": ["Security architect", "Information security"],
+      "C": ["Solution architect", "Architect", "Engineering lead", "Compliance", "Risk", "Data owner"],
+      "I": ["Project manager", "Requester"]}),
+    ("Change request (CAB)", r"\bcab\b|change (?:request|approval|advisory|board)|\brfc\b",
+     {"A": ["Change advisory board", "Change manager", "Service owner"],
+      "R": ["Change manager", "Engineering lead", "Operations lead", "Project manager"],
+      "C": ["Service owner", "System owner", "Operations", "Solution architect", "Architect"],
+      "I": ["Requester", "Service desk", "Business owner"]}),
+    ("Build and test", r"\bbuild\b|\btest(?:ing)?\b|implementation|\buat\b|\bsit\b",
+     {"A": ["Engineering lead", "Delivery manager", "Project manager"],
+      "R": ["Engineering lead"] + BUILDERS,
+      "C": ["Solution architect", "Application architect", "Architect", "Security architect"],
+      "I": ["Requester", "Business owner", "Service owner"]}),
+    ("Cutover", r"cut-?over|go-?live|migration|deploy(?:ment)?|release",
+     {"A": ["Project manager", "Delivery manager", "Programme manager", "Change manager"],
+      "R": ["Engineering lead", "Operations lead", "Operations", "Infrastructure engineer", "Platform engineer",
+            "Network engineer", "Database administrator", "Site reliability engineer"],
+      "C": ["Service owner", "System owner", "Change manager", "Solution architect", "Architect", "Service desk"],
+      "I": ["Requester", "Business owner", "Sponsor", "Service desk"]}),
+    ("Operational handover", r"hand-?over|operational acceptance|transition to (?:operations|service)|\bbau\b",
+     {"A": ["Service owner", "Operations lead", "Service manager", "System owner"],
+      "R": ["Project manager", "Delivery manager", "Engineering lead"],
+      "C": ["Operations", "Service desk", "Site reliability engineer", "Solution architect", "Architect"],
+      "I": ["Requester", "Business owner", "Sponsor"]}),
+]
+ROLE_ORDER = {name: i for i, (name, _) in enumerate(ROLES)}
+
+
+def deliverable_for(text, strict=False):
+    """The default deliverable a gate or a recorded row names, or None. strict (a RACI table's row): the name
+    has to lead ("Design approval", not "Data migration rehearsal"), so another activity keeps a row of its own."""
+    t = (text or "").strip()
+    for name, rx, _ in DELIVERABLES:
+        m = re.search(rx, t, re.I)
+        if m and (not strict or m.start() == 0 or t.lower() == name.lower()):
+            return name
+    return None
+
+
+def drafted_cells(text):
+    """What Kit wrote in its own raci.md (or a draft of it), cell by cell: {deliverable: {role: "R*"}}, or None."""
+    m = DRAFTED.search(text)
+    try:
+        d = json.loads(m.group(1)) if m else None
+    except ValueError:
+        return None
+    return d if isinstance(d, dict) else None
+
+
+def same_cell(a, b):
+    return re.sub(r"\s+", "", a or "").upper() == re.sub(r"\s+", "", b or "").upper()
+
+
+def recorded_raci(pdir):
+    """[(activity, {role: letters}, source, own)] from the RACI tables in the project's documents: activities
+    down the side, roles across. A starred cell (R*) is a draft and is skipped. own marks Kit's own raci.md or
+    a draft of it: there only a cell someone changed counts (a star taken off, a letter changed or added), since
+    the letters Kit wrote unstarred are copies of records found elsewhere, which may have changed since."""
+    out = []
+    for f in sorted(pdir.rglob("*")):
+        if f.suffix.lower() not in (".md", ".txt") or f.name.startswith("stakeholders") or not f.is_file():
+            continue
+        text = kd.read(f)
+        own = RACI_MARK in text
+        drafted = drafted_cells(text) if own else None
+        if own and drafted is None:                 # no record of what Kit wrote: read none of it back
+            continue
+        lines = text.splitlines()
+        for h, rows, start in tables(lines):
+            hl = [c.lower() for c in h]
+            if "raci" in hl or len(h) < 2 or not any(roles_in(c) for c in h[1:]):
+                continue
+            rcols = [i for i in range(1, len(h)) if roles_in(h[i])]     # the role columns (not Sources)
+            body = [r[i].replace("*", "").strip() for r in rows for i in rcols if i < len(r) and r[i].strip()]
+            if not body or sum(1 for c in body if RACI_CELL.match(c.upper())) < 0.6 * len(body):
+                continue
+            src = f"{f.relative_to(pdir)} §RACI"
+            for row in rows:
+                act = re.sub(r"\*+", "", row[0]).strip()
+                if empty(act):
+                    continue
+                was = (drafted or {}).get(row[0].strip(), {})
+                cellmap = {}
+                for i, c in enumerate(row[1:], 1):
+                    if i >= len(h) or "*" in c or i not in rcols:
+                        continue
+                    if own and same_cell(c, was.get(h[i].strip(), "")):
+                        continue                    # as Kit wrote it: not a confirmation
+                    letters = "".join(x for x in "RACI" if x in re.sub(r"[^RACI]", "", c.upper()))
+                    for role in roles_in(h[i]) if letters else []:
+                        cellmap[role] = letters
+                if cellmap:
+                    out.append((act, cellmap, src, own))
+    return out
+
+
+def raci_matrix(m, pdir):
+    """The matrix: deliverables (defaults, then recorded activities of their own), the roles across, the cells,
+    and the checks."""
+    roles = set(m.r)
+    rows = {name: {"name": name, "cells": {}, "sources": []} for name, _, _ in DELIVERABLES}
+    order = [name for name, _, _ in DELIVERABLES]
+    for name, _, rule in DELIVERABLES:                  # inferred, from the roles there are
+        cells_ = rows[name]["cells"]
+        heads = [r for r in roles if r.startswith("Head of ")]
+        a_list = rule["A"] + ([h for h in heads if "architect" in h.lower()] if "Head of architecture" in rule["A"] else [])
+        acct = next((r for r in a_list if r in roles), None)
+        if acct:
+            cells_[acct] = {"letter": "A", "recorded": False}
+        for letter in "RCI":
+            for r in rule[letter]:
+                if r in roles and r not in cells_:
+                    cells_[r] = {"letter": letter, "recorded": False}
+        if acct and acct in rule["R"] and not any(c["letter"] == "R" for c in cells_.values()):
+            cells_[acct] = {"letter": "RA", "recorded": False}   # the one who signs it off also does it
+        for r in roles:                                 # whoever asked for the work hears how it went
+            if r not in cells_ and (m.r[r]["requester"] or r in ("Sponsor", "Executive sponsor")):
+                cells_[r] = {"letter": "I", "recorded": False}
+    for gate, role, _, src in m.gates:                  # sign-offs the intake note records
+        if not src.startswith("intake"):
+            continue
+        name = deliverable_for(gate) or "Project sign-off"
+        if name not in rows:
+            rows[name] = {"name": name, "cells": {}, "sources": []}
+            order.append(name)
+        for r, c in list(rows[name]["cells"].items()):  # one Accountable: the recorded one (R/A keeps its R)
+            if "A" in c["letter"] and not c["recorded"] and r != role:
+                rows[name]["cells"][r] = {"letter": c["letter"].replace("A", "") or "C", "recorded": False}
+        rows[name]["cells"][role] = {"letter": "A", "recorded": True}
+        roles.add(role)
+        if src not in rows[name]["sources"]:
+            rows[name]["sources"].append(src)
+    recs = recorded_raci(pdir)
+    for act, cellmap, src, own in [x for x in recs if not x[3]] + [x for x in recs if x[3]]:
+        name = deliverable_for(act, strict=True)        # RACI tables in the project's documents win
+        if not name:
+            name = kd.clip(act, 60)
+            if name not in rows:
+                rows[name] = {"name": name, "cells": {}, "sources": []}
+                order.append(name)
+        row = rows[name]
+        if own:                                         # Kit's raci.md adds only cells someone confirmed there
+            cellmap = {r: v for r, v in cellmap.items() if not row["cells"].get(r, {}).get("recorded")}
+            if not cellmap:
+                continue
+        if any("A" in v for v in cellmap.values()):     # a recorded Accountable replaces an inferred one
+            for r, c in list(row["cells"].items()):
+                if "A" in c["letter"] and not c["recorded"] and r not in cellmap:
+                    row["cells"][r] = {"letter": c["letter"].replace("A", "") or "C", "recorded": False}
+        for r, letters in cellmap.items():
+            cur = row["cells"].get(r)
+            if cur and cur["recorded"]:                 # two recorded rows on one deliverable: both count
+                letters = "".join(x for x in "RACI" if x in cur["letter"] + letters)
+            row["cells"][r] = {"letter": letters, "recorded": True}
+            roles.add(r)
+        if src not in row["sources"]:
+            row["sources"].append(src)
+    cols = sorted(roles, key=lambda r: (ROLE_ORDER.get(r, -1 if r.startswith("Head of ") else 999), r))
+    checks = []
+    for name in order:
+        cells_ = rows[name]["cells"]
+        accts = [r for r, c in cells_.items() if "A" in c["letter"]]
+        resp = [r for r, c in cells_.items() if "R" in c["letter"]]
+        if not accts:
+            checks.append(f"{name}: no Accountable role found; confirm who signs it off")
+        elif len(accts) > 1:
+            checks.append(f"{name}: {len(accts)} Accountable roles ({', '.join(sorted(accts))}); there should be one")
+        if not resp:
+            checks.append(f"{name}: no Responsible role found; confirm who does the work")
+    idle = [r for r in cols if not any(r in rows[n]["cells"] for n in order)]
+    if idle:
+        checks.append("No part in any deliverable: " + ", ".join(idle) + " (check whether they should be kept informed)")
+    return {"roles": cols, "rows": [rows[n] for n in order], "checks": checks}
+
+
+def render_raci(project, m, mat):
+    used = ", ".join(f"{k} ({v.name if isinstance(v, pathlib.Path) else v})" for k, v in m.used.items()) or "none found"
+    drafted = {row["name"]: {r: "/".join(c["letter"]) + ("" if c["recorded"] else "*")
+                             for r, c in row["cells"].items()} for row in mat["rows"]}
+    mark = json.dumps(drafted, sort_keys=True, separators=(",", ":")).replace(">", "\\u003e")
+    out = [f"# RACI: {project}", "", RACI_MARK, f"<!-- kit-stakeholders drafted {mark} -->", "",
+           f"Drafted {kd.fmt(kd.today())} by kit-stakeholders from the library. Sources read: {used}. People appear "
+           f"by role only; {m.dropped} entr{'y' if m.dropped == 1 else 'ies'} with no recognisable role "
+           f"{'was' if m.dropped == 1 else 'were'} left out.", "",
+           "R: responsible (does the work). A: accountable (signs it off; one per deliverable). C: consulted. "
+           "I: informed. R/A: does it and signs it off. A starred letter (R*) is inferred from the roles the map found; take the star off once "
+           "someone confirms it. A letter without a star is recorded in the project's documents (the sources "
+           "column says where).", ""]
+    if not mat["roles"]:
+        out += ["No roles found in the register, minutes, status reports, intake note, or a RACI table, so there is "
+                "nothing to put across the top yet.", ""]
+    cols = mat["roles"]
+    out += ["## Matrix", "", "| Deliverable | " + " | ".join(cols) + " | Sources |", "|" + "---|" * (len(cols) + 2)]
+    for row in mat["rows"]:
+        cs = []
+        for r in cols:
+            c = row["cells"].get(r)
+            cs.append("" if not c else "/".join(c["letter"]) + ("" if c["recorded"] else "*"))
+        src = "; ".join(row["sources"]) or "inferred"
+        out.append(f"| {row['name']} | " + " | ".join(cs) + f" | {src} |")
+    out += ["", "## Checks", ""] + ([f"- {c}" for c in mat["checks"]] or ["- None: each deliverable has one Accountable "
+                                                                          "and at least one Responsible role."])
+    out += ["", "_Drafted by Kit for your edit, from the stakeholder map's signals. Roles only; nothing was sent._"]
+    return "\n".join(out) + "\n"
+
+
 def main(argv):
     ap = argparse.ArgumentParser(prog="kit-stakeholders", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -517,6 +774,7 @@ def main(argv):
     ap.add_argument("--write", action="store_true")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--list", action="store_true")
+    ap.add_argument("--raci", action="store_true", help="a RACI matrix: deliverables by role")
     args = ap.parse_args(argv)
     root = pathlib.Path(os.path.expanduser(args.root)) if args.root else kd.library_root()
     if not root or not root.is_dir():
@@ -539,6 +797,30 @@ def main(argv):
     read_minutes(pdir, m)
     read_status(pdir, m)
     read_raci(pdir, m)
+    if args.raci:
+        mat = raci_matrix(m, pdir)
+        if args.json:
+            print(json.dumps({"project": args.project, "dropped_without_role": m.dropped, "roles": mat["roles"],
+                              "deliverables": [{"name": r["name"], "sources": r["sources"],
+                                                "cells": {k: {"letter": v["letter"], "recorded": v["recorded"]}
+                                                          for k, v in sorted(r["cells"].items())}}
+                                               for r in mat["rows"]],
+                              "checks": mat["checks"]}, indent=2))
+            return 0
+        text = render_raci(args.project, m, mat)
+        if args.write:
+            path = pdir / "raci.md"
+            if path.exists():
+                path = pdir / f"raci-draft-{kd.today().isoformat()}.md"
+                if path.exists() and RACI_MARK not in kd.read(path):
+                    sys.exit(f"kit-stakeholders: {path.name} exists and isn't a kit-stakeholders draft; nothing written")
+            kd.write(path, text)
+            note = "; raci.md already exists, so merge the draft into it by hand" if path.name != "raci.md" else ""
+            print(f"kit-stakeholders: wrote {path} ({len(mat['rows'])} deliverable(s), {len(mat['roles'])} role(s), "
+                  f"{len(mat['checks'])} check(s)){note}")
+            return 0
+        print(text, end="")
+        return 0
     if args.json:
         print(json.dumps({"project": args.project, "dropped_without_role": m.dropped,
                           "sources": {k: str(v) for k, v in m.used.items()},

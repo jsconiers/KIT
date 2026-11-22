@@ -43,7 +43,7 @@ affiliated with them.)
   indexes, and queue items waiting more than a week (with a follow-up draft, never sent). An optional monthly regulatory watch has the researcher brief you
   on public changes to the regimes you list.
 - **Turns meetings and designs into records.** Architectural decisions in minutes become proposed
-  ADR drafts (`kit-decisions`); a stakeholder map by role comes from the library
+  ADR drafts (`kit-decisions`); a stakeholder map and a RACI matrix by role come from the library
   (`kit-stakeholders`); any IA or GDS gets a cited one-page executive summary (`kit-onepager`);
   diagrams are linted against your standard (`kit-diaglint`); a GDS yields DoDAF-style viewpoints
   (`kit-viewpoints`); `kit-coverage` shows framework coverage across designs. TOGAF-style deliverable
@@ -53,7 +53,8 @@ affiliated with them.)
   agents' tools (`kit-audit privileges`). NIST SP 800-53 Rev 5 and MITRE ATT&CK ship as data
   (`kit-controls`), and threat models and red-team notes cite them.
 - **Watches your estate.** `kit-lifecycle` flags operating systems and products past or near end of
-  support, including those only covered by paid extended support, from a CMDB export.
+  support, including those only covered by paid extended support, from a CMDB export, and `kit-techdebt`
+  keeps the technical debt register ranked by risk, end of support, waivers, and target dates.
 - **Prepares your day.** Meeting prep packs, inbox triage suggestions, mail still awaiting a reply,
   1:1 prep, an accomplishments log, and calendar holds as drafts you open and save.
 - **Asks before acting.** Anything that sends, deletes, installs, commits, pushes, changes
@@ -122,10 +123,10 @@ The installer links these into `~/.local/bin` (all in `shared/bin/`):
 | `kit-holds` | Draft calendar holds as .ics files you open and save; Kit never writes to the calendar |
 | `kit-oneonone` | One-page prep for your 1:1 with your manager (by role); `--done` records the date |
 | `kit-wins` | Accomplishments log for reviews and 1:1s: collect, this month, report by theme; `mark` after editing the log by hand; `month` is the one-page "what Kit did this month" for leadership updates and AI Wins (work finished, highlights, runs and estimated cost against the month before; `--write` saves Markdown and a print-ready page) |
-| `kit-feedback` | A private log of feedback on the people you lead (praise, coaching, goals): 1:1 prep, review notes, and who's had no note lately; never shared or texted |
+| `kit-feedback` | A private log of feedback on the people you lead (praise, coaching, goals): 1:1 prep, review notes, who's had no note lately, and recognition (praise you haven't passed on, who hasn't been thanked in a while, a short draft); never shared or texted |
 | `kit-meetload` | Meeting load audit: hours and share of working hours, recurring meetings' weekly cost, back-to-back runs, focus time left, after-hours meetings, double bookings, suggestions; `--holds` drafts focus time; reads the calendar, a JSON file, or an .ics export |
 | `kit-tradeinsights` | Patterns in your 0DTE trading from the daily journals: by time of day, weekday, calls and puts, and hold time; after a loss against after a win; rules kept and broken and what breaking the 13:00 stop cost; the biggest leaks; personal, never tagged work |
-| `kit-dates` | Important dates (birthdays, anniversaries, work anniversaries), with a to-do and a drafted card or note when one comes up |
+| `kit-dates` | Important dates (birthdays, anniversaries, work anniversaries), with a to-do and a drafted card or note when one comes up; a gift planner with ideas, budgets, and an order-by date for each gift |
 | `kit-touch` | Keep in touch: who you haven't talked to in a while, by your own rhythm for each; calls and meals on the calendar count |
 | `kit-library` | Catalogs folders you choose (collections): tags, full-text and scripture search, scanned PDFs read on the Mac; delivers finished work to an output folder, mirrored to a synced folder if you like (Claude Code asks before mirror and fetch; work and confidential material is never mirrored) |
 | `kit-textback` | macOS: text Kit from your phone ("kit today", "kit find ..."); changes come back with a code to confirm |
@@ -174,10 +175,11 @@ The installer links these into `~/.local/bin` (all in `shared/bin/`):
 | `kit-templatecheck` | Template drift check: sections missing, renamed, reordered, or added, the template version, and leftover placeholder text |
 | `doctor.py --readiness` | Agent readiness (no known limit, limits, blocked) and why, by cause; the source for readiness figures in the docs |
 | `kit-alerts` | Open alerts (runs, cost, connectors, connector-guard integrity, agent drift, library indexes, items waiting too long, policy exceptions); `check` recomputes; `drift --diff <agent>` shows a drifted agent |
-| `kit-stakeholders` | Stakeholder map by role (never names) from the demand register, minutes, status reports, intake notes, and RACI tables |
+| `kit-stakeholders` | Stakeholder map by role (never names) from the demand register, minutes, status reports, intake notes, and RACI tables; `--raci` drafts the RACI matrix, deliverables by role, with one Accountable each and the inferred letters starred |
 | `kit-labcheck` | Flags production or confidential data in lab requests and runbooks; warns when a runbook names no hardening baseline |
 | `kit-lifecycle` | End-of-support early warning from an inventory and sourced dates: past, extended (inside paid extended support), urgent, warning; a data-quality section; `--import` turns a CMDB export into the inventory |
 | `kit-roadmap` | Drafts a 1-to-3-year technology roadmap |
+| `kit-techdebt` | The technical debt register: add, update, accept, and close items (a preview until `--write`), ranked by risk, end of support, waivers, target dates, and the cost to fix, with every reason shown; the month for the digest, and the weekly review's lines |
 | `kit-project` | Creates a project's folder skeleton by type (dry run unless `--yes`) |
 | `kit-quality` | Recurring review findings become proposed lessons and template changes |
 

@@ -1,0 +1,753 @@
+#!/usr/bin/env python3
+"""kit-techdebt: the technical debt register, ranked by what's most pressing.
+
+  kit-techdebt [list] [--all] [--json]     open debt, most pressing first, with the reasons (--all: every
+                                           status, accepted and closed included)
+  kit-techdebt show ID                     one item: every field, its score, and its history in the log
+  kit-techdebt add ITEM... --system S [--type T] [--impact TEXT] [--risk high|medium|low]
+                   [--cost low|likely|high] [--lifecycle TEXT] [--owner ROLE] [--target DATE]
+                   [--status open|planned|in progress] [--write]
+  kit-techdebt set ID [--risk R] [--cost C] [--impact TEXT] [--lifecycle TEXT] [--owner ROLE]
+                   [--target DATE] [--status open|planned|in progress] [--write]
+  kit-techdebt accept ID --reason TEXT --by ROLE --review DATE [--write]
+                                           living with it: the status becomes accepted and a row goes in the
+                                           Accepted debt table, with a date to look again
+  kit-techdebt close ID --how TEXT [--date DATE] [--write]
+                                           fixed or retired: the status becomes closed and a row goes in the
+                                           Closed table (rows are never deleted)
+  kit-techdebt due [--days N] [--json]     past its target date, due within N days (default 30), and
+                                           accepted debt due a review
+  kit-techdebt month [--month YYYY-MM|this|last] [--json]
+                                           what moved in a month (added, closed, accepted) and where the
+                                           register stands: kit-digest's Technical debt section
+  kit-techdebt brief                       the weekly review's lines, [work]; nothing when nothing's due
+  ... --register FILE                      a register other than tech-debt.md in the radar folder
+
+The register is the future tech planner's tech-debt.md in the radar folder (radar/ in the library root, or
+future-tech.md's Folder), started from templates/tech-debt-register-template.md the first time --write
+adds an item. Columns are found by name, so the team may reorder them, and a status is read by its first
+words ("Open - blocked on vendor" is open, "Done" closed; anything else is still open). Ids are TD-001 and
+up, never reused. add, set, accept, and close are read-only unless --write: they print the row as it would
+be. Each write is also logged in tech-debt-log.jsonl beside the register, which is how the month knows
+what was added; hand edits to the register are read as they stand.
+
+Most pressing first: a score from the risk (high 3, medium 2, low 1), the technology's end of support
+(kit-lifecycle's summary.json in the radar folder: past 3, extended or urgent 2, warning 1, matched on the
+system or the product the item or its lifecycle link names), a verdict of retire, replace, or migrate in
+the lifecycle link (1), a policy exception on the same system in kit-exceptions' register (an active
+waiver 1; one that has expired or expires within 60 days 2), the target date (passed 2, within 30 days
+1), and the rough cost to fix (low 1, high -1: quick wins rise). Every point is listed with its reason;
+the score orders the list and decides nothing.
+
+Owners are roles, never names. Text that looks like a credential is refused. Dates are DD-Mmm-YYYY or
+YYYY-MM-DD. Work content: the brief line is tagged [work]. Local files only; nothing is sent. KIT_TODAY
+sets the day (for tests).
+"""
+import argparse
+import datetime as dt
+import json
+import os
+import pathlib
+import re
+import sys
+
+BIN = pathlib.Path(__file__).resolve().parent
+for cand in (BIN.parent, pathlib.Path(os.path.expanduser(os.environ.get("KIT_DIR", "~/Claude/Agents/kit"))) / ".install/shared"):
+    if (cand / "kit_compliance.py").exists():
+        sys.path.insert(0, str(cand))
+        break
+import kit_compliance as kc  # noqa: E402
+import kit_radar as kr  # noqa: E402
+
+PROG = "kit-techdebt"
+WORK = "[work]"
+COLUMNS = [("id", r"^id$"), ("item", r"^item"), ("system", r"^system"), ("type", r"^type"), ("impact", r"^impact"),
+           ("risk", r"^risk(?! owner)"), ("cost", r"cost"), ("lifecycle", r"lifecycle"), ("owner", r"(?<!risk )owner"),
+           ("target", r"target"), ("status", r"status")]     # a "Risk owner" column is the team's own: left alone
+MUST = [r"\bid\b", r"\bitem\b", r"\bstatus\b"]
+ACC_COLUMNS = [("id", r"^id$"), ("reason", r"reason"), ("review", r"\breview"), ("by", r"accepted by|\bby\b")]
+ACC_MUST = [r"\bid\b", r"reason accepted"]
+CLO_COLUMNS = [("id", r"^id$"), ("closed", r"^closed"), ("how", r"^how")]
+CLO_MUST = [r"\bid\b", r"\bclosed\b", r"\bhow\b"]
+TYPES = ("architecture", "code", "infrastructure", "security", "data", "documentation", "process")
+RISKS = ("high", "medium", "low")
+COSTS = ("low", "likely", "high")
+OPEN = ("open", "planned", "in progress")
+STATUSES = OPEN + ("accepted", "closed")
+CLOSED_WORDS = ("done", "resolved", "fixed", "retired", "complete", "completed", "remediated", "cancelled", "canceled")
+RISK_PTS = {"high": 3, "medium": 2, "low": 1}
+COST_PTS = {"low": 1, "high": -1}
+LIFE_PTS = {"past": 3, "extended": 2, "urgent": 2, "warning": 1}
+VERDICT = re.compile(r"\b(retire|retiring|replace|replacing|migrate|migrating|decommission)\b", re.I)
+ACCEPTED_SECTION = ("\n## Accepted debt\n\n| Id | Reason accepted | Accepted by | Review by |\n|---|---|---|---|\n"
+                    "| | | | |\n")
+CLOSED_SECTION = "\n## Closed\n\n| Id | Closed | How |\n|---|---|---|\n| | | |\n"
+
+
+class Fail(Exception):
+    pass
+
+
+def norm(s):
+    return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
+
+
+def status_of(s):
+    """What a status cell means, by its leading word(s), so a hand edit keeps the item: "Open - blocked on
+    vendor" is open, "In progress (Q1)" in progress, "Done" or "Fixed in 4.2" closed. Anything else the team
+    writes (blocked, on hold) is still open debt."""
+    n = norm(s)
+    if not n:
+        return "open"
+    for st in sorted(STATUSES, key=len, reverse=True):
+        if n == st or n.startswith(st + " "):
+            return st
+    return "closed" if n.split(" ")[0] in CLOSED_WORDS else "open"
+
+
+def day(s, name):
+    if not s:
+        return ""
+    if s.strip().lower() == "today":
+        return kc.fmt(kc.today())
+    d = kc.parse_date(s)
+    if not d:
+        raise Fail(f"{name} must be DD-Mmm-YYYY or YYYY-MM-DD")
+    return kc.fmt(d)
+
+
+def register_path(override):
+    if override:
+        return pathlib.Path(os.path.expanduser(override))
+    root = kr.library_root()
+    if not root:
+        raise Fail("no library root: set it in memory/context/library.md (or pass --register FILE)")
+    return kr.radar_dir(root) / "tech-debt.md"
+
+
+def log_path(reg):
+    return reg.with_name("tech-debt-log.jsonl")
+
+
+def load(reg):
+    """(text, register table, items, accepted rows, closed rows)."""
+    text = kc.read(reg) if reg.exists() else ""
+    found, recs = kc.rows(text, MUST, COLUMNS)
+    recs = [r for r in recs if not kc.placeholder(r["item"]) and re.match(r"[A-Za-z]+-\d+$", r["id"].strip())]
+    for r in recs:
+        r["status_n"] = status_of(r["status"])
+        r["risk_n"] = norm(r["risk"]).split(" ")[0] if r["risk"] else ""
+        r["cost_n"] = norm(r["cost"]).split(" ")[0] if r["cost"] else ""
+        r["target_d"] = kc.parse_date(r["target"])
+    _, acc = kc.rows(text, ACC_MUST, ACC_COLUMNS)
+    _, clo = kc.rows(text, CLO_MUST, CLO_COLUMNS)
+    return text, found, recs, acc, clo
+
+
+def find(recs, rid):
+    rid = (rid or "").strip().upper()
+    if re.fullmatch(r"\d+", rid):
+        rid = f"TD-{int(rid):03d}"
+    hit = [r for r in recs if r["id"].strip().upper() == rid]
+    if not hit:
+        raise Fail(f"no item {rid} in the register (kit-techdebt list --all)")
+    return hit[0]
+
+
+def next_id(text):
+    nums = [int(n) for n in re.findall(r"\bTD-(\d+)\b", text or "")]
+    return f"TD-{(max(nums) + 1) if nums else 1:03d}"
+
+
+def update_row(text, found, rec):
+    """The text with rec's register row rewritten in the table's own column order; cells for columns Kit
+    doesn't know are kept as they were."""
+    head, i, _ = found
+    lines = text.splitlines()
+    old = kc.cells(lines[rec["_line"]]) or []
+    order = []
+    for h in head:
+        nh = kc.norm(h)
+        order.append(next((k for k, rx in COLUMNS if k not in order and re.search(rx, nh)), None))
+    vals = [kc.clean_cell(rec.get(k, "")) if k else (old[n] if n < len(old) else "") for n, k in enumerate(order)]
+    lines[rec["_line"]] = "| " + " | ".join(vals) + " |"
+    return "\n".join(lines) + "\n"
+
+
+def stamp(text):
+    """The Updated field set to today."""
+    return re.sub(r"^(\|\s*Updated\s*\|)[^|\n]*(\|)", lambda m: f"{m.group(1)} {kc.fmt(kc.today())} {m.group(2)}",
+                  text, count=1, flags=re.M)
+
+
+EXAMPLE_ROW = re.compile(r"^\|\s*TD-\d+\s*\|\s*<")
+
+
+def without_example(text):
+    """The text without the template's example row (| TD-001 | <one line> | ...), which a register copied by hand
+    still has: it isn't an item, and its id isn't taken."""
+    return "\n".join(ln for ln in text.splitlines() if not EXAMPLE_ROW.match(ln)) + "\n"
+
+
+def new_register():
+    text = kc.template(None, "tech-debt-register-template.md")
+    if not text:
+        text = ("# Tech debt register\n\n| Field | Value |\n|---|---|\n| Updated | |\n| Kept by | |\n"
+                "| Classification | internal |\n\n## Register\n\n| Id | Item | System | Type | Impact | Risk | Rough cost "
+                "to fix | Lifecycle link and verdict | Owner | Target date | Status |\n|---|---|---|---|---|---|---|---|---"
+                "|---|---|\n" + ACCEPTED_SECTION + CLOSED_SECTION)
+    return without_example(text)
+
+
+def refuse_secrets(*vals):
+    hits = kc.cred_hits(" ".join(str(v or "") for v in vals))
+    if hits:
+        raise Fail(f"refused: the text looks like a credential ({', '.join(hits)})")
+
+
+def log(reg, action, rec, **extra):
+    entry = {"at": dt.datetime.now().isoformat(timespec="seconds"), "date": kc.today().isoformat(), "action": action,
+             "id": rec["id"], "item": rec.get("item", ""), "system": rec.get("system", ""),
+             "risk": rec.get("risk", "")}
+    entry.update({k: v for k, v in extra.items() if v})
+    p = log_path(reg)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    if os.name != "nt":
+        os.chmod(p, 0o600)
+
+
+def read_log(reg):
+    out = []
+    p = log_path(reg)
+    if p.exists():
+        for ln in kc.read(p).splitlines():
+            try:
+                e = json.loads(ln)
+            except ValueError:
+                continue
+            if isinstance(e, dict) and e.get("id"):
+                out.append(e)
+    return out
+
+
+# ------------------------------------------------------------------ ranking
+def lifecycle_items(reg):
+    """kit-lifecycle's items from summary.json in the radar folder, or ([], why not)."""
+    f = reg.parent / "lifecycle" / "summary.json"
+    if not f.exists():
+        return [], "no lifecycle summary yet (kit-lifecycle writes it), so end of support isn't counted"
+    try:
+        data = json.loads(f.read_text(encoding="utf-8-sig"))
+        items = [i for i in data.get("items") or [] if isinstance(i, dict)]
+        return items, None
+    except (OSError, ValueError, AttributeError):
+        return [], "the lifecycle summary can't be read, so end of support isn't counted"
+
+
+def waivers():
+    """Active and expired exceptions from kit-exceptions' register, or ([], why not)."""
+    try:
+        path = kc.exception_register(None)
+    except Exception:
+        path = None
+    if not path or not path.exists():
+        return [], None
+    try:
+        _, _, recs = kc.load_exceptions(path)
+    except Exception:
+        return [], "the exception register can't be read, so waivers aren't counted"
+    return [r for r in recs if r["status_n"] in kc.EXC_ACTIVE + ("expired",)], None
+
+
+def lifecycle_hits(rec, items):
+    hay = norm(" ".join((rec["item"], rec["system"], rec["lifecycle"])))
+    link = norm(rec["lifecycle"])
+    system = norm(rec["system"])
+    hits = []
+    for it in items:
+        prod, ver = norm(it.get("product")), norm(str(it.get("version") or ""))
+        systems = [norm(x) for x in it.get("systems") or []]
+        if not prod:
+            continue
+        named = re.search(rf"\b{re.escape(prod)}\b", hay) and (not ver or re.search(rf"\b{re.escape(ver)}\b", hay))
+        linked = link and re.search(rf"\b{re.escape(prod)}\b", link)
+        if (system and system in systems) or named or linked:
+            hits.append(it)
+    return hits
+
+
+def waiver_hits(rec, exc):
+    system = norm(rec["system"])
+    if len(system) < 3:
+        return []
+    out = []
+    for e in exc:
+        es = norm(e.get("system"))
+        if es and (system == es or (len(es) > 3 and (f" {system} " in f" {es} " or f" {es} " in f" {system} "))):
+            out.append(e)                           # whole words: "api" isn't "rapid payments"
+    return out
+
+
+def score(rec, items, exc, today):
+    pts, why = 0, []
+    risk = rec["risk_n"]
+    if risk in RISK_PTS:
+        pts += RISK_PTS[risk]
+        why.append(f"risk {risk} +{RISK_PTS[risk]}")
+    else:
+        pts += 1
+        why.append("risk not set +1")
+    flags = []
+    for it in lifecycle_hits(rec, items):
+        f = it.get("flag")
+        if f in LIFE_PTS:
+            flags.append((LIFE_PTS[f], f, f"{it.get('product', '')} {it.get('version') or ''}".strip()))
+    if flags:
+        p, f, name = max(flags)
+        pts += p
+        why.append(f"end of support {f} +{p} ({name})")
+    if VERDICT.search(rec["lifecycle"] or ""):
+        pts += 1
+        why.append(f"lifecycle verdict {VERDICT.search(rec['lifecycle']).group(1).lower()} +1")
+    best = None
+    for e in waiver_hits(rec, exc):
+        exp = e.get("expiry_d")
+        if e["status_n"] == "expired" or (exp and exp < today):
+            cand = (2, f"waiver {e['id']} has expired +2")
+        elif exp and (exp - today).days <= 60:
+            cand = (2, f"waiver {e['id']} expires in {(exp - today).days} days +2")
+        else:
+            cand = (1, f"runs on a waiver ({e['id']}) +1")
+        best = max(best, cand) if best else cand
+    if best:
+        pts += best[0]
+        why.append(best[1])
+    t = rec["target_d"]
+    if t and t < today:
+        pts += 2
+        why.append(f"past its target date ({kc.fmt(t)}) +2")
+    elif t and (t - today).days <= 30:
+        pts += 1
+        why.append(f"target date in {(t - today).days} days +1")
+    if rec["cost_n"] in COST_PTS:
+        p = COST_PTS[rec["cost_n"]]
+        pts += p
+        why.append(f"cost to fix {rec['cost_n']} {'+' if p > 0 else ''}{p}")
+    return pts, why
+
+
+def ranked(reg, recs, everything=False):
+    items, why_l = lifecycle_items(reg)
+    exc, why_e = waivers()
+    today = kc.today()
+    out = []
+    for r in recs:
+        if not everything and r["status_n"] not in OPEN:
+            continue
+        s, why = score(r, items, exc, today)
+        out.append(dict(r, score=s, reasons=why))
+    out.sort(key=lambda r: (r["status_n"] not in OPEN, -r["score"], r["target_d"] or dt.date.max, r["id"]))
+    return out, [n for n in (why_l, why_e) if n]
+
+
+def public(r):
+    out = {k: v for k, v in r.items() if not k.startswith("_") and not k.endswith(("_n", "_d"))}
+    if r.get("target_d"):
+        out["target_iso"] = r["target_d"].isoformat()
+    return out
+
+
+def summary(r):
+    bits = [b for b in (r["system"], f"risk {r['risk_n']}" if r["risk_n"] else "risk not set",
+                        f"owner {r['owner']}" if r["owner"] else "", f"target {r['target']}" if r["target"] else "",
+                        r["status"].strip() if norm(r["status"]) not in ("", "open") else "") if b]
+    return f"{r['id']}  {r['item']}" + (f" ({'; '.join(bits)})" if bits else "")
+
+
+# ------------------------------------------------------------------ commands
+def cmd_list(a):
+    reg = register_path(a.register)
+    if not reg.exists():
+        if a.json:
+            print(json.dumps({"register": str(reg), "exists": False, "items": [], "notes": []}, indent=2))
+        else:
+            print(f"{PROG}: no register yet at {reg}; `{PROG} add ITEM --system S ... --write` starts one")
+        return 0
+    _, found, recs, _, _ = load(reg)
+    if found is None:
+        raise Fail(f"{reg} has no table with Id, Item, and Status columns")
+    rows, notes = ranked(reg, recs, a.all)
+    if a.json:
+        print(json.dumps({"register": str(reg), "exists": True, "today": kc.today().isoformat(),
+                          "items": [public(r) for r in rows], "notes": notes}, indent=2, ensure_ascii=False))
+        return 0
+    n_open = sum(1 for r in recs if r["status_n"] in OPEN)
+    print(f"{PROG}: {n_open} open item(s) in {reg}" + (", most pressing first" if n_open else "")
+          + (f"; {len(rows) - n_open} accepted or closed" if a.all else ""))
+    for n, r in enumerate(rows, 1):
+        print(f"  {n:>2}. [{r['score']:>2}] {summary(r)}")
+        print(f"        {'; '.join(r['reasons'])}")
+    for note in notes:
+        print(f"  Note: {note}")
+    return 0
+
+
+def cmd_show(a):
+    reg = register_path(a.register)
+    _, _, recs, acc, clo = load(reg)
+    r = find(recs, " ".join(a.rest))
+    (row,), _ = ranked(reg, [r], True)
+    print(f"{r['id']}: {r['item']}")
+    for k, label in (("system", "System"), ("type", "Type"), ("impact", "Impact"), ("risk", "Risk"),
+                     ("cost", "Rough cost to fix"), ("lifecycle", "Lifecycle link and verdict"), ("owner", "Owner"),
+                     ("target", "Target date"), ("status", "Status")):
+        print(f"  {label}: {r[k] or '-'}")
+    print(f"  Score {row['score']}: {'; '.join(row['reasons'])}")
+    for x in acc:
+        if x["id"].strip().upper() == r["id"].upper():
+            print(f"  Accepted: {x['reason']} (by {x['by'] or 'role not given'}; review by {x['review'] or '-'})")
+    for x in clo:
+        if x["id"].strip().upper() == r["id"].upper():
+            print(f"  Closed {x['closed']}: {x['how']}")
+    hist = [e for e in read_log(reg) if e["id"].upper() == r["id"].upper()]
+    for e in hist:
+        print(f"  {kc.fmt(kc.parse_date(e.get('date')))} {e.get('action')}" +
+              (f": {e['changes']}" if e.get("changes") else ""))
+    return 0
+
+
+def check_fields(a):
+    if a.risk and a.risk.lower() not in RISKS:
+        raise Fail(f"--risk is one of: {', '.join(RISKS)}")
+    if a.cost and a.cost.lower() not in COSTS:
+        raise Fail(f"--cost is one of: {', '.join(COSTS)}")
+    if a.type and a.type.lower() not in TYPES:
+        raise Fail(f"--type is one of: {', '.join(TYPES)}")
+    if a.status and a.status.lower() not in OPEN:
+        if a.status.lower() in ("accepted", "closed"):
+            raise Fail(f"use `{PROG} {'accept' if a.status.lower() == 'accepted' else 'close'} ID ...` for that")
+        raise Fail(f"--status is one of: {', '.join(OPEN)}")
+
+
+VERBS = {"add": ("Added", "adds"), "set": ("Updated", "updates"), "accept": ("Accepted", "accepts"),
+         "close": ("Closed", "closes")}
+
+
+def finish(a, reg, new, rec, action, **extra):
+    line = next((ln for ln in new.splitlines() if re.match(rf"^\|\s*{re.escape(rec['id'])}\s*\|", ln)), "")
+    done, does = VERBS[action]
+    print(line)
+    if a.write:
+        kc.write(reg, stamp(new))
+        log(reg, action, rec, **extra)
+        print(f"{PROG}: {done} {rec['id']} in {reg}" + (f" ({extra['changes']})" if extra.get("changes") else ""))
+    else:
+        print(f"{PROG}: read-only; --write {does} {rec['id']} in {reg}")
+    return 0
+
+
+def cmd_add(a):
+    reg = register_path(a.register)
+    item = " ".join(a.rest).strip()
+    if not item:
+        raise Fail(f'{PROG} add "what the debt is" --system SYSTEM [--risk high] [--owner ROLE] ... [--write]')
+    if not a.system:
+        raise Fail("add needs --system (the system the debt sits in)")
+    check_fields(a)
+    text, found, recs, _, _ = load(reg)
+    if reg.exists() and found is None:
+        raise Fail(f"{reg} has no table with Id, Item, and Status columns")
+    if not text:
+        text = new_register()
+    elif any(EXAMPLE_ROW.match(ln) for ln in text.splitlines()):
+        text = without_example(text)                # copied from the template by hand: the example goes
+    found = kc.find_table(text, MUST)
+    if not found:
+        raise Fail("the tech debt register template has no register table to start from")
+    if any(norm(r["item"]) == norm(item) and norm(r["system"]) == norm(a.system) and r["status_n"] in OPEN
+           for r in recs):
+        raise Fail(f"that item is already open on {a.system} (kit-techdebt list)")
+    rec = {"id": next_id(text), "item": item[:200], "system": a.system[:80], "type": (a.type or "").lower(),
+           "impact": (a.impact or "")[:300], "risk": (a.risk or "").lower(), "cost": (a.cost or "").lower(),
+           "lifecycle": (a.lifecycle or "")[:150], "owner": (a.owner or "")[:60],
+           "target": day(a.target, "--target"), "status": (a.status or "open").lower()}
+    refuse_secrets(*rec.values())
+    new = kc.append_row(text, found, COLUMNS, rec)
+    return finish(a, reg, new, rec, "add")
+
+
+def cmd_set(a):
+    reg = register_path(a.register)
+    check_fields(a)
+    text, found, recs, _, _ = load(reg)
+    rec = find(recs, " ".join(a.rest))
+    changes = []
+    for k, v in (("risk", a.risk), ("cost", a.cost), ("type", a.type), ("impact", a.impact),
+                 ("lifecycle", a.lifecycle), ("owner", a.owner), ("status", a.status), ("system", a.system)):
+        if v is not None:
+            v = v.lower() if k in ("risk", "cost", "type", "status") else v
+            if v != rec[k]:
+                changes.append(f"{k} {rec[k] or '-'} -> {v}")
+                rec[k] = v
+    if a.target is not None:
+        v = day(a.target, "--target")
+        if v != rec["target"]:
+            changes.append(f"target {rec['target'] or '-'} -> {v}")
+            rec["target"] = v
+    if not changes:
+        raise Fail("nothing to change: give --risk, --cost, --impact, --lifecycle, --owner, --target, or --status")
+    refuse_secrets(*(rec[k] for k, _ in COLUMNS))
+    new = update_row(text, found, rec)
+    return finish(a, reg, new, rec, "set", changes="; ".join(changes))
+
+
+def add_side_row(text, must, columns, section, rec):
+    found = kc.find_table(text, must)
+    if not found:
+        text = text.rstrip("\n") + "\n" + section
+        found = kc.find_table(text, must)
+    return kc.append_row(text, found, columns, rec)
+
+
+def cmd_accept(a):
+    reg = register_path(a.register)
+    missing = [f for f, v in (("--reason", a.reason), ("--by", a.by), ("--review", a.review)) if not v]
+    if missing:
+        raise Fail(f"accept needs {', '.join(missing)} (why the team lives with it, who accepted it by role, "
+                   "and when to look again)")
+    text, found, recs, _, _ = load(reg)
+    rec = find(recs, " ".join(a.rest))
+    if rec["status_n"] == "closed":
+        raise Fail(f"{rec['id']} is closed")
+    review = day(a.review, "--review")
+    if kc.parse_date(review) <= kc.today():
+        raise Fail("--review is a date still to come")
+    refuse_secrets(a.reason, a.by)
+    rec["status"] = "accepted"
+    new = update_row(text, found, rec)
+    new = add_side_row(new, ACC_MUST, ACC_COLUMNS, ACCEPTED_SECTION,
+                       {"id": rec["id"], "reason": a.reason[:300], "by": a.by[:60], "review": review})
+    return finish(a, reg, new, rec, "accept", reason=a.reason[:300], by=a.by[:60], review=review)
+
+
+def cmd_close(a):
+    reg = register_path(a.register)
+    if not a.how:
+        raise Fail("close needs --how (what closed it: fixed, retired, replaced, and where)")
+    text, found, recs, _, _ = load(reg)
+    rec = find(recs, " ".join(a.rest))
+    if rec["status_n"] == "closed":
+        raise Fail(f"{rec['id']} is already closed")
+    when = day(a.date or "today", "--date")
+    if kc.parse_date(when) > kc.today():
+        raise Fail("--date hasn't happened yet")
+    refuse_secrets(a.how)
+    rec["status"] = "closed"
+    new = update_row(text, found, rec)
+    new = add_side_row(new, CLO_MUST, CLO_COLUMNS, CLOSED_SECTION, {"id": rec["id"], "closed": when, "how": a.how[:300]})
+    return finish(a, reg, new, rec, "close", how=a.how[:300], closed=when)
+
+
+def due_items(reg, days):
+    _, _, recs, acc, _ = load(reg)
+    today = kc.today()
+    past, soon, review = [], [], []
+    for r in recs:
+        if r["status_n"] in OPEN and r["target_d"]:
+            left = (r["target_d"] - today).days
+            if left < 0:
+                past.append((r, -left))
+            elif left <= days:
+                soon.append((r, left))
+    accepted = {r["id"].upper(): r for r in recs if r["status_n"] == "accepted"}
+    latest = {}
+    for x in acc:                                   # accepted again: the last row is the one in force
+        latest[x["id"].strip().upper()] = x
+    for x in latest.values():
+        r = accepted.get(x["id"].strip().upper())
+        d = kc.parse_date(x["review"])
+        if r and d and (d - today).days <= days:
+            review.append((r, (d - today).days, d))
+    return recs, past, soon, review
+
+
+def cmd_due(a):
+    reg = register_path(a.register)
+    days = a.days if a.days is not None else 30
+    if not reg.exists():
+        if a.json:
+            print(json.dumps({"register": str(reg), "exists": False, "past": [], "soon": [], "review": []}))
+        else:
+            print(f"{PROG}: no register yet at {reg}")
+        return 0
+    _, past, soon, review = due_items(reg, days)
+    if a.json:
+        print(json.dumps({"register": str(reg), "exists": True, "today": kc.today().isoformat(), "days": days,
+                          "past": [dict(public(r), days=n) for r, n in past],
+                          "soon": [dict(public(r), days=n) for r, n in soon],
+                          "review": [dict(public(r), days=n, review=d.isoformat()) for r, n, d in review]}, indent=2))
+        return 0
+    if not (past or soon or review):
+        print(f"{PROG}: nothing due: no open item is past its target or due within {days} days, and no accepted "
+              "debt is due a review")
+        return 0
+    for r, n in past:
+        print(f"  Past target by {n} day(s): {summary(r)}")
+    for r, n in soon:
+        print(f"  Due in {n} day(s): {summary(r)}")
+    for r, n, d in review:
+        print(f"  Accepted, review {'overdue' if n < 0 else 'due'} {kc.fmt(d)}: {summary(r)}")
+    return 0
+
+
+def month_bounds(spec):
+    today = kc.today()
+    spec = (spec or "last").strip().lower()
+    if spec == "this":
+        first = today.replace(day=1)
+    elif spec == "last":
+        first = (today.replace(day=1) - dt.timedelta(days=1)).replace(day=1)
+    else:
+        m = re.fullmatch(r"(\d{4})-(\d{2})", spec)
+        if not m or not 1 <= int(m.group(2)) <= 12:
+            raise Fail("--month takes YYYY-MM, this, or last")
+        first = dt.date(int(m.group(1)), int(m.group(2)), 1)
+    nxt = (first + dt.timedelta(days=32)).replace(day=1)
+    return first, nxt - dt.timedelta(days=1)
+
+
+def month_data(reg, spec):
+    first, last = month_bounds(spec)
+    out = {"register": str(reg), "exists": reg.exists(), "month": first.strftime("%Y-%m"), "from": first.isoformat(),
+           "to": last.isoformat(), "added": [], "closed": [], "accepted": [], "open": {}, "top": [], "notes": []}
+    if not reg.exists():
+        return out
+    _, found, recs, acc, clo = load(reg)
+    if found is None:
+        out["notes"].append(f"{reg.name} has no table with Id, Item, and Status columns")
+        return out
+    byid = {r["id"].upper(): r for r in recs}
+    seen = {"added": set(), "closed": set(), "accepted": set()}
+
+    def fact(rid, item="", system="", **kw):
+        r = byid.get(rid.upper(), {})
+        return dict({"id": rid, "item": r.get("item") or item, "system": r.get("system") or system,
+                     "risk": r.get("risk_n") or ""}, **kw)
+    for e in read_log(reg):
+        key = {"add": "added", "close": "closed", "accept": "accepted"}.get(e.get("action"))
+        d = kc.parse_date(e.get("closed") if key == "closed" and e.get("closed") else e.get("date"))
+        if not d or not first <= d <= last:
+            continue
+        if key and e["id"].upper() not in seen[key]:
+            seen[key].add(e["id"].upper())
+            extra = {"date": d.isoformat()}
+            if key == "closed":
+                extra["how"] = e.get("how", "")
+            if key == "accepted":
+                extra["review"] = e.get("review", "")
+            out[key].append(fact(e["id"], item=e.get("item", ""), system=e.get("system", ""), **extra))
+    for x in clo:                                   # closed by hand, not through kit-techdebt
+        d = kc.parse_date(x["closed"])
+        rid = x["id"].strip()
+        if d and first <= d <= last and rid.upper() not in seen["closed"]:
+            seen["closed"].add(rid.upper())
+            out["closed"].append(fact(rid, date=d.isoformat(), how=x["how"]))
+    for k in ("added", "closed", "accepted"):
+        out[k].sort(key=lambda f: (f["date"], f["id"]))
+    rows, notes = ranked(reg, recs)
+    today = kc.today()
+    out["open"] = {"total": len(rows), **{k: sum(1 for r in rows if r["risk_n"] == k) for k in RISKS},
+                   "unset": sum(1 for r in rows if r["risk_n"] not in RISKS),
+                   "past_target": sum(1 for r in rows if r["target_d"] and r["target_d"] < today),
+                   "as_of": today.isoformat()}
+    out["top"] = [{"id": r["id"], "item": r["item"], "system": r["system"], "score": r["score"], "reasons": r["reasons"]}
+                  for r in rows[:3]]
+    out["notes"] = notes
+    return out
+
+
+def cmd_month(a):
+    reg = register_path(a.register)
+    d = month_data(reg, a.month)
+    if a.json:
+        print(json.dumps(d, indent=2, ensure_ascii=False))
+        return 0
+    if not d["exists"]:
+        print(f"{PROG}: no register yet at {reg}")
+        return 0
+    first = dt.date.fromisoformat(d["from"])
+    print(f"Technical debt, {first:%B %Y}")
+    for key, word in (("added", "Added"), ("closed", "Closed"), ("accepted", "Accepted")):
+        for f in d[key]:
+            print(f"  {word} {f['id']}: {f['item']} ({f['system']}" + (f"; {f['how']}" if f.get("how") else "") + ")")
+    if not (d["added"] or d["closed"] or d["accepted"]):
+        print("  Nothing added, closed, or accepted this month.")
+    o = d["open"]
+    print(f"  Open now: {o['total']} ({o['high']} high, {o['medium']} medium, {o['low']} low risk"
+          + (f", {o['unset']} not rated" if o["unset"] else "") + f"); {o['past_target']} past their target date")
+    for t in d["top"]:
+        print(f"  Most pressing: {t['id']} {t['item']} [{t['score']}]: {'; '.join(t['reasons'])}")
+    return 0
+
+
+def cmd_brief(a):
+    try:
+        reg = register_path(a.register)
+    except Fail:
+        return 0
+    if not reg.exists():
+        return 0
+    recs, past, soon, review = due_items(reg, 14)
+    rows, _ = ranked(reg, recs)
+    high = [r for r in rows if r["risk_n"] == "high"]
+    if not (past or review):                        # nothing past its target or due a review: nothing to say
+        return 0
+    parts = [f"{len(rows)} open ({len(high)} high risk)"]
+    if past:
+        parts.append("past target: " + ", ".join(r["id"] for r, _ in past[:6]) + (" and more" if len(past) > 6 else ""))
+    if review:
+        parts.append("accepted, due a review: " + ", ".join(r["id"] for r, _, _ in review[:6]))
+    lines = ["Technical debt", f"{WORK} " + "; ".join(parts) + "."]
+    if rows:
+        top = rows[0]
+        lines.append(f"{WORK} Most pressing: {top['id']} {top['item'][:90]} ({top['system']}): "
+                     f"{'; '.join(top['reasons'][:3])}. (kit-techdebt list)")
+    print("\n".join(lines))
+    return 0
+
+
+def main(argv):
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except (AttributeError, ValueError):
+            pass
+    ap = argparse.ArgumentParser(prog=PROG, description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("command", nargs="?", default="list",
+                    choices=("list", "show", "add", "set", "accept", "close", "due", "month", "brief"))
+    ap.add_argument("rest", nargs="*")
+    ap.add_argument("--register")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--all", action="store_true")
+    ap.add_argument("--write", action="store_true")
+    for f in ("system", "type", "impact", "risk", "cost", "lifecycle", "owner", "target", "status", "reason", "by",
+              "review", "how", "date", "month"):
+        ap.add_argument(f"--{f}")
+    ap.add_argument("--days", type=int)
+    a = ap.parse_args(argv)
+    cmds = {"list": cmd_list, "show": cmd_show, "add": cmd_add, "set": cmd_set, "accept": cmd_accept,
+            "close": cmd_close, "due": cmd_due, "month": cmd_month, "brief": cmd_brief}
+    if a.command in ("list", "due", "month", "brief") and a.rest and not (a.command == "brief" and
+                                                                        a.rest[0] in ("morning", "weekly")):
+        ap.error(f"{a.command} takes no words; did you mean `{PROG} show {' '.join(a.rest)}`?")
+    try:
+        return cmds[a.command](a) or 0
+    except Fail as e:
+        print(f"{PROG}: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

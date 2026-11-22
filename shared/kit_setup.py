@@ -76,6 +76,11 @@ ALLOW = [f"Read({K}/**)", f"Edit({K}/memory/**)", f"Edit({K}/QUEUE.md)", f"Edit(
          # The team coverage map and the monthly architecture digest: they read Kit's registers (and PPM Express,
          # read only) and write only Kit's own files (the coverage file, briefs/teammap-*, briefs/digest-*).
          "Bash(kit-teammap)", "Bash(kit-teammap *)", "Bash(kit-digest)", "Bash(kit-digest *)",
+         # The technical debt register: only the reading commands. add, set, accept, and close change the team's
+         # register in the library with --write, so they ask first, like kit-facts set.
+         "Bash(kit-techdebt)", "Bash(kit-techdebt list)", "Bash(kit-techdebt list *)", "Bash(kit-techdebt show *)",
+         "Bash(kit-techdebt due)", "Bash(kit-techdebt due *)", "Bash(kit-techdebt month)", "Bash(kit-techdebt month *)",
+         "Bash(kit-techdebt brief)", "Bash(kit-techdebt brief *)",
          # The review loop's plan only reads (it prints the steps, the agent commands, and the cost), and so do its
          # readiness score and status.
          "Bash(kit-review-loop plan *)", "Bash(kit-review-loop score *)", "Bash(kit-review-loop status)",

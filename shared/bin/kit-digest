@@ -24,6 +24,9 @@ Sections, each "Nothing this month." when it's empty:
   End of support: what reached it in the month and what reaches it in the next six months (kit-lifecycle
     --json, from the inventory and eol.json in the radar folder).
   Exceptions expiring in the next 60 days (kit-exceptions due --json), and expired ones still open.
+  Technical debt: items added, closed, and accepted in the month, how many are open (and how many of those are
+    high risk or past their target date), and the most pressing (kit-techdebt month --json), only when the
+    library has a tech debt register.
   Coming to the review board next month: pre-reads (kit-preread) and rehearsals (kit-rehearse) Kit has
     written for a meeting next month, and review board meetings in --calendar-json FILE.
   Portfolio: the At Risk or Critical count in the latest PPM Express pulse snapshot (kit-ppmx pulse
@@ -339,6 +342,35 @@ def exceptions(ahead):
     return sec
 
 
+# ------------------------------------------------------------------ technical debt
+def tech_debt(first, ahead):
+    """What moved in the tech debt register in the month, or None when there's no register (left out quietly)."""
+    data, why = run_tool("kit-techdebt", ["month", "--month", first.strftime("%Y-%m"), "--json"],
+                         {"KIT_TODAY": ahead.isoformat()})
+    if data is None:
+        if "isn't installed" in why or "no library root" in why:
+            return None
+        return {"added": [], "closed": [], "accepted": [], "open": {}, "top": [], "note": f"kit-techdebt: {why}"}
+    if not isinstance(data, dict) or not data.get("exists"):
+        return None
+
+    def facts(key, *extra):
+        out = []
+        for x in data.get(key) or []:
+            if isinstance(x, dict):
+                out.append({"id": clip(x.get("id"), 20), "item": clip(x.get("item"), 90), "system": clip(x.get("system"), 50),
+                            "risk": clip(x.get("risk"), 10), **{k: clip(x.get(k), 120) for k in extra}})
+        return out
+    opened = data.get("open") if isinstance(data.get("open"), dict) else {}
+    top = [{"id": clip(t.get("id"), 20), "item": clip(t.get("item"), 90), "system": clip(t.get("system"), 50)}
+           for t in (data.get("top") or [])[:3] if isinstance(t, dict)]
+    notes = [clip(n, 200) for n in (data.get("notes") or []) if isinstance(n, str) and n.strip()]
+    return {"added": facts("added"), "closed": facts("closed", "how"), "accepted": facts("accepted", "review"),
+            "open": {k: opened.get(k) or 0 for k in ("total", "high", "medium", "low", "unset", "past_target")},
+            "top": top, "note": ("kit-techdebt: " + "; ".join(notes)) if notes else None,
+            "unreadable": any("has no table" in n for n in notes)}
+
+
 # ------------------------------------------------------------------ the review board next month
 def papers(folder, kind, nfirst, nlast, ahead):
     out = []
@@ -463,8 +495,13 @@ def build(a):
         d["portfolio"] = portfolio(ahead)
     except Exception:
         d["portfolio"] = None
+    try:
+        d["tech_debt"] = tech_debt(first, ahead)
+    except Exception as e:
+        d["tech_debt"] = {"added": [], "closed": [], "accepted": [], "open": {}, "top": [],
+                          "note": f"kit-techdebt: couldn't be read ({e.__class__.__name__})"}
     d["not_read"] = [d[k]["note"] for k in ("decisions", "patterns", "lifecycle", "exceptions", "review_board")
-                     if d[k]["note"]]
+                     if d[k]["note"]] + ([d["tech_debt"]["note"]] if d["tech_debt"] and d["tech_debt"]["note"] else [])
     return d
 
 
@@ -472,7 +509,8 @@ def tally(d):
     return {"decisions": len(d["decisions"]["made"]), "patterns": len(d["patterns"]["items"]),
             "eos": len(d["lifecycle"]["reached"]) + len(d["lifecycle"]["coming"]),
             "exceptions": len(d["exceptions"]["expiring"]),
-            "board": len(d["review_board"]["meetings"]) + len(d["review_board"]["papers"])}
+            "board": len(d["review_board"]["meetings"]) + len(d["review_board"]["papers"]),
+            "debt": sum(len(d["tech_debt"][k]) for k in ("added", "closed", "accepted")) if d.get("tech_debt") else 0}
 
 
 def tally_file(text):
@@ -491,7 +529,8 @@ def tally_file(text):
             "patterns": len(items("Reference architectures and patterns")),
             "eos": sum(1 for x in items("End of support") if x.startswith(("Reached end of support", "By "))),
             "exceptions": sum(1 for x in items("Exceptions expiring") if not x.startswith("Past expiry")),
-            "board": len(items("Coming to the review board"))}
+            "board": len(items("Coming to the review board")),
+            "debt": sum(1 for x in items("Technical debt") if x.startswith(("Added ", "Closed ", "Accepted ")))}
 
 
 def counts(n):
@@ -500,7 +539,8 @@ def counts(n):
                            ("patterns", "reference architecture change", "reference architecture changes"),
                            ("eos", "end-of-support item", "end-of-support items"),
                            ("exceptions", "exception expiring", "exceptions expiring"),
-                           ("board", "review board item", "review board items")):
+                           ("board", "review board item", "review board items"),
+                           ("debt", "technical debt change", "technical debt changes")):
         if n.get(key):
             parts.append(f"{n[key]} {one if n[key] == 1 else many}")
     return ", ".join(parts) or "nothing new"
@@ -572,6 +612,26 @@ def to_markdown(d):
     if ex["expired"]:
         md.append("- Past expiry and still open: " + "; ".join(f"{x['id']} {x['policy']} / {x['system']} "
                                                                 f"({fmt_iso(x['date'])})" for x in ex["expired"][:5]))
+    td = d.get("tech_debt")
+    if td:
+        md += ["", "## Technical debt", ""]
+        for x in td["added"]:
+            md.append(f"- Added {x['id']}: {x['item']} ({x['system']}" + (f"; risk {x['risk']}" if x["risk"] else "") + ")")
+        for x in td["closed"]:
+            md.append(f"- Closed {x['id']}: {x['item']} ({x['system']})" + (f": {x['how']}" if x["how"] else ""))
+        for x in td["accepted"]:
+            md.append(f"- Accepted {x['id']}: {x['item']} ({x['system']})"
+                      + (f": review by {fmt_iso(x['review']) or x['review']}" if x["review"] else ""))
+        if not (td["added"] or td["closed"] or td["accepted"]):
+            md.append(f"- {NOTHING}")
+        o = td["open"]
+        if o.get("total") or not (td["note"] and td.get("unreadable", True)):
+            line = (f"- Open now: {o.get('total', 0)} ({o.get('high', 0)} high risk); {o.get('past_target', 0)} past "
+                    f"{'its' if o.get('past_target') == 1 else 'their'} target date.")
+            if td["top"]:
+                t = td["top"][0]
+                line += f" Most pressing: {t['id']} {t['item']} ({t['system']})."
+            md.append(line)
     rb = d["review_board"]
     md += ["", f"## Coming to the review board in {d['next_month'].split()[0]}", ""]
     for x in rb["meetings"]:

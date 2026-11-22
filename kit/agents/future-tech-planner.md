@@ -87,6 +87,9 @@ Read Word, PowerPoint, Excel, and PDF files with the document skills.
    reviews), each linked to its technology's lifecycle review and verdict. When a lifecycle review
    recommends migrate or retire, list the open debt on that technology in the review. Never close
    an item without a source saying it's fixed or retired; move it to **Closed** with the date.
+   Ask Kit in **Requests** for `kit-techdebt list` (the open items ranked by risk, end of support,
+   waivers, and target dates, with the reasons) and for the `kit-techdebt add|set|accept|close`
+   change you propose; Kit makes it with `--write` once the owner says yes.
 7. **Vendor landscape.** Keep `vendors.md` from the vendor landscape template in `future-tech.md`:
    each vendor's products in use, strategic tier, contract renewal date (as Kit passes it on; never
    contract text or prices), POCs run, radar entries, relationship owner by role, and risks.

@@ -13,6 +13,20 @@
                                 action (send a card, call, buy a gift, write a note), once per year
   kit-dates --json [--days N]   the upcoming list as JSON
 
+Gifts (for dates whose action is gift):
+  kit-dates gift NAME IDEA... [--price N] [--link URL] [--for WHAT]
+                                save a gift idea for someone (--for: the occasion, such as birthday)
+  kit-dates gifts [NAME] [--year YYYY]
+                                ideas, budget, and what's been bought; with no NAME, the gift dates
+                                coming in the next 60 days with their order-by dates, and the year's
+                                spending against the budgets
+  kit-dates budget NAME AMOUNT [--ship DAYS]
+                                a budget for each occasion, and how many days delivery takes (default 5)
+  kit-dates bought NAME [N|TEXT] [--price N] [--for WHAT] [--date D]
+                                a gift bought: idea N (its number in gifts NAME) leaves the ideas list;
+                                the coming occasion counts as covered, so the brief stops asking
+  kit-dates gift-remove NAME N  drop idea N
+
 The list is ~/Claude/Agents/kit/dates.json, which stays on this computer:
 
   {"lead_days": 7,
@@ -28,7 +42,13 @@ The list is ~/Claude/Agents/kit/dates.json, which stays on this computer:
 "side": "work" marks a work date: the brief puts it with the work items, and its note is drafted for
 work channels. A card or note line says where its draft goes (briefs/cards/), and the morning run
 writes the draft; nothing is ever sent. February 29 dates fall on February 28 in other years.
-KIT_DIR overrides the Kit folder (for tests). Cross-platform.
+
+A gift has an order-by date: the day, less the delivery days (the person's --ship, else the list's
+"ship_days", else 5), less two days to spare. The brief shows a gift date from a week before that, with
+the order-by date and how many ideas are saved (never the ideas themselves), and --queue's to-do is due
+on the order-by date. Once you record it bought for that occasion, the line says so and no to-do is
+added. Ideas, budgets, and purchases are kept in dates.json under "gifts", by name; Kit never buys
+anything. KIT_DIR overrides the Kit folder and KIT_TODAY the day (for tests). Cross-platform.
 """
 import datetime as dt
 import json
@@ -45,6 +65,14 @@ ACTIONS = {"card", "call", "gift", "note", "none"}
 # How many days ahead each action needs its to-do: a card has to be bought and mailed.
 ACTION_LEAD = {"card": 7, "gift": 5, "call": 0, "note": 1}
 DOING = {"card": "Send a card to", "gift": "Get a gift for", "call": "Call", "note": "Write a note to"}
+DEFAULT_SHIP = 5     # days delivery takes, unless the person's or the list's ship_days says otherwise
+SPARE = 2            # days to spare before the date
+DECIDE = 7           # the brief shows a gift date this many days before its order-by date
+
+
+def today():
+    s = os.environ.get("KIT_TODAY")
+    return dt.date.fromisoformat(s) if s else dt.date.today()
 
 
 def load():
@@ -56,7 +84,7 @@ def load():
 def save(cfg):
     LIST.parent.mkdir(parents=True, exist_ok=True)
     tmp = LIST.with_suffix(".tmp")
-    tmp.write_text(json.dumps(cfg, indent=2) + "\n")
+    tmp.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     tmp.replace(LIST)
 
 
@@ -164,16 +192,283 @@ def is_work(item):
     return (item.get("side") or "").lower() == "work"
 
 
+# ------------------------------------------------------------------ gifts
+def money(v):
+    if v is None:
+        return None
+    m = re.fullmatch(r"\$?\s*(\d+(?:\.\d{1,2})?)", str(v).strip().replace(",", ""))
+    if not m:
+        raise ValueError(f"not an amount: {v!r} (use 60 or 59.99)")
+    return float(m.group(1))
+
+
+def cash(v):
+    return f"${v:,.0f}" if v == int(v) else f"${v:,.2f}"
+
+
+def known_names(cfg):
+    names = {i["name"] for i in cfg.get("items", [])} | set((cfg.get("gifts") or {}).keys())
+    return sorted(names, key=lambda n: -len(n))
+
+
+def gift_key(cfg, name):
+    """The name gifts are kept under: an existing key or date name matched case-insensitively, else the one
+    name whose first word it is, else as given."""
+    want = name.strip().lower()
+    names = known_names(cfg)
+    for n in names:
+        if n.lower() == want:
+            return n
+    first = [n for n in names if n.split()[0].lower() == want]
+    return first[0] if len(first) == 1 else name.strip()
+
+
+def split_name(cfg, words):
+    """(name, rest): the longest run of leading words that names someone on the list, else the first word."""
+    for n in known_names(cfg):
+        k = len(n.split())
+        if k <= len(words) and " ".join(words[:k]).lower() == n.lower():
+            return n, words[k:]
+    return (words[0], words[1:]) if words else ("", [])
+
+
+def person(cfg, name, create=False):
+    g = cfg.setdefault("gifts", {}) if create else (cfg.get("gifts") or {})
+    key = gift_key(cfg, name)
+    if key not in g and create:
+        g[key] = {"ideas": [], "bought": []}
+    return key, g.get(key)
+
+
+def ship_days(cfg, item_name):
+    _, p = person(cfg, item_name)
+    return int((p or {}).get("ship_days", cfg.get("ship_days", DEFAULT_SHIP)))
+
+
+def order_by(cfg, item, when):
+    return when - dt.timedelta(days=ship_days(cfg, item["name"]) + SPARE)
+
+
+def occasion(item, when):
+    return f"{(item.get('what') or 'date').lower()} {when.year}"
+
+
+def bought_for(cfg, item, when):
+    """The purchase recorded for this occurrence, or None: one marked for it, or one bought in the 90 days
+    before it with no occasion given."""
+    _, p = person(cfg, item["name"])
+    for b in (p or {}).get("bought", []):
+        if b.get("for") == occasion(item, when):
+            return b
+        d = dt.date.fromisoformat(b["date"]) if b.get("date") else None
+        if not b.get("for") and d and dt.timedelta(0) <= when - d <= dt.timedelta(days=90):
+            return b
+    return None
+
+
+def gift_note(cfg, item, when):
+    """The brief's words for a gift date: bought, or the order-by date and how many ideas are saved."""
+    b = bought_for(cfg, item, when)
+    if b:
+        return f" Gift bought ({fmt_day(dt.date.fromisoformat(b['date'])) if b.get('date') else 'date not noted'})."
+    _, p = person(cfg, item["name"])
+    n = len((p or {}).get("ideas", []))
+    ob = order_by(cfg, item, when)
+    first = item["name"].split()[0]
+    ideas = f"{n} idea{'s' if n != 1 else ''} saved" if n else "no ideas saved yet"
+    if ob < today():
+        return f" Action: gift; the order-by date has passed ({ob:%a %d-%b}): buy locally, or send a card. ({ideas}: kit-dates gifts {first})"
+    return f" Action: gift; order by {ob:%a %d-%b}. ({ideas}: kit-dates gifts {first})"
+
+
+def fmt_day(d):
+    return d.strftime("%d-%b-%Y")
+
+
+def cmd_gift(argv):
+    argv = list(argv)
+    price, link, for_ = opt(argv, "--price"), opt(argv, "--link"), opt(argv, "--for")
+    cfg = load()
+    name, rest = split_name(cfg, argv)
+    idea = " ".join(rest).strip()
+    if not name or not idea:
+        raise ValueError('kit-dates gift NAME "the idea" [--price 60] [--link URL] [--for birthday]')
+    key, p = person(cfg, name, create=True)
+    if any(i["idea"].lower() == idea.lower() for i in p["ideas"]):
+        raise ValueError(f"{key} already has that idea")
+    entry = {"idea": idea[:200], "added": today().isoformat()}
+    if price:
+        entry["price"] = money(price)
+    if link:
+        if not re.match(r"https?://", link):
+            raise ValueError("--link is a web address (https://...)")
+        entry["link"] = link[:500]
+    if for_:
+        entry["for"] = for_.strip().lower()
+    p["ideas"].append(entry)
+    save(cfg)
+    print(f"Saved for {key}: {idea}" + (f" ({cash(entry['price'])})" if entry.get("price") else "")
+          + f". {len(p['ideas'])} idea(s) for {key} now.")
+    return 0
+
+
+def cmd_budget(argv):
+    argv = list(argv)
+    ship = opt(argv, "--ship")
+    cfg = load()
+    if not argv:
+        raise ValueError("kit-dates budget NAME AMOUNT [--ship DAYS]")
+    amount = money(argv[-1]) if len(argv) > 1 and re.fullmatch(r"\$?[\d,]+(?:\.\d+)?", argv[-1]) else None
+    name = " ".join(argv[:-1] if amount is not None else argv)
+    if amount is None and ship is None:
+        raise ValueError("give an AMOUNT, or --ship DAYS")
+    key, p = person(cfg, gift_key(cfg, name), create=True)
+    if amount is not None:
+        p["budget"] = amount
+    if ship is not None:
+        if not ship.isdigit() or not 0 <= int(ship) <= 60:
+            raise ValueError("--ship is a number of days, 0 to 60")
+        p["ship_days"] = int(ship)
+    save(cfg)
+    print(f"{key}: budget {cash(p['budget']) if p.get('budget') is not None else 'not set'} per occasion; "
+          f"delivery {p.get('ship_days', cfg.get('ship_days', DEFAULT_SHIP))} days.")
+    return 0
+
+
+def cmd_bought(argv):
+    argv = list(argv)
+    price, for_, when = opt(argv, "--price"), opt(argv, "--for"), opt(argv, "--date")
+    cfg = load()
+    name, rest = split_name(cfg, argv)
+    if not name:
+        raise ValueError("kit-dates bought NAME [N|what you bought] [--price N] [--for birthday] [--date D]")
+    key, p = person(cfg, name, create=True)
+    what = " ".join(rest).strip()
+    idea = None
+    if re.fullmatch(r"\d+", what or ""):
+        n = int(what)
+        if not 1 <= n <= len(p["ideas"]):
+            raise ValueError(f"{key} has {len(p['ideas'])} idea(s)")
+        idea = p["ideas"].pop(n - 1)
+        what = idea["idea"]
+    if not what:
+        raise ValueError("what did you buy? Give the idea's number (kit-dates gifts NAME) or a few words")
+    d = today()
+    if when:
+        y, mo, dd = parse_date(when)
+        d = dt.date(y or today().year, mo, dd)
+        if not y and d > today():                   # 12-28 written on 03-Jan: last December
+            d = dt.date(d.year - 1, mo, dd)
+        if d > today():
+            raise ValueError("that date hasn't happened yet")
+    entry = {"what": what[:200], "date": d.isoformat()}
+    amt = money(price) if price else (idea or {}).get("price")
+    if amt is not None:
+        entry["price"] = amt
+    occ = for_.strip().lower() if for_ else None
+    if not occ or not re.search(r"\d{4}$", occ):  # the occasion it's for: one of theirs in the three weeks
+        for when_, _, item in upcoming(cfg, d - dt.timedelta(days=21), 387):   # before, or else the next one
+            if item["name"] == key and ((occ and (item.get("what") or "").lower() == occ)
+                                        or (not occ and item.get("action") == "gift")):
+                occ = occasion(item, when_)
+                break
+        else:
+            occ = f"{occ} {d.year}" if occ else None
+    if occ:
+        entry["for"] = occ
+    p["bought"].append(entry)
+    save(cfg)
+    print(f"Bought for {key}: {what}" + (f", {cash(entry['price'])}" if entry.get("price") is not None else "")
+          + (f" (for {entry['for']})" if entry.get("for") else "") + ".")
+    return 0
+
+
+def cmd_gift_remove(argv):
+    argv = list(argv)
+    cfg = load()
+    if len(argv) < 2 or not argv[-1].isdigit():
+        raise ValueError("kit-dates gift-remove NAME N (N from kit-dates gifts NAME)")
+    n = int(argv.pop())
+    key, p = person(cfg, " ".join(argv))
+    if not p or not 1 <= n <= len(p.get("ideas", [])):
+        raise ValueError(f"{key} has {len((p or {}).get('ideas', []))} idea(s)")
+    gone = p["ideas"].pop(n - 1)
+    save(cfg)
+    print(f"Dropped for {key}: {gone['idea']}")
+    return 0
+
+
+def cmd_gifts(argv):
+    argv = list(argv)
+    year = int(opt(argv, "--year", str(today().year)))
+    cfg = load()
+    g = cfg.get("gifts") or {}
+    if argv:
+        key, p = person(cfg, " ".join(argv))
+        if not p:
+            print(f"No gift ideas for {key} yet: kit-dates gift {key.split()[0]} \"the idea\"")
+            p = {"ideas": [], "bought": []}
+        print(f"{key}: budget {cash(p['budget']) if p.get('budget') is not None else 'not set'} per occasion; "
+              f"delivery {p.get('ship_days', cfg.get('ship_days', DEFAULT_SHIP))} days")
+        for when, left, item in upcoming(cfg, today(), 400):
+            if item["name"] == key and item.get("action") == "gift":
+                b = bought_for(cfg, item, when)
+                print(f"Next: {describe(item, when)}, {when:%a %d-%b-%Y}; "
+                      + (f"bought: {b['what']}" if b else f"order by {order_by(cfg, item, when):%a %d-%b}"))
+                break
+        print("Ideas:" if p["ideas"] else "Ideas: none yet")
+        for n, i in enumerate(p["ideas"], 1):
+            print(f"  {n}. {i['idea']}" + (f" ({cash(i['price'])})" if i.get("price") is not None else "")
+                  + (f" [{i['for']}]" if i.get("for") else "") + (f"\n     {i['link']}" if i.get("link") else ""))
+        if p.get("bought"):
+            print("Bought:")
+            for b in sorted(p["bought"], key=lambda b: b.get("date", ""), reverse=True)[:10]:
+                print(f"  {fmt_day(dt.date.fromisoformat(b['date']))}: {b['what']}"
+                      + (f", {cash(b['price'])}" if b.get("price") is not None else "")
+                      + (f" (for {b['for']})" if b.get("for") else ""))
+        return 0
+    rows = [(when, left, item) for when, left, item in upcoming(cfg, today(), 60) if item.get("action") == "gift"]
+    print("Gift dates in the next 60 days:" if rows else "No gift dates in the next 60 days.")
+    for when, left, item in rows:
+        b = bought_for(cfg, item, when)
+        _, p = person(cfg, item["name"])
+        n = len((p or {}).get("ideas", []))
+        tag = " [work]" if is_work(item) else ""
+        print(f"  {when:%a %d-%b} {describe(item, when)}{tag}: " +
+              (f"bought ({b['what']})" if b else f"order by {order_by(cfg, item, when):%a %d-%b}; {n} idea(s)"
+               + (f"; budget {cash(p['budget'])}" if p and p.get("budget") is not None else "")))
+    spent = [(k, b) for k, p in g.items() for b in p.get("bought", [])
+             if b.get("date", "").startswith(str(year)) and b.get("price") is not None]
+    if spent:
+        total = sum(b["price"] for _, b in spent)
+        by = {}
+        for k, b in spent:
+            by[k] = by.get(k, 0) + b["price"]
+        parts = []
+        for k, v in sorted(by.items(), key=lambda kv: -kv[1]):
+            budget = g[k].get("budget")
+            n = sum(1 for kk, _ in spent if kk == k)
+            over = budget is not None and v > budget * n
+            parts.append(f"{k} {cash(v)}" + (f" of {cash(budget * n)}" if budget is not None else "") + (" (over)" if over else ""))
+        print(f"Spent in {year}: {cash(total)} on {len(spent)} gift(s): " + "; ".join(parts))
+    ideas = sum(len(p.get("ideas", [])) for p in g.values())
+    if ideas:
+        print(f"Ideas saved: {ideas}, for " + ", ".join(sorted(k for k, p in g.items() if p.get("ideas"))))
+    return 0
+
+
 def cmd_upcoming(argv):
     days = int(opt(list(argv), "--days", "30"))
     cfg = load()
-    rows = upcoming(cfg, dt.date.today(), days)
+    rows = upcoming(cfg, today(), days)
     if not rows:
         print(f"Nothing in the next {days} days." if LIST.exists() else f"No dates yet: {LIST}")
         return 0
     for when, left, item in rows:
         tag = " [work]" if is_work(item) else ""
         act = f"; {item['action']}" if item.get("action") and item["action"] != "none" else ""
+        if item.get("action") == "gift":
+            act += " (bought)" if bought_for(cfg, item, when) else f" (order by {order_by(cfg, item, when):%a %d-%b})"
         rel = f", {item['relation']}" if item.get("relation") else ""
         print(f"{when_text(when, left):24} {describe(item, when)}{rel}{tag}{act}")
     return 0
@@ -198,14 +493,18 @@ def cmd_all(argv):
     return 0
 
 
-def queue_todo(item, when):
-    """One to-do per occurrence for a date with an action, due when the action has to happen."""
+def queue_todo(item, when, cfg=None):
+    """One to-do per occurrence for a date with an action, due when the action has to happen (a gift: its
+    order-by date, and none once it's bought)."""
     action = item.get("action")
     if action not in ACTION_LEAD:
         return False
     if item.get("queued") == when.isoformat():
         return False
-    due = max(dt.date.today(), when - dt.timedelta(days=ACTION_LEAD[action]))
+    if action == "gift" and cfg is not None and bought_for(cfg, item, when):
+        return False
+    due = max(today(), order_by(cfg, item, when) if action == "gift" and cfg is not None
+              else when - dt.timedelta(days=ACTION_LEAD[action]))
     title = f"{DOING[action]} {item['name']}: {describe(item, when)}, {when:%a %d-%b}"
     args = [sys.executable, str(TODO), "--merge"] + (["work"] if is_work(item) else []) + [title, f"{due:%d-%b-%Y}"]
     r = subprocess.run(args, capture_output=True, text=True, timeout=60)
@@ -223,20 +522,24 @@ def cmd_brief(argv):
         return 0
     queue = "--queue" in argv
     cfg = load()
-    today = dt.date.today()
+    on = today()
     default_lead = int(cfg.get("lead_days", 7))
     changed = False
-    for when, left, item in upcoming(cfg, today, 400):
+    for when, left, item in upcoming(cfg, on, 400):
         lead = int(item.get("lead_days", default_lead))
         if item.get("action") in ACTION_LEAD:
             lead = max(lead, ACTION_LEAD[item["action"]])
+        if item.get("action") == "gift":
+            lead = max(lead, ship_days(cfg, item["name"]) + SPARE + DECIDE)
         if left > lead:
             continue
         tag = "[work] " if is_work(item) else ""
         rel = f" ({item['relation']})" if item.get("relation") else ""
         line = f"{tag}{when_text(when, left)}: {describe(item, when)}{rel}."
         action = item.get("action")
-        if action and action != "none":
+        if action == "gift":
+            line += gift_note(cfg, item, when)
+        elif action and action != "none":
             line += f" Action: {action}."
             if action in ("card", "note"):
                 draft = KIT / "briefs/cards" / f"{when:%Y-%m-%d}-{slug(item['name'])}-{action}.md"
@@ -246,7 +549,7 @@ def cmd_brief(argv):
             line += f" Note: {item['note']}"
         print(line)
         if queue and TODO.exists():
-            changed |= queue_todo(item, when)
+            changed |= queue_todo(item, when, cfg)
     if changed:
         save(cfg)
     return 0
@@ -280,8 +583,8 @@ def cmd_add(argv):
     if action and action not in ACTIONS:
         raise ValueError(f"action is one of: {', '.join(sorted(ACTIONS))}")
     if once and not y:
-        y = dt.date.today().year
-        if dt.date(y, mo, d) < dt.date.today():
+        y = today().year
+        if dt.date(y, mo, d) < today():
             y += 1
     cfg = load()
     dup = [i for i in cfg.get("items", []) if i["name"].lower() == name.lower()
@@ -300,7 +603,7 @@ def cmd_add(argv):
         item["once"] = True
     cfg.setdefault("items", []).append(item)
     save(cfg)
-    when = next_occurrence(item, dt.date.today())
+    when = next_occurrence(item, today())
     print(f"Added: {describe(item, when) if when else name}, next {when:%a %d-%b-%Y}" if when
           else f"Added: {name}")
     return 0
@@ -329,16 +632,19 @@ def cmd_json(argv):
     days = int(opt(list(argv), "--days", "30"))
     cfg = load()
     out = []
-    for when, left, item in upcoming(cfg, dt.date.today(), days):
+    for when, left, item in upcoming(cfg, today(), days):
         out.append({"date": when.isoformat(), "days_left": left, "label": describe(item, when),
                     "name": item["name"], "what": item.get("what"), "relation": item.get("relation"),
-                    "side": "work" if is_work(item) else "personal", "action": item.get("action")})
+                    "side": "work" if is_work(item) else "personal", "action": item.get("action"),
+                    **({"order_by": order_by(cfg, item, when).isoformat(),
+                        "gift_bought": bool(bought_for(cfg, item, when))} if item.get("action") == "gift" else {})})
     print(json.dumps(out, indent=2))
     return 0
 
 
 def main(argv):
-    cmds = {"all": cmd_all, "add": cmd_add, "remove": cmd_remove, "brief": cmd_brief}
+    cmds = {"all": cmd_all, "add": cmd_add, "remove": cmd_remove, "brief": cmd_brief, "gift": cmd_gift,
+            "gifts": cmd_gifts, "budget": cmd_budget, "bought": cmd_bought, "gift-remove": cmd_gift_remove}
     if argv[:1] in (["-h"], ["--help"], ["help"]):
         print(__doc__)
         return 0

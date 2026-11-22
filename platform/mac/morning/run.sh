@@ -322,6 +322,22 @@ if [ "$MODE" = "morning" ] || [ "$MODE" = "weekly" ]; then
       --write --month last --brief > briefs/extra-arch-digest.txt 2>> "$LOG" || rm -f briefs/extra-arch-digest.txt
     [ -s briefs/extra-arch-digest.txt ] || rm -f briefs/extra-arch-digest.txt
   fi
+  # Technical debt (TECH_DEBT_BRIEF, default on): on the weekly review, when the library has a tech debt register,
+  # kit-techdebt brief lists what's past its target date, accepted debt due a review, and the most pressing open
+  # item. Nothing when nothing's due. No model call, [work].
+  if [ "$MODE" = "weekly" ] && [ "${TECH_DEBT_BRIEF:-on}" != "off" ] && [ -f "$KIT/.install/shared/bin/kit-techdebt" ]; then
+    perl -e 'alarm shift; exec @ARGV' 120 python3 "$KIT/.install/shared/bin/kit-techdebt" brief weekly \
+      > briefs/extra-techdebt.txt 2>> "$LOG" || rm -f briefs/extra-techdebt.txt
+    [ -s briefs/extra-techdebt.txt ] || rm -f briefs/extra-techdebt.txt
+  fi
+  # Team feedback log (kit-feedback brief), when it has people on it: today's 1:1s with the prep command, who has
+  # had no note in a while, and praise still to pass on once it's RECOGNIZE_AFTER_DAYS old; the weekly review adds
+  # who hasn't been recognized in RECOGNIZE_EVERY_DAYS. Names and counts, every line [work], no "Text:" line.
+  if [ -f "$KIT/feedback/people.json" ] && [ -f "$KIT/.install/shared/bin/kit-feedback" ]; then
+    perl -e 'alarm shift; exec @ARGV' 60 python3 "$KIT/.install/shared/bin/kit-feedback" brief "$MODE" \
+      > briefs/extra-feedback.txt 2>> "$LOG" || rm -f briefs/extra-feedback.txt
+    [ -s briefs/extra-feedback.txt ] || rm -f briefs/extra-feedback.txt
+  fi
   for f in briefs/dates.txt briefs/renewals.txt briefs/renewals-missing.txt; do [ -s "$f" ] || rm -f "$f"; done
 fi
 PROMPT_TEXT=$(sed "s/{{OWNER}}/${OWNER_NAME:-the owner}/g" "$PROMPT")

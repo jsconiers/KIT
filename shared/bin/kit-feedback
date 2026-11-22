@@ -20,8 +20,17 @@
   kit-feedback review NAME [--from D] [--to D] [--write]
                                      the notes over a review period, by kind, with dates and counts:
                                      the raw material for a review you write yourself
-  kit-feedback brief                 [work] lines for the brief: who's had no note in a while, and
-                                     today's 1:1s on the calendar, with the prep command
+  kit-feedback thanked NAME [--how in-person|note|email|public|team] [--for TEXT] [--date D]
+                                     you recognized someone: when, how, and for what. Praise noted
+                                     before then counts as passed on
+  kit-feedback recognize [NAME]      recognition due: praise you noted and haven't passed on, wins in
+                                     the log that name them, and who hasn't been recognized lately;
+                                     with NAME, what to thank them for and a short draft to rewrite
+  kit-feedback brief [morning|weekly]
+                                     [work] lines for the brief: who's had no note in a while, today's
+                                     1:1s on the calendar, with the prep command, and praise still to
+                                     pass on once it's a week old; the weekly review adds who hasn't
+                                     been recognized in a month
   kit-feedback --check               one line for kit doctor
 
 Kept in Kit's folder, in feedback/: only your account can open it, it is never committed or
@@ -29,6 +38,13 @@ exported, and it's backed up only encrypted. Notes are about work: what someone 
 to, never guesses about motives, health, or private life. Nothing is ever sent to anyone, and none of
 it goes into a text: the brief gets names and counts only, tagged [work]. Dates: YYYY-MM-DD,
 DD-Mmm-YYYY, 20-Oct, today, yesterday.
+
+Recognition (thanked, recognize): what you've recognized goes in feedback/recognition.jsonl, owner-only like
+the notes. A praise note dated after the last time you recognized someone is praise still to pass on; the
+morning brief names who has some once it's RECOGNIZE_AFTER_DAYS old (default 7), and the weekly review
+also names who hasn't been recognized in RECOGNIZE_EVERY_DAYS (default 30), both from Kit's config. Wins
+are the lines of the accomplishments log (kit-wins) from the last 30 days that name someone by first name
+or alias. The draft is built from your own notes, with no model call; Kit never sends it.
 """
 import datetime as dt
 import json
@@ -44,7 +60,11 @@ KIT = pathlib.Path(os.path.expanduser(os.environ.get("KIT_DIR", "~/Claude/Agents
 DIR = KIT / "feedback"
 PEOPLE = DIR / "people.json"
 NOTES = DIR / "notes.jsonl"
+THANKS = DIR / "recognition.jsonl"
+WINS = KIT / "memory" / "accomplishments.md"
+CONFIG = KIT / ".install" / "shared" / "morning" / "config"
 KINDS = ("praise", "coaching", "observation", "goal", "concern")
+HOWS = ("in-person", "note", "email", "public", "team")
 DEFAULT_EVERY = 14
 ONE_ON_ONE = re.compile(r"\b(1\s*:\s*1|1-1|1on1|one[- ]on[- ]one|1x1|check[- ]in)\b", re.I)
 
@@ -108,6 +128,33 @@ def append_note(row):
     with open(NOTES, "a", encoding="utf-8") as f:
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
     private(NOTES)
+
+
+def thanks():
+    out = []
+    if THANKS.exists():
+        for line in THANKS.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                out.append(json.loads(line))
+            except ValueError:
+                continue
+    return out
+
+
+def save_thanks(rows):
+    ensure()
+    tmp = THANKS.with_suffix(".tmp")
+    tmp.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+    private(tmp)
+    tmp.replace(THANKS)
+
+
+def setting_days(key, default):
+    try:
+        m = re.search(rf'^{key}="?(\d+)"?', CONFIG.read_text(encoding="utf-8", errors="replace"), re.M)
+    except OSError:
+        m = None
+    return int(m.group(1)) if m and 0 < int(m.group(1)) <= 365 else default
 
 
 def norm(s):
@@ -302,12 +349,15 @@ def cmd_people(argv):
         print("No one on your list yet.")
         return 0
     quarter = (today() - dt.timedelta(days=91)).isoformat()
+    thank_rows = thanks()
     for p in sorted(d["people"], key=lambda p: p["name"].lower()):
         last = last_note(rows, p)
         n = len([r for r in mine(rows, p) if r["date"] >= quarter])
+        lt = last_thanked(thank_rows, p)
         print(f"{p['name']}" + (f" ({p['role']})" if p.get("role") else "") +
               f": every {p.get('every') or DEFAULT_EVERY} days; last note {fmt(last) if last else 'none'}; "
-              f"{n} in 90 days" + (f"; last 1:1 {fmt(p['last_1on1'])}" if p.get("last_1on1") else ""))
+              f"{n} in 90 days" + (f"; last 1:1 {fmt(p['last_1on1'])}" if p.get("last_1on1") else "")
+              + (f"; last recognized {fmt(lt['date'])}" if lt else ""))
     return 0
 
 
@@ -367,6 +417,8 @@ def cmd_remove_person(argv):
             print("Kept.")
             return 0
         save_notes([r for r in notes() if r.get("person") != p["name"]])
+        if THANKS.exists():
+            save_thanks([r for r in thanks() if r.get("person") != p["name"]])
     d["people"].remove(p)
     save_people(d)
     print(f"Removed {p['name']}" + (" and their notes." if forget else "; their notes are kept."))
@@ -416,6 +468,9 @@ def cmd_prep(argv):
              f"Since {'your last 1:1, ' if p.get('last_1on1') else ''}{fmt(since)}: {len(recent)} note(s). Private "
              "(Kit's feedback/ folder); share what you choose, in your own words.", ""]
     lines += block("Praise to give", by["praise"])
+    lt = last_thanked(thanks(), p)
+    lines += [f"Last recognized: {fmt(lt['date'])} ({lt['how']})." if lt else "Not recognized yet (kit-feedback thanked "
+              "NAME once you have).", ""]
     lines += block("Coaching to raise", by["coaching"] + by["concern"])
     lines += block("What you've seen", by["observation"])
     open_goals = goals(rows, p)
@@ -453,6 +508,13 @@ def cmd_review(argv):
             tags[t] = tags.get(t, 0) + 1
     if tags:
         lines += ["Themes (tags): " + ", ".join(f"{t} {n}" for t, n in sorted(tags.items(), key=lambda x: -x[1])), ""]
+    rec = [r for r in thanks() if r.get("person") == p["name"] and start.isoformat() <= r["date"] <= end.isoformat()]
+    if rec:
+        hows = {}
+        for r in rec:
+            hows[r["how"]] = hows.get(r["how"], 0) + 1
+        lines += [f"Recognized {len(rec)} time(s) in the period (" + ", ".join(f"{h} {n}" for h, n in sorted(hows.items()))
+                  + ").", ""]
     titles = {"praise": "Strengths shown", "coaching": "Coaching given", "concern": "Concerns raised",
               "observation": "Other observations", "goal": "Goals"}
     for k in ("praise", "coaching", "concern", "observation"):
@@ -468,6 +530,144 @@ def cmd_review(argv):
         print(f"Saved {f}")
     else:
         print(text, end="")
+    return 0
+
+
+def last_thanked(rows, p):
+    mine_ = [r for r in rows if r.get("person") == p["name"]]
+    return max(mine_, key=lambda r: (r["date"], r.get("at", ""))) if mine_ else None
+
+
+def pending_praise(note_rows, thank_rows, p):
+    """Praise noted after the last time you recognized them: still to pass on, oldest first."""
+    last = last_thanked(thank_rows, p)
+    since = last["date"] if last else ""
+    return sorted((r for r in mine(note_rows, p) if r.get("kind") == "praise" and r["date"] > since),
+                  key=lambda r: r["date"])
+
+
+def wins_naming(p, days=30):
+    """Lines of the accomplishments log from the last days that name them (first name or alias, as written)."""
+    try:
+        text = WINS.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    names = [n for n in [p["name"].split()[0]] + p.get("aliases", []) if len(n) > 1]
+    start = today() - dt.timedelta(days=days)
+    out = []
+    for ln in text.splitlines():
+        m = re.match(r"^- (\d{2}-[A-Z][a-z]{2}-\d{4}) (?:\[[^\]]+\] )?(.*)$", ln)
+        if not m:
+            continue
+        try:
+            d = dt.datetime.strptime(m.group(1), "%d-%b-%Y").date()
+        except ValueError:
+            continue
+        if d >= start and any(re.search(rf"\b{re.escape(n)}\b", m.group(2)) for n in names):
+            out.append((d, re.sub(r"\s*\([^()]*\)\s*$", "", m.group(2)).strip()))
+    return out
+
+
+def recognition_state(d, note_rows, thank_rows):
+    every = setting_days("RECOGNIZE_EVERY_DAYS", 30)
+    out = []
+    for p in sorted(d["people"], key=lambda p: p["name"].lower()):
+        last = last_thanked(thank_rows, p)
+        gap = (today() - dt.date.fromisoformat(last["date"])).days if last else None
+        pend = pending_praise(note_rows, thank_rows, p)
+        oldest = (today() - dt.date.fromisoformat(pend[0]["date"])).days if pend else None
+        out.append({"person": p, "last": last, "gap": gap, "pending": pend, "oldest": oldest,
+                    "wins": wins_naming(p), "overdue": gap is None or gap >= every})
+    return out
+
+
+def cmd_thanked(argv):
+    argv = list(argv)
+    how = (opt(argv, "--how", "in-person") or "").lower()
+    if how not in HOWS:
+        raise Fail(f"--how is one of: {', '.join(HOWS)}")
+    what, when = opt(argv, "--for"), parse_day(opt(argv, "--date", "today"))
+    if when > today():
+        raise Fail("that date hasn't happened yet")
+    d = load_people()
+    p = find(d, " ".join(argv))
+    pend = pending_praise(notes(), thanks(), p)
+    row = {"id": uuid.uuid4().hex[:8], "at": dt.datetime.now().isoformat(timespec="minutes"), "date": when.isoformat(),
+           "person": p["name"], "how": how}
+    if what:
+        row["for"] = what[:500]
+    ensure()
+    with open(THANKS, "a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    private(THANKS)
+    passed = [r for r in pend if r["date"] <= when.isoformat()]
+    print(f"Recognized {p['name']} ({how}, {fmt(when)})."
+          + (f" {len(passed)} praise note(s) now count as passed on." if passed else ""))
+    return 0
+
+
+def lower_first(t):
+    t = t.strip().rstrip(". ")
+    return t[:1].lower() + t[1:] if t[:2] != t[:2].upper() else t
+
+
+def draft_thanks(p, pend, wins):
+    """A starting point in your own notes' words: the newest praise that says what it led to, else the newest."""
+    first = p["name"].split()[0]
+    if pend:
+        r = next((x for x in reversed(pend) if x.get("impact")), pend[-1])
+        text = f"{first}, I noticed you {lower_first(r['text'])}, and I wanted to say thank you."
+        if r.get("impact"):
+            text += f" It meant {lower_first(r['impact'])}."
+        return text
+    if wins:
+        return f"{first}, thank you for your part in this: {lower_first(wins[-1][1])}. I wanted you to know I noticed."
+    return None
+
+
+def cmd_recognize(argv):
+    d, note_rows, thank_rows = load_people(), notes(), thanks()
+    if not d["people"]:
+        print("No one on your list yet: kit-feedback add-person NAME")
+        return 0
+    if argv:
+        p = find(d, " ".join(argv))
+        st = next(x for x in recognition_state(d, note_rows, thank_rows) if x["person"] is p)
+        last = st["last"]
+        print(f"Recognition: {p['name']}" + (f", {p['role']}" if p.get("role") else ""))
+        print(f"Last recognized: {fmt(last['date'])} ({last['how']})" + (f" for {last['for']}" if last.get("for") else "")
+              if last else "Last recognized: not yet")
+        print("Praise to pass on:" if st["pending"] else "Praise to pass on: none since then")
+        for r in st["pending"]:
+            print(f"  {fmt(r['date'])}: {r['text']}" + (f" (it led to: {r['impact']})" if r.get("impact") else ""))
+        if st["wins"]:
+            print("Wins in the log that name them (30 days):")
+            for day_, text in st["wins"]:
+                print(f"  {fmt(day_)}: {text}")
+        draft = draft_thanks(p, st["pending"], st["wins"])
+        if draft:
+            print("\nA draft to rewrite in your own words (Kit sends nothing):\n")
+            print(f"  {draft}")
+        print(f"\nOnce you've said it: kit-feedback thanked {p['name'].split()[0]} --how in-person|note|public")
+        return 0
+    after = setting_days("RECOGNIZE_AFTER_DAYS", 7)
+    every = setting_days("RECOGNIZE_EVERY_DAYS", 30)
+    any_ = False
+    for st in recognition_state(d, note_rows, thank_rows):
+        p, bits = st["person"], []
+        if st["pending"]:
+            bits.append(f"{len(st['pending'])} praise note(s) to pass on, the oldest {st['oldest']} days old")
+        if st["wins"]:
+            bits.append(f"{len(st['wins'])} win(s) in the log name them")
+        if st["overdue"]:
+            bits.append("not recognized yet" if st["last"] is None else f"last recognized {st['gap']} days ago")
+        if bits:
+            any_ = True
+            print(f"{p['name']}: {'; '.join(bits)}")
+    if not any_:
+        print(f"Nothing due: no praise waiting more than {after} days, and everyone recognized in the last {every} days.")
+    else:
+        print("\nkit-feedback recognize NAME for what to thank them for and a draft; kit-feedback thanked NAME afterwards.")
     return 0
 
 
@@ -502,6 +702,7 @@ def todays_events():
 
 
 def cmd_brief(argv):
+    mode = argv[0] if argv and argv[0] in ("morning", "weekly") else "morning"
     d, rows = load_people(), notes()
     if not d["people"]:
         return 0
@@ -527,6 +728,18 @@ def cmd_brief(argv):
             quiet.append(f"{p['name'].split()[0]} ({'none yet' if gap is None else f'{gap} days'})")
     if quiet:
         lines.append("[work] No feedback note lately: " + ", ".join(quiet) + ". (kit-feedback add NAME \"...\")")
+    after = setting_days("RECOGNIZE_AFTER_DAYS", 7)
+    state = recognition_state(d, rows, thanks())
+    waiting = [f"{st['person']['name'].split()[0]} ({len(st['pending'])})" for st in state
+               if st["pending"] and st["oldest"] >= after]
+    if waiting:
+        lines.append("[work] Praise to pass on: " + ", ".join(waiting) + ". (kit-feedback recognize NAME)")
+    if mode == "weekly":
+        due = [st["person"]["name"].split()[0] + (" (not yet)" if st["last"] is None else f" ({st['gap']} days)")
+               for st in state if st["overdue"]]
+        if due:
+            lines.append(f"[work] Not recognized in {setting_days('RECOGNIZE_EVERY_DAYS', 30)} days: " + ", ".join(due)
+                         + ". (kit-feedback recognize)")
     if lines:
         print("Team feedback")
         print("\n".join(lines))
@@ -538,15 +751,17 @@ def cmd_check(argv):
     loose = DIR.exists() and os.name == "posix" and (DIR.stat().st_mode & 0o077 or any(
         f.stat().st_mode & 0o077 for f in DIR.iterdir()))
     state = "warn" if loose else "ok"
-    print(f"{state} {len(d['people'])} people, {len(rows)} notes" + (" (feedback/ is readable by others: chmod -R "
-                                                                    "go-rwx it)" if loose else ""))
+    n_thanks = len(thanks())
+    print(f"{state} {len(d['people'])} people, {len(rows)} notes" + (f", {n_thanks} recognitions" if n_thanks else "")
+          + (" (feedback/ is readable by others: chmod -R go-rwx it)" if loose else ""))
     return 0
 
 
 def main(argv):
     cmds = {"add": cmd_add, "show": cmd_show, "done": cmd_done, "people": cmd_people, "add-person": cmd_add_person,
             "set": cmd_set, "remove-person": cmd_remove_person, "met": cmd_met, "prep": cmd_prep,
-            "review": cmd_review, "brief": cmd_brief, "--check": cmd_check}
+            "review": cmd_review, "brief": cmd_brief, "thanked": cmd_thanked, "recognize": cmd_recognize,
+            "--check": cmd_check}
     try:
         if not argv:
             return cmd_default([])

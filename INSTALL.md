@@ -335,6 +335,12 @@ reads the decisions folder, the reference architecture index, the radar, and the
 the library root first; a missing source only empties its section. No model call; the same on macOS
 and Windows.
 
+**Technical debt.** `kit-techdebt add "ITEM" --system S --risk high --owner ROLE --target DATE --write`
+starts the register (`tech-debt.md` in the radar folder, from the register template) the first time.
+`kit-techdebt` lists the open items, most pressing first; the weekly review lists what's past its target
+and accepted debt due a review (`TECH_DEBT_BRIEF="off"` turns that off), and the digest's Technical debt
+section counts what moved in the month.
+
 The red team and threat modeler need no setup beyond `standards.md` and `compliance.md`; name a
 team copy of their templates under "Design review templates" in `standards.md`. They and the standards
 checker save each note in their own project folder (`red-team/`, `threat-model/`, `standards/`) and a
@@ -477,7 +483,10 @@ endpoints, Claude Code's permission rules, and every credential. Undo a change f
   up over the network only with `--live`; the health check and the brief read the saved results.
 - **Feedback on your team:** `kit-feedback add-person NAME --role R`, `kit-feedback add NAME TEXT --kind
   praise`, `kit-feedback prep NAME` before a 1:1, `kit-feedback review NAME --from ... --to ...` for a
-  review. Owner-only, never committed, exported, or texted.
+  review, `kit-feedback thanked NAME --how note` when you've recognized someone, and `kit-feedback
+  recognize` for who's due. Owner-only, never committed, exported, or texted.
+- **Gifts:** `kit-dates add NAME DATE --action gift`, then `kit-dates gift NAME "idea" --price 60`,
+  `kit-dates budget NAME 75 --ship 4`, and `kit-dates bought NAME 1` once you've bought it.
 - **Meeting load:** `kit-meetload` (the last two weeks; `--ahead`, `--profile work|personal`, `--ics FILE`
   for a calendar kitcal can't read, `--holds` to draft focus time). It reads the calendar and changes
   nothing.

@@ -595,6 +595,24 @@ if ($Mode -eq "morning" -or $Mode -eq "weekly") {
         $drc = Invoke-KitPy $kitDigest @("--write", "--month", "last", "--brief") ([int](Cfg "ARCH_DIGEST_TIMEOUT" "300")) $digestTxt
         if ($drc -ne 0 -or -not (Test-NonEmpty $digestTxt)) { Remove-Item -LiteralPath $digestTxt -Force -ErrorAction SilentlyContinue }
     }
+    # Technical debt (TECH_DEBT_BRIEF, default on): on the weekly review, when the library has a tech debt register,
+    # kit-techdebt brief lists what's past its target date, accepted debt due a review, and the most pressing open
+    # item. Nothing when nothing's due. No model call, [work].
+    $kitDebt = Join-Path $binDir "kit-techdebt"
+    if ($Mode -eq "weekly" -and (Cfg "TECH_DEBT_BRIEF" "on") -ne "off" -and (Test-Path -LiteralPath $kitDebt)) {
+        $debtTxt = Join-Path $briefsDir "extra-techdebt.txt"
+        $trc = Invoke-KitPy $kitDebt @("brief", "weekly") 120 $debtTxt
+        if ($trc -ne 0 -or -not (Test-NonEmpty $debtTxt)) { Remove-Item -LiteralPath $debtTxt -Force -ErrorAction SilentlyContinue }
+    }
+    # Team feedback log (kit-feedback brief), when it has people on it: today's 1:1s with the prep command, who has
+    # had no note in a while, and praise still to pass on once it's RECOGNIZE_AFTER_DAYS old; the weekly review adds
+    # who hasn't been recognized in RECOGNIZE_EVERY_DAYS. Names and counts, every line [work], no "Text:" line.
+    $kitFeedback = Join-Path $binDir "kit-feedback"
+    if ((Test-Path -LiteralPath (Join-Path $KitHome "feedback\people.json")) -and (Test-Path -LiteralPath $kitFeedback)) {
+        $fbTxt = Join-Path $briefsDir "extra-feedback.txt"
+        $frc = Invoke-KitPy $kitFeedback @("brief", $Mode) 60 $fbTxt
+        if ($frc -ne 0 -or -not (Test-NonEmpty $fbTxt)) { Remove-Item -LiteralPath $fbTxt -Force -ErrorAction SilentlyContinue }
+    }
     foreach ($f in @($datesTxt, $renewTxt, $missingTxt)) {
         if (-not (Test-NonEmpty $f)) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
     }

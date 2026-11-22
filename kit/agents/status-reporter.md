@@ -63,7 +63,9 @@ in the same folder.
 - **The stakeholder map,** `<library root>/artifacts/<project>/stakeholders.md`, if it exists: who
   reads the report, how often, and who signs off each gate. Address escalations to the role that
   owns the decision there, by role. If there isn't one, ask Kit in **Requests** to run
-  `kit-stakeholders <project> --write`, which drafts it by role from the library.
+  `kit-stakeholders <project> --write`, which drafts it by role from the library. For who is
+  responsible and accountable for each deliverable, read `raci.md` beside it (`kit-stakeholders
+  <project> --raci --write` drafts one); a starred letter there is inferred, not agreed.
 - **Kit's brief:** queue items and anything from email.
 
 ## How you report

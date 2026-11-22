@@ -5,6 +5,53 @@ What changed in each Kit release. The installed version is in
 morning brief summarizes the new entries once. Format: [Keep a Changelog](https://keepachangelog.com),
 versions follow [semantic versioning](https://semver.org).
 
+## [1.8.2] - 2026-11-22
+
+### Added
+- `kit-techdebt`, the technical debt register: `add ITEM --system S [--type T] [--impact TEXT] [--risk R] [--cost C]
+  [--lifecycle TEXT] [--owner ROLE] [--target DATE]`, `set ID`, `accept ID --reason --by ROLE --review DATE`, and
+  `close ID --how`, each a preview until `--write`, on the future tech planner's `tech-debt.md` in the radar folder
+  (started from the register template the first time; columns found by name, a typed status read by its first words
+  ("Open - blocked on vendor" is open, "Done" closed), ids TD-001 and up, rows never deleted: an accepted or closed
+  item gets a row in the Accepted debt or Closed table, and the latest acceptance is the one in force; a close counts
+  in the month of its date). `list` ranks the open items with every point's reason: the risk, the technology's end of
+  support (kit-lifecycle's summary.json, matched on the system or the product), a retire, replace, or migrate
+  verdict, a waiver on the same system (kit-exceptions; one expiring in 60 days counts double), the target date, and
+  the cost to fix. `due`, `month --json`, and `brief`. Writes are logged in `tech-debt-log.jsonl` beside the
+  register; credential-shaped text is refused; owners are roles; the installer pre-approves only the reading
+  commands (list, show, due, month, brief), so a change to the register asks first (tests/test_techdebt.py).
+- The architecture digest's Technical debt section: the month's items added, closed, and accepted, how many are open,
+  how many of those are high risk or past their target date, and the most pressing one, only when the library has a
+  register. When an item is past its target or accepted debt is due a review, the weekly review lists them with the
+  most pressing open item, and says nothing otherwise (`TECH_DEBT_BRIEF`, default on; run.sh and run.ps1).
+- `kit-stakeholders PROJECT --raci [--write|--json]`: a RACI matrix with the usual architecture deliverables down
+  the side (impact assessment, design specification, architecture review, security review, change request, build and
+  test, cutover, operational handover) and the roles the stakeholder map found across, one Accountable each. Inferred
+  letters carry a star; a RACI table in the project's documents (its own activities become rows) and the intake
+  note's sign-offs win and carry none. Checks: no Accountable, two, or no Responsible, and roles with no part.
+  `--write` saves raci.md or a dated draft beside it, with a note of what Kit wrote: a star taken off (or a letter
+  changed) is read as recorded next time, and the letters Kit copied are never read back as records
+  (tests/test_stakeholders.sh).
+- Recognition in `kit-feedback`: `thanked NAME [--how in-person|note|email|public|team] [--for TEXT]` records it
+  (feedback/recognition.jsonl, owner-only); `recognize [NAME]` gives the praise you noted and haven't passed on, the
+  wins in the accomplishments log that name them, who hasn't been recognized lately, and, for one person, a short
+  draft built from your own notes (no model call; Kit sends nothing). The morning brief names who has praise waiting
+  once it's `RECOGNIZE_AFTER_DAYS` old (7); the weekly review also names who hasn't been recognized in
+  `RECOGNIZE_EVERY_DAYS` (30); names and counts only, [work]. Both runners now put `kit-feedback brief` in the brief
+  and the review when the feedback log has people on it (run.sh, run.ps1; tests/test_runsh.sh). The 1:1 prep, the
+  review notes, `people`, and the doctor line show it (tests/test_recognition.py).
+- The gift planner in `kit-dates`: `gift NAME IDEA [--price] [--link] [--for]`, `gifts [NAME] [--year]`, `budget NAME
+  AMOUNT [--ship DAYS]`, `bought NAME N|TEXT`, and `gift-remove`. A gift date has an order-by date (the day less the
+  delivery days, default 5, less two to spare): the brief shows it a week ahead with the count of ideas (never the
+  ideas), `--queue`'s to-do is due on it, and once it's bought for that occasion the brief says so and no to-do is
+  added (a gift recorded up to three weeks after the day is for that day, and a purchase date without a year is the
+  most recent one). `gifts` adds the year's spending against the budgets. `kit-dates` now honours `KIT_TODAY`
+  (tests/test_gifts.py).
+
+### Changed
+- The status reporter reads `raci.md` beside the stakeholder map; the future tech planner asks Kit for `kit-techdebt`.
+- KIT.md: the gift planner, the team feedback log with recognition, technical debt, and stakeholders and RACI.
+
 ## [1.8.1] - 2026-11-20
 
 ### Added

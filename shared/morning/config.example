@@ -252,12 +252,17 @@ REHEARSE_TIMEOUT="900"
 # Monthly architecture digest (kit-digest): "on" has the first weekly review of each month (day 1 to 7) draft last
 # month's digest into briefs/digest-YYYY-MM.md for your edit, with a line in the review pointing at it: the month's
 # decisions, reference architectures approved or changed, end of support in the next six months, exceptions
-# expiring in 60 days, and what's coming to the review board. No model call; [work]. ARCH_DIGEST_WHEN="every-run"
-# runs it on every weekly review (for a test); ARCH_DIGEST_TIMEOUT is its time limit in seconds. Works the same on
-# macOS and Windows.
+# expiring in 60 days, technical debt added, closed, and accepted, and what's coming to the review board. No model
+# call; [work]. ARCH_DIGEST_WHEN="every-run" runs it on every weekly review (for a test); ARCH_DIGEST_TIMEOUT is its
+# time limit in seconds. Works the same on macOS and Windows.
 ARCH_DIGEST="off"
 ARCH_DIGEST_WHEN="first-week"
 ARCH_DIGEST_TIMEOUT="300"
+
+# Technical debt (kit-techdebt): "on" has the weekly review list, when the library has a tech debt register
+# (tech-debt.md in the radar folder), what's past its target date, accepted debt due a review, and the most pressing
+# open item. Nothing when nothing's due. No model call; [work]. Works the same on macOS and Windows.
+TECH_DEBT_BRIEF="on"
 
 # Team coverage map (kit-teammap): more than TEAMMAP_MAX_LOAD percent allocated is over the limit, or, when PPM
 # Express gives no allocation, more than TEAMMAP_MAX_ITEMS open projects and tasks. TEAMMAP_COVERAGE names another
@@ -265,6 +270,12 @@ ARCH_DIGEST_TIMEOUT="300"
 TEAMMAP_MAX_LOAD="100"
 TEAMMAP_MAX_ITEMS="8"
 TEAMMAP_COVERAGE=""
+
+# Recognition (kit-feedback): the morning brief names who has praise you noted and haven't passed on once it's
+# RECOGNIZE_AFTER_DAYS old; the weekly review also names who you haven't recognized (kit-feedback thanked) in
+# RECOGNIZE_EVERY_DAYS. Names and counts only, [work]; the notes themselves never leave Kit's feedback folder.
+RECOGNIZE_AFTER_DAYS="7"
+RECOGNIZE_EVERY_DAYS="30"
 
 # Phone and remote access, phase 1 (shared/kit_inbox.py). PHONE_APPROVALS adds a single-use code to
 # each delivered work list and brief for approving it from Kit Inbox (low-tier actions only).

@@ -6,8 +6,8 @@ how to start. For depth, see the [design guide](DESIGN-GUIDE.md); for installing
 
 | | |
 |---|---|
-| Describes | Kit 1.8.1 |
-| Date | 20-Nov-2026 |
+| Describes | Kit 1.8.2 |
+| Date | 22-Nov-2026 |
 | Audience | Architects, team leads, and reviewers deciding whether to adopt Kit |
 | Licence | All rights reserved; see [LICENSE](../LICENSE) |
 
@@ -60,11 +60,11 @@ them.)
 |---|---|
 | Commitments | A running queue (`QUEUE.md`) for the owner, for Kit, and for what's waiting on others, with sprints, stale-item checks, and duplicate detection; synced to Outlook Tasks or Apple Reminders |
 | Briefings | A morning brief on weekdays, a weekly review on Mondays, a daily work list for approval, and an end-of-day wrap, delivered as a desktop notification or an Outlook draft (never sent) |
-| Architecture work | Reference-architecture matching, precedent search (and the three closest past IAs and GDSs pulled into every new draft), system profiles, sizing, diagram diffs and linting, red-team and STRIDE threat-model reviews before peer review, requirement tracing, one-page executive summaries, ADR drafts, review pre-reads and rehearsals, and consistency checks before review: diagrams against the text, repeated statements and disagreeing figures, each draft against the project's fact sheet of agreed numbers, and drifted copies across synced libraries |
+| Architecture work | Reference-architecture matching, precedent search (and the three closest past IAs and GDSs pulled into every new draft), system profiles, sizing, diagram diffs and linting, red-team and STRIDE threat-model reviews before peer review, requirement tracing, one-page executive summaries, ADR drafts, stakeholder maps and RACI matrices by role, review pre-reads and rehearsals, and consistency checks before review: diagrams against the text, repeated statements and disagreeing figures, each draft against the project's fact sheet of agreed numbers, and drifted copies across synced libraries |
 | Frameworks and compliance | A framework profile (for example NIST CSF 2.0, Zero Trust, Secure by Design, CIS) that limits which frameworks are mapped; control lookups (NIST SP 800-53, MITRE ATT&CK, shipped as data); an exception register, evidence packs, and an audit request tracker |
-| Estate watch | End-of-support warnings from a configuration-management export, a technology radar, and a draft roadmap |
+| Estate watch | End-of-support warnings from a configuration-management export, a technology radar, a technical debt register ranked by risk, end of support, waivers, and target dates, and a draft roadmap |
 | Portfolio | PPM Express reads, a weekly portfolio pulse, and meeting actions proposed as tasks, each change made only on the owner's yes |
-| The day | Meeting prep packs, inbox triage suggestions, mail awaiting a reply, 1:1 prep, accomplishments, self-evaluation and 360 feedback drafts, a time-off pack (what will slip, out-of-office drafts, the handoff), calendar holds as files to open, meeting-load audits, important dates, keep-in-touch reminders, and a private feedback log |
+| The day | Meeting prep packs, inbox triage suggestions, mail awaiting a reply, 1:1 prep, accomplishments, self-evaluation and 360 feedback drafts, a time-off pack (what will slip, out-of-office drafts, the handoff), calendar holds as files to open, meeting-load audits, important dates with a gift planner (order-by dates, ideas, and budgets), keep-in-touch reminders, and a private feedback log with recognition nudges |
 | Personal admin | Formal letters from draft to reply (the letters desk), an expiry list for logins, certificates, and renewals, and a document library with full-text search |
 | Team | Sharing selected records between Kits, a team workload view, an expertise finder, a team coverage map, and agents and templates packaged as Claude Code plugins |
 

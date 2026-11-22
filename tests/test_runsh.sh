@@ -298,6 +298,24 @@ fresh; rm -f "$KIT/briefs/extra-ppmx-pulse.txt"; run morning
 printf 'OUTLOOK_CHECK="off"\nPPMX_PULSE_DAY="%s"\n' "$(date +%u)" > "$M/config"
 fresh; rm -f "$KIT/briefs/extra-ppmx-pulse.txt"; run morning
 [ ! -f "$KIT/briefs/extra-ppmx-pulse.txt" ] && ok "pulse: off unless PPMX_PULSE=on" || bad "pulse default off"
+
+# ---- the team feedback log's lines, when it has people on it -----------------------------------------------
+cat > "$KIT/.install/shared/bin/kit-feedback" <<'KF'
+import sys
+print("Team feedback")
+print("[work] args: " + " ".join(sys.argv[1:]))
+KF
+printf 'OUTLOOK_CHECK="off"\n' > "$M/config"
+fresh; run morning
+[ ! -f "$KIT/briefs/extra-feedback.txt" ] && ok "feedback: nothing without a feedback log" || bad "feedback without a log"
+mkdir -p "$KIT/feedback"; echo '{"people": {}}' > "$KIT/feedback/people.json"
+fresh; run morning
+grep -q "args: brief morning" "$KIT/briefs/extra-feedback.txt" 2>/dev/null \
+  && ok "feedback: the morning brief gets kit-feedback brief morning" || bad "feedback in the morning brief"
+fresh; run weekly
+grep -q "args: brief weekly" "$KIT/briefs/extra-feedback.txt" 2>/dev/null \
+  && ok "feedback: the weekly review gets kit-feedback brief weekly" || bad "feedback in the weekly review"
+rm -rf "$KIT/feedback" "$KIT/.install/shared/bin/kit-feedback"
 rm -f "$KIT/.install/shared/bin/kit-ppmx"
 
 # ---- Monthly architecture digest on the first weekly review of the month ---------------------------------------------
