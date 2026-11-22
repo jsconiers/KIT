@@ -5,6 +5,25 @@ What changed in each Kit release. The installed version is in
 morning brief summarizes the new entries once. Format: [Keep a Changelog](https://keepachangelog.com),
 versions follow [semantic versioning](https://semver.org).
 
+## [1.8.3] - 2026-11-22
+
+### Added
+- `kit-author`, the author's desk, in the public release: `book add|set`, `books`, `launch "TITLE" [done N|undo N|add
+  "ITEM" --offset N]` (a dated checklist from 90 days before the launch to 30 after; `author/launch-checklist.json`
+  replaces it with your own), `bible SERIES [add NAME|check FILE...]` (names spelled close to one in the bible, facts
+  and ages a manuscript contradicts, and names it doesn't know yet; `AUTHOR_COMMON_WORDS` lists words that are never
+  names), and `royalties import FILE` (a KDP or IngramSpark .csv or .xlsx report, kept as totals by month, book,
+  format, and marketplace; combined and order tabs aren't counted twice) with `royalties [--year] [--html]
+  [--deliver]`. The royalties stay in `author/royalties/`, owner-only, with a `.gitignore` of their own; no model or
+  network call, and nothing at KDP or IngramSpark changes (tests/test_author.py).
+- The brief and the weekly review carry the author's desk once there's a book or a royalty report: launch tasks due
+  in the next three days or overdue, and in the review, launches in the next 60 days and last month's royalties.
+  Titled "(personal)", never [work], and no "Text:" line (run.sh and run.ps1; tests/test_runsh.sh).
+
+### Changed
+- KIT.md: the author's desk. The installer links `kit-author` and pre-approves it (it writes only Kit's own `author/`
+  folder).
+
 ## [1.8.2] - 2026-11-22
 
 ### Added

@@ -7,7 +7,7 @@ repository; [DESIGN.md](../DESIGN.md) is the shorter reference that sits beside 
 
 | | |
 |---|---|
-| Describes | Kit 1.8.2 |
+| Describes | Kit 1.8.3 |
 | Date | 22-Nov-2026 |
 | Audience | Maintainers, security reviewers, technical adopters |
 | Licence | All rights reserved; see [LICENSE](../LICENSE) |
@@ -128,7 +128,7 @@ The tools in `shared/bin/` are standard-library Python with a usage docstring, l
 
 | Family | Examples | Model calls |
 |---|---|---|
-| Queue and day | `todo`, `kit-queue`, `kit-meetprep`, `kit-triage`, `kit-awaiting`, `kit-holds`, `kit-wrap`, `kit-dates`, `kit-touch`, `kit-feedback`, `kit-meetload`, `kit-expiry`, `kit-letter`, `kit-library`, `kit-tradeinsights`, `kit-selfeval`, `kit-360` | None |
+| Queue and day | `todo`, `kit-queue`, `kit-meetprep`, `kit-triage`, `kit-awaiting`, `kit-holds`, `kit-wrap`, `kit-dates`, `kit-touch`, `kit-feedback`, `kit-meetload`, `kit-expiry`, `kit-letter`, `kit-library`, `kit-tradeinsights`, `kit-author`, `kit-selfeval`, `kit-360` | None |
 | Architecture | `kit-refarch`, `kit-precedent`, `kit-sysprofile`, `kit-trace`, `kit-csf`, `kit-sizing`, `kit-diagram-diff`, `kit-diaglint`, `kit-onepager`, `kit-decisions`, `kit-viewpoints`, `kit-coverage`, `kit-controls`, `kit-lifecycle`, `kit-roadmap`, `kit-techdebt`, `kit-stakeholders`, `kit-vendors`, `kit-digest`, `kit-signoff`, `kit-diagtext`, `kit-dedupe`, `kit-facts`, `kit-drift` | None |
 | Closed reviews | `kit-preread`, `kit-rehearse`, `kit-review-loop`, `kit-timeoff --handoff` | One closed Claude run each, asked first; `kit-review-loop run` is four agent runs (reviewer, red team, threat modeler, standards checker), asked first (also from `kit-settings ui`'s Review loop section, with the cost shown), and its `plan`, `merge`, `feedback`, `score` (ready for ARB), and `status` make none |
 | Team | `kit-publish`, `kit-team`, `kit-teammap`, `kit-plugin` | None |

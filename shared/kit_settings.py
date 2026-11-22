@@ -292,6 +292,7 @@ META = {
     "ARCH_DIGEST_WHEN": ("briefs", "Digest: when", "First week of the month, or every run."),
     "ARCH_DIGEST_TIMEOUT": ("briefs", "Digest time limit (s)", "Seconds the digest may take."),
     "TECH_DEBT_BRIEF": ("briefs", "Technical debt in the review", "The weekly review's lines from the tech debt register."),
+    "AUTHOR_COMMON_WORDS": ("documents", "Author: words that aren't names", "Capitalized words the series consistency check (kit-author) never counts as a name it doesn't know."),
     "MONTH_REPORT_MODES": ("briefs", "Monthly report: runs counted", "Which runs the monthly report counts."),
     "TICKET_WATCH": ("briefs", "Ticket watcher", "The brief's \"Your tickets\" section, from ServiceNow, read-only."),
     "TICKET_SERVER": ("briefs", "Ticket watcher connector", "The connector the ticket watcher searches."),

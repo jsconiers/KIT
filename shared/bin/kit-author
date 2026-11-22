@@ -1,0 +1,905 @@
+#!/usr/bin/env python3
+"""kit-author: the author's desk: book launches on a dated checklist, a bible for each series with a consistency
+check over the manuscripts, and the royalties from KDP and IngramSpark.
+
+  kit-author                          launches coming (with what's due), the series bibles, last month's royalties
+  kit-author book add "TITLE" [--series S] [--launch DATE] [--formats ebook,paperback,hardcover]
+                  [--platform kdp|ingramspark|both]
+  kit-author book set "TITLE" [--launch DATE] [--status writing|editing|production|launched] [--series S]
+  kit-author books                    every book, with its series, status, and launch date
+  kit-author launch "TITLE"           its launch checklist, dated from the launch day (from 90 days before to 30
+                                      after); launch "TITLE" done N... | undo N... | add "ITEM" --offset -14
+  kit-author bible SERIES             the series bible: characters, places, things, and terms, with their facts
+  kit-author bible SERIES add NAME [--kind character|place|thing|term] [--alias A,B] [--fact "eyes=brown"]...
+                  [--age "BOOK=AGE"]...
+  kit-author bible SERIES check FILE... [--write]
+                                      the manuscripts (.docx, .md, .txt) against the bible: spellings close to a
+                                      name in it (Elliah for Eliah), facts the text contradicts (her eyes,
+                                      his father, the town), ages that don't agree, and names the text uses
+                                      often that the bible doesn't have yet; --write saves the report
+  kit-author royalties import FILE [--platform kdp|ingramspark]
+                                      a KDP or IngramSpark report (.csv or .xlsx): kept as totals by month,
+                                      book, format, and marketplace; a later report for the same months
+                                      replaces them
+  kit-author royalties [--year YYYY] [--html] [--deliver]
+                                      units and royalties by month, book, and format; --html writes a page with
+                                      a chart (author/royalties/), --deliver puts it in Kit Output > Other > Author
+  kit-author brief [morning|weekly]   launch tasks due in the next three days or overdue; the weekly review adds
+                                      launches in the next 60 days and last month's royalties
+
+Everything is in author/ in Kit's folder; the royalties are totals only (author/royalties/, owner-only, never
+in Kit's history), with no customer or account details, and never in a text. The consistency check reads
+words only: no model call. Kit never publishes, orders, or changes anything at KDP or IngramSpark.
+
+The launch checklist is the usual one unless author/launch-checklist.json holds your own: a list of
+[days from launch, "item"] pairs (or {"offset": N, "item": "..."}), which replaces it for every book; a book's
+own items (launch "TITLE" add) come on top. Settings (shared/morning/config): AUTHOR_COMMON_WORDS, capitalized
+words the consistency check never counts as a name it doesn't know (words your books use often, separated by
+spaces or commas). The brief's lines are personal: titled "(personal)", never [work], and no "Text:" line.
+Works the same on macOS and Windows. KIT_DIR sets Kit's folder and KIT_TODAY the day (for tests).
+"""
+import csv
+import datetime as dt
+import hashlib
+import html
+import io
+import json
+import os
+import pathlib
+import re
+import subprocess
+import sys
+import xml.etree.ElementTree as ET
+import zipfile
+
+KIT = pathlib.Path(os.path.expanduser(os.environ.get("KIT_DIR", "~/Claude/Agents/kit")))
+DIR = KIT / "author"
+BOOKS = DIR / "books.json"
+BIBLES = DIR / "bible"
+ROYAL = DIR / "royalties"
+LEDGER = ROYAL / "ledger.json"
+CHECKLIST = DIR / "launch-checklist.json"
+SHARED = KIT / ".install" / "shared"
+CONFIG = SHARED / "morning" / "config"
+STATUSES = ("writing", "editing", "production", "launched")
+KINDS = ("character", "place", "thing", "term")
+LAUNCH = [
+    (-90, "Final manuscript locked: every edit in"),
+    (-75, "Cover final: front, spine, and back, with the back-cover copy"),
+    (-60, "ISBNs assigned for each print format (and the ebook, if you use one)"),
+    (-60, "Book description, seven keywords, and the categories chosen"),
+    (-45, "Author bio and photo current"),
+    (-45, "Interior formatted for print, and the ebook file made"),
+    (-30, "Proof copy ordered"),
+    (-30, "Advance copies out to reviewers"),
+    (-21, "Pre-order set up for the ebook"),
+    (-21, "Launch team and the announcements planned (your list, your community, events)"),
+    (-14, "Proof approved; the files final"),
+    (-14, "Website and Amazon Author Central updated"),
+    (-7, "Launch posts scheduled and the email to the list drafted"),
+    (-5, "Uploads in, staggered when several titles launch the same week (KDP limits new titles a week)"),
+    (0, "Launch day: live in every format and marketplace; share the links"),
+    (3, "Ask the launch team for their reviews"),
+    (7, "The first week's numbers (kit-author royalties)"),
+    (14, "A+ content and the series page linked"),
+    (30, "Decide on a price promotion or ads"),
+]
+ATTRS = {"eyes": r"eyes", "hair": r"hair", "father": r"father", "mother": r"mother", "wife": r"wife",
+         "husband": r"husband", "tribe": r"tribe", "town": r"(?:town|village|hometown|city)", "home": r"home"}
+COLORS = ("brown", "blue", "green", "gray", "grey", "hazel", "black", "dark", "amber", "golden", "red", "white",
+          "silver", "auburn", "blond", "blonde")
+WORDNUM = {w: i for i, w in enumerate("zero one two three four five six seven eight nine ten eleven twelve thirteen "
+                                      "fourteen fifteen sixteen seventeen eighteen nineteen twenty".split())}
+WORDNUM.update({"thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90})
+COMMON = set("""The A An And But Or For Nor So Yet He She It They We You I His Her Its Their Our Your My This That These
+Those Then There Here When Where While After Before Because If As At By In On Of To From With Into Over Under Out Up
+Down Not No Yes Lord God Jesus Christ Spirit Holy Father Son Israel Scripture Bible Chapter Day Days Amen Oh Now Let
+What Who Why How All Some Many One Two Three Even Still Only Just Every Each Today Tomorrow Yesterday Psalm
+Psalms Mr Mrs Ms Dr Saint St Prayer Reflection Read Reading Week""".split())
+
+
+class Fail(Exception):
+    pass
+
+
+def setting(key, default=""):
+    if os.environ.get(key):
+        return os.environ[key]
+    try:
+        for line in CONFIG.read_text(encoding="utf-8", errors="replace").splitlines():
+            m = re.match(rf"^\s*{key}=(.*)$", line)
+            if m and m.group(1).strip().strip("\"'"):
+                return m.group(1).strip().strip("\"'")
+    except OSError:
+        pass
+    return default
+
+
+def common_words():
+    """Capitalized words that are never a name: the usual ones, and AUTHOR_COMMON_WORDS."""
+    return COMMON | {w for w in re.split(r"[\s,]+", setting("AUTHOR_COMMON_WORDS")) if w}
+
+
+def today():
+    s = os.environ.get("KIT_TODAY")
+    return dt.date.fromisoformat(s) if s else dt.date.today()
+
+
+def opt(argv, name, default=None):
+    if name in argv:
+        i = argv.index(name)
+        if i + 1 >= len(argv):
+            raise Fail(f"{name} needs a value")
+        v = argv[i + 1]
+        del argv[i:i + 2]
+        return v
+    return default
+
+
+def many(argv, name):
+    out = []
+    while name in argv:
+        i = argv.index(name)
+        if i + 1 >= len(argv):
+            raise Fail(f"{name} needs a value")
+        out.append(argv[i + 1])
+        del argv[i:i + 2]
+    return out
+
+
+def parse_day(s):
+    s = (s or "").strip().lower().rstrip(".,")
+    if s in ("", "today"):
+        return today()
+    for f in ("%Y-%m-%d", "%d-%b-%Y", "%m/%d/%Y"):
+        try:
+            return dt.datetime.strptime(s, f).date()
+        except ValueError:
+            pass
+    for f in ("%d-%b", "%m/%d", "%b %d"):
+        try:
+            d = dt.datetime.strptime(f"{s} {today().year}", f + " %Y").date()
+            return d if d >= today() - dt.timedelta(days=60) else d.replace(year=d.year + 1)
+        except ValueError:
+            pass
+    raise Fail(f"not a date: {s!r} (2027-02-17, 17-Feb, today)")
+
+
+def fmt(d):
+    d = d if isinstance(d, dt.date) else dt.date.fromisoformat(d)
+    return f"{d:%a %d-%b-%Y}"
+
+
+def slug(s, n=48):
+    return re.sub(r"[^a-z0-9]+", "-", (s or "").lower()).strip("-")[:n].strip("-") or "book"
+
+
+def write(path, text, private=False):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if private:
+        os.chmod(path.parent, 0o700)
+        if path.parent == ROYAL and not (ROYAL / ".gitignore").exists():
+            # Keeps the royalties out of Kit's folder history, whatever the folder's own .gitignore says.
+            (ROYAL / ".gitignore").write_text("*\n", encoding="utf-8")
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    if private:
+        os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+
+def jload(path, default):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return json.loads(json.dumps(default))
+
+
+# ------------------------------------------------------------------ books and launches
+def books():
+    d = jload(BOOKS, {"books": []})
+    d.setdefault("books", [])
+    return d
+
+
+def save_books(d):
+    write(BOOKS, json.dumps(d, indent=1, ensure_ascii=False) + "\n")
+
+
+def find_book(d, title):
+    key = (title or "").strip().lower()
+    if not key:
+        raise Fail("which book? Give its title (or the start of it)")
+    hits = [b for b in d["books"] if b["title"].lower() == key] or \
+           [b for b in d["books"] if b["title"].lower().startswith(key)] or \
+           [b for b in d["books"] if key in b["title"].lower()]
+    if len(hits) == 1:
+        return hits[0]
+    if hits:
+        raise Fail(f"{title!r} fits more than one book: " + "; ".join(b["title"] for b in hits))
+    raise Fail(f"no book {title!r} (kit-author books)")
+
+
+def launch_items():
+    """The launch checklist: yours from author/launch-checklist.json when it has any items, else the usual one."""
+    data = jload(CHECKLIST, None)
+    items = []
+    for x in data if isinstance(data, list) else []:
+        if isinstance(x, dict):
+            o, t = x.get("offset"), x.get("item")
+        elif isinstance(x, list) and len(x) == 2:
+            o, t = x
+        else:
+            continue
+        if isinstance(o, int) and not isinstance(o, bool) and -3650 <= o <= 3650 and isinstance(t, str) and t.strip():
+            items.append((o, t.strip()[:200]))
+    return items or list(LAUNCH)
+
+
+def checklist(b):
+    """[(n, offset, item, due date or None, done)] for the book's launch."""
+    launch = dt.date.fromisoformat(b["launch"]) if b.get("launch") else None
+    items = launch_items() + [(x["offset"], x["item"]) for x in b.get("extra", [])]
+    items.sort(key=lambda x: x[0])
+    done = b.get("done", {})
+    return [(n, o, t, (launch + dt.timedelta(days=o)) if launch else None, done.get(t))
+            for n, (o, t) in enumerate(items, 1)]
+
+
+def cmd_book(argv):
+    argv = list(argv)
+    sub = argv.pop(0) if argv else ""
+    series, launch, formats = opt(argv, "--series"), opt(argv, "--launch"), opt(argv, "--formats")
+    platform, status = opt(argv, "--platform"), opt(argv, "--status")
+    d = books()
+    if sub == "add":
+        title = " ".join(argv).strip()
+        if not title:
+            raise Fail('kit-author book add "TITLE" [--series S] [--launch DATE]')
+        if any(b["title"].lower() == title.lower() for b in d["books"]):
+            raise Fail(f"{title} is already on the list")
+        if platform and platform.lower() not in ("kdp", "ingramspark", "both"):
+            raise Fail("--platform is kdp, ingramspark, or both")
+        b = {"title": title[:200], "series": (series or "").strip(), "status": "production" if launch else "writing",
+             "launch": parse_day(launch).isoformat() if launch else "",
+             "formats": [f.strip().lower() for f in (formats or "ebook,paperback").split(",") if f.strip()],
+             "platform": (platform or "kdp").lower(), "done": {}, "extra": []}
+        d["books"].append(b)
+        save_books(d)
+        print(f"Added {b['title']}" + (f" ({b['series']})" if b["series"] else "") +
+              (f", launching {fmt(b['launch'])}: kit-author launch \"{b['title'][:30]}\"" if b["launch"] else "."))
+        return 0
+    if sub == "set":
+        b = find_book(d, " ".join(argv))
+        if launch:
+            b["launch"] = parse_day(launch).isoformat()
+        if series is not None:
+            b["series"] = series.strip()
+        if status:
+            if status.lower() not in STATUSES:
+                raise Fail(f"--status is one of: {', '.join(STATUSES)}")
+            b["status"] = status.lower()
+        if formats:
+            b["formats"] = [f.strip().lower() for f in formats.split(",") if f.strip()]
+        save_books(d)
+        print(f"{b['title']}: {b['status']}" + (f", launching {fmt(b['launch'])}" if b.get("launch") else "") + ".")
+        return 0
+    raise Fail('kit-author book add "TITLE" ... | book set "TITLE" ...')
+
+
+def cmd_books(argv):
+    d = books()
+    if not d["books"]:
+        print('No books yet: kit-author book add "TITLE" --series S --launch DATE')
+        return 0
+    for b in sorted(d["books"], key=lambda b: (b.get("launch") or "9999", b["title"])):
+        cl = checklist(b)
+        done = sum(1 for x in cl if x[4])
+        print(f"{b['title']}" + (f" [{b['series']}]" if b.get("series") else "") + f": {b['status']}"
+              + (f", launch {fmt(b['launch'])}" if b.get("launch") else "") + f"; launch checklist {done} of {len(cl)}")
+    return 0
+
+
+def cmd_launch(argv):
+    argv = list(argv)
+    offset = opt(argv, "--offset")
+    d = books()
+    for verb in ("done", "undo", "add"):
+        if verb in argv:
+            i = argv.index(verb)
+            b = find_book(d, " ".join(argv[:i]))
+            rest = argv[i + 1:]
+            cl = checklist(b)
+            if verb == "add":
+                item = " ".join(rest).strip()
+                if not item or offset is None or not re.fullmatch(r"-?\d+", offset):
+                    raise Fail('kit-author launch "TITLE" add "ITEM" --offset -14 (days from the launch)')
+                b.setdefault("extra", []).append({"item": item[:200], "offset": int(offset)})
+                save_books(d)
+                print(f"Added to {b['title']}'s launch: {item} ({int(offset):+d} days).")
+                return 0
+            if not rest:
+                raise Fail(f'kit-author launch "TITLE" {verb} N...')
+            names = []
+            for n in rest:
+                if not n.isdigit() or not 1 <= int(n) <= len(cl):
+                    raise Fail(f"the checklist has items 1 to {len(cl)}")
+                item = cl[int(n) - 1][2]
+                if verb == "done":
+                    b.setdefault("done", {})[item] = today().isoformat()
+                else:
+                    b.get("done", {}).pop(item, None)
+                names.append(item)
+            save_books(d)
+            print(("Done: " if verb == "done" else "Not done: ") + "; ".join(names))
+            return 0
+    b = find_book(d, " ".join(argv))
+    print(f"Launch: {b['title']}" + (f", {fmt(b['launch'])}" if b.get("launch") else " (no launch date yet: kit-author "
+                                                                                       "book set TITLE --launch DATE)"))
+    for n, o, item, due, done in checklist(b):
+        mark = "x" if done else ("!" if due and due < today() else " ")
+        print(f"{n:>3}. [{mark}] {item}" + (f" ({fmt(due)}, {o:+d} days)" if due else f" ({o:+d} days)")
+              + (f" done {fmt(done)}" if done else ""))
+    return 0
+
+
+# ------------------------------------------------------------------ the series bible
+def bible_path(series):
+    return BIBLES / f"{slug(series)}.json"
+
+
+def bible(series):
+    d = jload(bible_path(series), {"series": series, "entries": []})
+    d.setdefault("entries", [])
+    return d
+
+
+def find_entry(d, name):
+    key = name.strip().lower()
+    return next((e for e in d["entries"] if e["name"].lower() == key or key in [a.lower() for a in e.get("aliases", [])]),
+                None)
+
+
+def cmd_bible(argv):
+    argv = list(argv)
+    if not argv:
+        have = sorted(p.stem for p in BIBLES.glob("*.json")) if BIBLES.is_dir() else []
+        print("Series bibles: " + (", ".join(have) if have else "none yet (kit-author bible SERIES add NAME ...)"))
+        return 0
+    series = argv.pop(0)
+    sub = argv.pop(0) if argv else "show"
+    d = bible(series)
+    if sub == "add":
+        kind = (opt(argv, "--kind", "character") or "").lower()
+        alias, facts, ages = opt(argv, "--alias"), many(argv, "--fact"), many(argv, "--age")
+        name = " ".join(argv).strip()
+        if not name:
+            raise Fail('kit-author bible SERIES add NAME [--kind character] [--alias A,B] [--fact "eyes=brown"]')
+        if kind not in KINDS:
+            raise Fail(f"--kind is one of: {', '.join(KINDS)}")
+        e = find_entry(d, name)
+        if not e:
+            e = {"name": name[:80], "kind": kind, "aliases": [], "facts": {}, "ages": {}}
+            d["entries"].append(e)
+        if alias:
+            e["aliases"] = sorted(set(e.get("aliases", [])) | {a.strip() for a in alias.split(",") if a.strip()})
+        for f in facts:
+            k, _, v = f.partition("=")
+            if not k.strip() or not v.strip():
+                raise Fail('--fact looks like "eyes=brown" or "father=Manoah"')
+            e["facts"][k.strip().lower()] = v.strip()
+        for a in ages:
+            k, _, v = a.partition("=")
+            if not v.strip().isdigit():
+                raise Fail('--age looks like "Book One=17"')
+            e["ages"][k.strip()] = int(v)
+        write(bible_path(series), json.dumps(d, indent=1, ensure_ascii=False) + "\n")
+        print(f"{series} bible: {e['name']} ({e['kind']})" + (f"; facts: {', '.join(f'{k}={v}' for k, v in e['facts'].items())}"
+                                                              if e["facts"] else "") + f". {len(d['entries'])} entries.")
+        return 0
+    if sub == "check":
+        return bible_check(series, d, argv)
+    if not d["entries"]:
+        print(f"No bible for {series} yet: kit-author bible {series} add NAME --kind character --fact ...")
+        return 0
+    for kind in KINDS:
+        es = [e for e in d["entries"] if e["kind"] == kind]
+        if es:
+            print(f"{kind.capitalize()}s:")
+            for e in sorted(es, key=lambda e: e["name"]):
+                bits = [f"{k}: {v}" for k, v in e["facts"].items()] + [f"age {v} in {k}" for k, v in e["ages"].items()]
+                print(f"  {e['name']}" + (f" (also {', '.join(e['aliases'])})" if e.get("aliases") else "")
+                      + (f": {'; '.join(bits)}" if bits else ""))
+    return 0
+
+
+def lev(a, b):
+    if a == b:
+        return 0
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def manuscript(path):
+    ext = path.suffix.lower()
+    if ext == ".docx":
+        sys.path.insert(0, str(SHARED))
+        import kit_doctext
+        return [(b.where or b.section or "", b.text) for b in kit_doctext.blocks(path)]
+    text = path.read_text(encoding="utf-8", errors="replace")
+    return [(f"paragraph {i}", p.strip()) for i, p in enumerate(re.split(r"\n\s*\n", text), 1) if p.strip()]
+
+
+def number(w):
+    w = w.lower()
+    if w.isdigit():
+        return int(w)
+    if "-" in w:
+        a, _, b = w.partition("-")
+        if a in WORDNUM and b in WORDNUM:
+            return WORDNUM[a] + WORDNUM[b]
+    return WORDNUM.get(w)
+
+
+def bible_check(series, d, argv):
+    argv = list(argv)
+    save_it = "--write" in argv
+    argv = [a for a in argv if a != "--write"]
+    files = [pathlib.Path(os.path.expanduser(a)) for a in argv] or [pathlib.Path(p) for p in d.get("files", [])]
+    if not files:
+        raise Fail(f"kit-author bible {series} check FILE... (the manuscripts: .docx, .md, or .txt)")
+    for f in files:
+        if not f.is_file():
+            raise Fail(f"no file {f}")
+    if not d["entries"]:
+        raise Fail(f"the {series} bible is empty: add its people and places first (kit-author bible {series} add ...)")
+    d["files"] = [str(f) for f in files]
+    write(bible_path(series), json.dumps(d, indent=1, ensure_ascii=False) + "\n")
+    known = {e["name"].lower(): e for e in d["entries"]}
+    accepted = {n.lower() for e in d["entries"] for n in [e["name"]] + e.get("aliases", [])}
+    english = set()
+    try:                                                # an ordinary word close to a name isn't a misspelling of it
+        english = {w.strip().lower() for w in open("/usr/share/dict/words", encoding="utf-8", errors="ignore")}
+    except OSError:
+        pass
+    variants, facts, ages, unknown = {}, [], {}, {}
+    common = common_words()
+    for f in files:
+        for where, text in manuscript(f):
+            loc = f"{f.name}, {where}" if where else f.name
+            for m in re.finditer(r"(?<![\w'])([A-Z][a-z]{2,})(?![\w'])", text):
+                w = m.group(1)
+                lw = w.lower()
+                if lw in accepted or w in common:
+                    continue
+                for e in d["entries"]:
+                    n = e["name"].split()[0]
+                    if len(n) < 4 or not n[0].isupper() or lw in english:
+                        continue
+                    dist = lev(lw, n.lower())
+                    if 0 < dist <= (1 if len(n) <= 6 else 2) and abs(len(w) - len(n)) <= 2:
+                        v = variants.setdefault((w, e["name"]), {"n": 0, "where": loc})
+                        v["n"] += 1
+                        break
+                else:
+                    before = text[max(0, m.start() - 2):m.start()]
+                    if m.start() > 0 and not re.search(r"[.!?\"“]\s*$", before):
+                        unknown[w] = unknown.get(w, 0) + 1
+            for e in d["entries"]:
+                names = [e["name"]] + e.get("aliases", [])
+                nrx = "|".join(re.escape(n) for n in names)
+                for key, val in e["facts"].items():
+                    if key not in ATTRS:
+                        continue
+                    arx = ATTRS[key]
+                    if key in ("eyes", "hair"):
+                        pat = rf"(?:\b(?:{nrx})(?:'s|’s)\s+(?:\w+\s+)?({'|'.join(COLORS)})\s+{arx}|\b(?:{nrx})(?:'s|’s)\s+{arx}\s+(?:were|was)\s+({'|'.join(COLORS)}))"
+                    else:
+                        pat = rf"(?:\b(?:{nrx})(?:'s|’s)\s+{arx},?\s+([A-Z][a-z]+)|\b([A-Z][a-z]+),\s+(?:the\s+)?{arx}\s+of\s+(?:{nrx})\b)"
+                    for fm in re.finditer(pat, text):
+                        said = next(g for g in fm.groups() if g)
+                        if said.lower() != val.lower().split()[0] and said.lower() not in val.lower():
+                            facts.append((e["name"], key, val, said, loc))
+                age_rx = rf"\b(?:{nrx})\b(?:,)?\s+(?:was|is|now|at|aged)\s+(?:only\s+|just\s+)?(\d{{1,3}}|[a-z]+(?:-[a-z]+)?)" \
+                         rf"(?:\s+years?)?(?:\s+old)?|(\d{{1,3}}|[a-z]+(?:-[a-z]+)?)-year-old\s+(?:{nrx})\b"
+                for am in re.finditer(age_rx, text, re.I):
+                    raw = am.group(1) or am.group(2)
+                    n = number(raw)
+                    tail = text[am.end():am.end() + 12].lower()
+                    if n is None or not (am.group(2) or "year" in am.group(0).lower() or tail.startswith((" year", ","))):
+                        continue
+                    ages.setdefault(e["name"], []).append((n, f.name, loc))
+    lines = [f"# Consistency check: {series}", "",
+             f"{len(files)} manuscript(s) against the bible's {len(d['entries'])} entries, {today():%d-%b-%Y}. "
+             "Words only, no model: check each before you change anything.", ""]
+    lines += ["## Spellings close to a name in the bible", ""]
+    if variants:
+        for (w, name), v in sorted(variants.items(), key=lambda x: -x[1]["n"]):
+            lines.append(f"- \"{w}\" ({v['n']} time{'s' if v['n'] != 1 else ''}, first in {v['where']}) looks like "
+                         f"{name}" + (f"; if it's meant, add it: kit-author bible {series} add \"{name}\" --alias {w}"))
+    else:
+        lines.append("- None.")
+    lines += ["", "## Facts the text contradicts", ""]
+    lines += [f"- {name}'s {key}: the bible says {val}; {where} says {said}" for name, key, val, said, where in facts] \
+        or ["- None found."]
+    lines += ["", "## Ages", ""]
+    any_age = False
+    for name, rows in sorted(ages.items()):
+        e = known.get(name.lower())
+        by_file = {}
+        for n, fname, loc in rows:
+            by_file.setdefault(fname, set()).add(n)
+        for fname, vals in by_file.items():
+            book_age = next((v for k, v in (e or {}).get("ages", {}).items() if k.lower() in fname.lower()), None)
+            if len(vals) > 1:
+                lines.append(f"- {name} in {fname}: the text gives {', '.join(str(v) for v in sorted(vals))}")
+                any_age = True
+            elif book_age is not None and book_age not in vals:
+                lines.append(f"- {name} in {fname}: the text says {vals.pop()}; the bible says {book_age}")
+                any_age = True
+        seq = [min(by_file[f.name]) for f in files if f.name in by_file]
+        if len(seq) > 1 and any(b < a for a, b in zip(seq, seq[1:])):
+            lines.append(f"- {name}: younger in a later manuscript ({' then '.join(str(x) for x in seq)}, in the order "
+                         "the files were given)")
+            any_age = True
+    if not any_age:
+        lines.append("- Nothing that disagrees.")
+    common_unknown = sorted(((w, n) for w, n in unknown.items() if n >= 3), key=lambda x: -x[1])[:15]
+    lines += ["", "## Names the text uses that the bible doesn't have", ""]
+    lines += [f"- {w} ({n} times)" for w, n in common_unknown] or ["- None used three times or more."]
+    report = "\n".join(lines) + "\n"
+    print(report, end="")
+    if save_it:
+        f = BIBLES / slug(series) / f"check-{today().isoformat()}.md"
+        write(f, report)
+        print(f"Saved author/bible/{slug(series)}/{f.name}")
+    return 0
+
+
+# ------------------------------------------------------------------ royalties
+def col_index(ref):
+    letters = re.match(r"[A-Z]+", ref or "A").group(0)
+    n = 0
+    for ch in letters:
+        n = n * 26 + ord(ch) - 64
+    return n - 1
+
+
+def xlsx_sheets(path):
+    """{sheet name: rows} from an .xlsx, standard library only."""
+    m = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+    r_ns = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+    with zipfile.ZipFile(path) as z:
+        names = z.namelist()
+        shared = []
+        if "xl/sharedStrings.xml" in names:
+            for si in ET.fromstring(z.read("xl/sharedStrings.xml")).iter(f"{m}si"):
+                shared.append("".join(t.text or "" for t in si.iter(f"{m}t")))
+        rels = {r.get("Id"): r.get("Target") for r in ET.fromstring(z.read("xl/_rels/workbook.xml.rels"))}
+        out = {}
+        for sh in ET.fromstring(z.read("xl/workbook.xml")).iter(f"{m}sheet"):
+            target = rels.get(sh.get(f"{r_ns}id"), "").lstrip("/")
+            target = target if target.startswith("xl/") else f"xl/{target}"
+            if target not in names:
+                continue
+            rows = []
+            for row in ET.fromstring(z.read(target)).iter(f"{m}row"):
+                vals = {}
+                for c in row.iter(f"{m}c"):
+                    t, v = c.get("t"), c.find(f"{m}v")
+                    if t == "s" and v is not None:
+                        val = shared[int(v.text)]
+                    elif t == "inlineStr":
+                        val = "".join(x.text or "" for x in c.iter(f"{m}t"))
+                    else:
+                        val = v.text if v is not None and v.text is not None else ""
+                    vals[col_index(c.get("r"))] = val
+                rows.append([vals.get(i, "") for i in range(max(vals) + 1)] if vals else [])
+            out[sh.get("name")] = rows
+    return out
+
+
+def as_month(v):
+    v = str(v or "").strip()
+    if re.fullmatch(r"\d{5}(?:\.\d+)?", v) and 20000 < float(v) < 80000:     # a spreadsheet date serial
+        return (dt.date(1899, 12, 30) + dt.timedelta(days=int(float(v)))).strftime("%Y-%m")
+    for f in ("%Y-%m-%d", "%Y-%m", "%m/%d/%Y", "%m/%Y", "%b %Y", "%B %Y", "%Y/%m/%d", "%d-%b-%Y", "%b-%y",
+              "%Y-%m-%d %H:%M:%S"):
+        try:
+            return dt.datetime.strptime(v, f).strftime("%Y-%m")
+        except ValueError:
+            pass
+    m = re.search(r"(\d{4})-(\d{2})", v)
+    return f"{m.group(1)}-{m.group(2)}" if m else ""
+
+
+def num(v):
+    s = str(v or "").replace(",", "").replace("$", "").strip()
+    if re.fullmatch(r"\(.*\)", s):
+        s = "-" + s[1:-1]
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def pick(head, *wants, avoid=()):
+    for w in wants:
+        for i, h in enumerate(head):
+            hl = h.lower()
+            if w in hl and not any(a in hl for a in avoid):
+                return i
+    return None
+
+
+def tables_of(path):
+    """[(sheet name, rows)] from a .csv or .xlsx report."""
+    if path.suffix.lower() == ".xlsx":
+        return list(xlsx_sheets(path).items())
+    text = path.read_text(encoding="utf-8-sig", errors="replace")
+    return [(path.stem, list(csv.reader(io.StringIO(text))))]
+
+
+COMBINED_SHEET = re.compile(r"combined|summary|total|overview|dashboard|\ball\b", re.I)
+ORDERS_SHEET = re.compile(r"\border", re.I)
+
+
+def parse_report(path, platform=None):
+    """(platform, rows). A workbook with a tab per format may also have a combined or summary tab, or order tabs
+    beside the royalty ones: those repeat the same sales, so they're left out when the per-format or royalty tabs
+    are there."""
+    sheets, seen_platform = [], platform
+    for sheet, rows in tables_of(path):
+        hi = next((i for i, r in enumerate(rows[:30]) if any("title" in str(c).lower() for c in r)
+                   and any(re.search(r"royalt|compensation|earning|units|qty|quantity|kenp", str(c), re.I) for c in r)),
+                  None)
+        if hi is None:
+            continue
+        head = [str(c).strip() for c in rows[hi]]
+        hl = " | ".join(head).lower()
+        plat = seen_platform or ("ingramspark" if re.search(r"compensation|net qty|ingram", hl) else "kdp")
+        seen_platform = plat
+        c_title = pick(head, "title")
+        c_month = pick(head, "royalty date", "period", "month", "date", "sale date")
+        c_units = pick(head, "net units", "net qty", "net quantity", "units sold", "quantity", "qty", "kenp read",
+                       "units", avoid=("refund", "free"))
+        c_money = pick(head, "publisher compensation", "royalty", "compensation", "earnings",
+                       avoid=("date", "type", "rate"))
+        c_fmt = pick(head, "format", "binding", "product type")
+        c_mkt = pick(head, "marketplace", "market", "country", "sales territory")
+        c_cur = pick(head, "currency")
+        if c_title is None or c_units is None:
+            continue
+        sheet_fmt = ("kenp pages" if "kenp" in sheet.lower() else "ebook" if re.search(r"e-?book|kindle", sheet, re.I)
+                     else "paperback" if "paperback" in sheet.lower() else "hardcover" if "hardcover" in sheet.lower()
+                     else "")
+        out = []
+        sheets.append((sheet, sheet_fmt, out))
+        for r in rows[hi + 1:]:
+            if not r or c_title >= len(r) or not str(r[c_title]).strip():
+                continue
+            cell = lambda c: r[c] if c is not None and c < len(r) else ""
+            units = num(cell(c_units))
+            if units is None:
+                continue
+            month = as_month(cell(c_month)) if c_month is not None else ""
+            raw = str(cell(c_fmt)).strip().lower()
+            fmt_ = ("ebook" if re.search(r"e-?book|kindle|digital", raw) else "paperback" if "paper" in raw else
+                    "hardcover" if "hard" in raw or "cloth" in raw else "kenp pages" if "kenp" in raw else
+                    sheet_fmt or raw or "unknown")
+            out.append({"platform": plat, "month": month or "unknown", "title": str(cell(c_title)).strip()[:200],
+                        "format": fmt_, "market": str(cell(c_mkt)).strip()[:40] or "all",
+                        "currency": (str(cell(c_cur)).strip().upper() or "USD")[:5], "units": units,
+                        "royalty": num(cell(c_money)) or 0.0})
+    used = [s for s in sheets if s[2]]
+    if any(f for _, f, _ in used):                  # per-format tabs: a combined or summary tab repeats them
+        used = [s for s in used if s[1] or not COMBINED_SHEET.search(s[0])]
+    if any("royalt" in n.lower() for n, _, _ in used):   # royalty tabs: the order tabs count the same sales
+        used = [s for s in used if not ORDERS_SHEET.search(s[0])]
+    out = [r for _, _, rs in used for r in rs]
+    if not out:
+        raise Fail("no royalty rows found: the report needs a title column and a units or royalty column")
+    return seen_platform, out
+
+
+def ledger():
+    d = jload(LEDGER, {"rows": [], "imports": []})
+    d.setdefault("rows", [])
+    d.setdefault("imports", [])
+    return d
+
+
+def cmd_royalties(argv):
+    argv = list(argv)
+    if argv[:1] == ["import"]:
+        argv.pop(0)
+        platform = opt(argv, "--platform")
+        if platform and platform.lower() not in ("kdp", "ingramspark"):
+            raise Fail("--platform is kdp or ingramspark")
+        if not argv:
+            raise Fail("kit-author royalties import FILE [--platform kdp|ingramspark]")
+        f = pathlib.Path(os.path.expanduser(argv[0]))
+        if not f.is_file():
+            raise Fail(f"no file {argv[0]}")
+        digest = hashlib.sha256(f.read_bytes()).hexdigest()
+        d = ledger()
+        if any(x["sha256"] == digest for x in d["imports"]):
+            raise Fail(f"{f.name} was imported already")
+        plat, rows = parse_report(f, platform.lower() if platform else None)
+        agg = {}
+        for r in rows:
+            k = (r["platform"], r["month"], r["title"], r["format"], r["market"], r["currency"])
+            a = agg.setdefault(k, {"units": 0.0, "royalty": 0.0})
+            a["units"] += r["units"]
+            a["royalty"] += r["royalty"]
+        months = {k[1] for k in agg}
+        before = len(d["rows"])
+        d["rows"] = [x for x in d["rows"] if not (x["platform"] == plat and x["month"] in months)]
+        replaced = before - len(d["rows"])
+        for (p, mo, t, fm, mk, cu), a in agg.items():
+            d["rows"].append({"platform": p, "month": mo, "title": t, "format": fm, "market": mk, "currency": cu,
+                              "units": round(a["units"], 2), "royalty": round(a["royalty"], 2)})
+        d["rows"].sort(key=lambda x: (x["month"], x["title"], x["format"]))
+        d["imports"].append({"file": f.name, "sha256": digest, "platform": plat, "months": sorted(months),
+                             "rows": len(agg), "at": dt.datetime.now().isoformat(timespec="minutes")})
+        write(LEDGER, json.dumps(d, indent=1, ensure_ascii=False) + "\n", private=True)
+        os.chmod(ROYAL, 0o700)
+        usd = sum(a["royalty"] for k, a in agg.items() if k[5] == "USD")
+        print(f"Imported {f.name} ({plat}): {len(agg)} total(s) for {', '.join(sorted(months))}; ${usd:,.2f} in USD"
+              + (f"; replaced {replaced} earlier total(s) for those months" if replaced else "") + ".")
+        return 0
+    year = int(opt(argv, "--year", str(today().year)))
+    as_html, deliver = "--html" in argv, "--deliver" in argv
+    d = ledger()
+    rows = [r for r in d["rows"] if r["month"].startswith(str(year))]
+    if not rows:
+        print(f"No royalties for {year} yet: kit-author royalties import FILE (a KDP or IngramSpark report)")
+        return 0
+    usd = [r for r in rows if r["currency"] == "USD"]
+    by_month, by_book, by_fmt = {}, {}, {}
+    for r in usd:
+        for dct, k in ((by_month, r["month"]), (by_book, r["title"]), (by_fmt, r["format"])):
+            a = dct.setdefault(k, [0.0, 0.0])
+            a[0] += r["units"]
+            a[1] += r["royalty"]
+    other = {}
+    for r in rows:
+        if r["currency"] != "USD":
+            other[r["currency"]] = other.get(r["currency"], 0.0) + r["royalty"]
+    total = sum(a[1] for a in by_month.values())
+    units = sum(a[0] for k, a in by_fmt.items() if k != "kenp pages")
+    lines = [f"Royalties, {year}: ${total:,.2f} on {units:,.0f} units (in USD; " + (
+        ", ".join(f"{v:,.2f} {k}" for k, v in sorted(other.items())) + " in other currencies)" if other else "no other currencies)")]
+    lines.append("By month: " + "; ".join(f"{dt.datetime.strptime(k, '%Y-%m'):%b} ${a[1]:,.2f} ({a[0]:,.0f})"
+                                          for k, a in sorted(by_month.items()) if k != "unknown"))
+    lines.append("By book: " + "; ".join(f"{k} ${a[1]:,.2f} ({a[0]:,.0f})" for k, a in
+                                         sorted(by_book.items(), key=lambda x: -x[1][1])))
+    lines.append("By format: " + "; ".join(f"{k} ${a[1]:,.2f} ({a[0]:,.0f})" for k, a in
+                                           sorted(by_fmt.items(), key=lambda x: -x[1][1])))
+    print("\n".join(lines))
+    if as_html or deliver:
+        f = ROYAL / f"dashboard-{year}.html"
+        write(f, dashboard_html(year, by_month, by_book, by_fmt, total, units, other), private=True)
+        print(f"Wrote author/royalties/{f.name}")
+        if deliver:
+            r = subprocess.run([sys.executable, str(SHARED / "bin" / "kit-library"), "deliver", str(f), "--kind", "other",
+                                "--sub", "Author", "--name", f"Royalties {year}", "--replace"], capture_output=True,
+                               text=True, timeout=900)
+            out = (r.stdout or r.stderr).strip()
+            print(out.splitlines()[-1] if out else "Delivered.")
+    return 0
+
+
+def dashboard_html(year, by_month, by_book, by_fmt, total, units, other):
+    months = [f"{year}-{m:02d}" for m in range(1, 13)]
+    vals = [by_month.get(m, [0, 0])[1] for m in months]
+    top = max(vals) or 1
+    bars = "".join(f'<g><rect x="{40 + i * 52}" y="{200 - 170 * v / top:.1f}" width="36" height="{170 * v / top:.1f}" '
+                   f'fill="#7a2e2e"><title>{dt.date(year, i + 1, 1):%B}: ${v:,.2f}</title></rect>'
+                   f'<text x="{58 + i * 52}" y="218" text-anchor="middle" font-size="11">{dt.date(year, i + 1, 1):%b}</text>'
+                   f'</g>' for i, v in enumerate(vals))
+
+    def table(title, dct):
+        rows = "".join(f"<tr><td>{html.escape(k)}</td><td>{a[0]:,.0f}</td><td>${a[1]:,.2f}</td></tr>"
+                       for k, a in sorted(dct.items(), key=lambda x: -x[1][1]))
+        return f"<h2>{title}</h2><table><tr><th></th><th>Units</th><th>Royalties</th></tr>{rows}</table>"
+    extra = ("<p>Other currencies: " + html.escape(", ".join(f"{v:,.2f} {k}" for k, v in sorted(other.items())))
+             + " (not converted).</p>") if other else ""
+    return f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>Royalties {year}</title><style>
+body{{font-family:Georgia,serif;max-width:760px;margin:2em auto;color:#2b1d14}}h1{{color:#7a2e2e}}
+table{{border-collapse:collapse;width:100%;margin-bottom:1.5em}}td,th{{border-bottom:1px solid #ddd;padding:4px 8px;text-align:right}}
+td:first-child,th:first-child{{text-align:left}}</style></head><body>
+<h1>Royalties, {year}</h1><p><b>${total:,.2f}</b> on {units:,.0f} units, in USD. Totals from the KDP and IngramSpark
+reports imported into Kit; nothing else is kept.</p>{extra}
+<svg viewBox="0 0 680 230" width="100%" role="img" aria-label="Royalties by month">{bars}</svg>
+{table("By book", by_book)}{table("By format", by_fmt)}
+<p style="color:#777">Made by kit-author on {today():%d-%b-%Y}.</p></body></html>
+"""
+
+
+# ------------------------------------------------------------------ overview and brief
+def cmd_overview(argv):
+    d = books()
+    coming = [b for b in d["books"] if b.get("launch") and b["launch"] >= (today() - dt.timedelta(days=30)).isoformat()]
+    for b in sorted(coming, key=lambda b: b["launch"]):
+        open_ = [x for x in checklist(b) if not x[4]]
+        nxt = open_[0] if open_ else None
+        print(f"Launch {fmt(b['launch'])}: {b['title']}" + (f"; next: {nxt[2]} ({fmt(nxt[3])})" if nxt and nxt[3] else
+                                                            "; the checklist is done"))
+    if not coming:
+        print('No launches coming: kit-author book add "TITLE" --launch DATE')
+    have = sorted(p.stem for p in BIBLES.glob("*.json")) if BIBLES.is_dir() else []
+    if have:
+        print("Series bibles: " + ", ".join(have))
+    last = (today().replace(day=1) - dt.timedelta(days=1)).strftime("%Y-%m")
+    rows = [r for r in ledger()["rows"] if r["month"] == last and r["currency"] == "USD"]
+    if rows:
+        print(f"Royalties, {dt.datetime.strptime(last, '%Y-%m'):%B}: ${sum(r['royalty'] for r in rows):,.2f} on "
+              f"{sum(r['units'] for r in rows if r['format'] != 'kenp pages'):,.0f} units")
+    return 0
+
+
+def cmd_brief(argv):
+    mode = argv[0] if argv and argv[0] in ("morning", "weekly") else "morning"
+    d = books()
+    lines = []
+    for b in d["books"]:
+        if not b.get("launch") or (b.get("status") == "launched"
+                                   and b["launch"] < (today() - dt.timedelta(days=31)).isoformat()):
+            continue
+        late, soon = [], []
+        for n, o, item, due, done in checklist(b):
+            if done or not due:
+                continue
+            if due < today() and (today() - due).days <= 30:
+                late.append((due, item))
+            elif 0 <= (due - today()).days <= 3:
+                soon.append((due, item))
+        lines += [f"Due {('today' if due == today() else fmt(due))} for {b['title']}: {item}" for due, item in soon]
+        if len(late) > 3:
+            lines.append(f"Overdue for {b['title']}: {len(late)} items, the oldest \"{late[0][1]}\" (was due "
+                         f"{fmt(late[0][0])}). kit-author launch \"{b['title'][:40]}\"")
+        else:
+            lines += [f"Overdue for {b['title']}: {item} (was due {fmt(due)})" for due, item in late]
+    if mode == "weekly":
+        soon = [b for b in d["books"] if b.get("launch") and 0 <= (dt.date.fromisoformat(b["launch"]) - today()).days <= 60]
+        for b in sorted(soon, key=lambda b: b["launch"]):
+            cl = checklist(b)
+            lines.append(f"Launching {fmt(b['launch'])}: {b['title']} (checklist {sum(1 for x in cl if x[4])} of {len(cl)})")
+        last = (today().replace(day=1) - dt.timedelta(days=1)).strftime("%Y-%m")
+        rows = [r for r in ledger()["rows"] if r["month"] == last and r["currency"] == "USD"]
+        if rows:
+            lines.append(f"Royalties, {dt.datetime.strptime(last, '%Y-%m'):%B}: ${sum(r['royalty'] for r in rows):,.2f} "
+                         f"(kit-author royalties)")
+    if lines:
+        print("Author (personal)")                  # "(personal)" keeps it out of OneDrive with PUBLISH_PERSONAL off
+        print("\n".join(lines))
+    return 0
+
+
+def main(argv):
+    cmds = {"book": cmd_book, "books": cmd_books, "launch": cmd_launch, "bible": cmd_bible, "royalties": cmd_royalties,
+            "brief": cmd_brief}
+    try:
+        if not argv:
+            return cmd_overview([])
+        if argv[0] in ("-h", "--help", "help"):
+            print(__doc__)
+            return 0
+        fn = cmds.get(argv[0])
+        if not fn:
+            print(__doc__.split("\n\n")[1])
+            return 2
+        return fn(list(argv[1:])) or 0
+    except Fail as e:
+        print(f"kit-author: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

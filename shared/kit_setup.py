@@ -81,6 +81,9 @@ ALLOW = [f"Read({K}/**)", f"Edit({K}/memory/**)", f"Edit({K}/QUEUE.md)", f"Edit(
          "Bash(kit-techdebt)", "Bash(kit-techdebt list)", "Bash(kit-techdebt list *)", "Bash(kit-techdebt show *)",
          "Bash(kit-techdebt due)", "Bash(kit-techdebt due *)", "Bash(kit-techdebt month)", "Bash(kit-techdebt month *)",
          "Bash(kit-techdebt brief)", "Bash(kit-techdebt brief *)",
+         # The author's desk: books, launch checklists, series bibles, and royalty totals, all in Kit's own author/
+         # folder (and Kit Output with --deliver); nothing at KDP or IngramSpark changes.
+         "Bash(kit-author)", "Bash(kit-author *)",
          # The review loop's plan only reads (it prints the steps, the agent commands, and the cost), and so do its
          # readiness score and status.
          "Bash(kit-review-loop plan *)", "Bash(kit-review-loop score *)", "Bash(kit-review-loop status)",

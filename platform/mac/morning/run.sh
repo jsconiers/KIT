@@ -338,6 +338,15 @@ if [ "$MODE" = "morning" ] || [ "$MODE" = "weekly" ]; then
       > briefs/extra-feedback.txt 2>> "$LOG" || rm -f briefs/extra-feedback.txt
     [ -s briefs/extra-feedback.txt ] || rm -f briefs/extra-feedback.txt
   fi
+  # The author's desk (kit-author brief), when there are books or royalties on file: launch tasks due in the next
+  # three days or overdue; the weekly review adds launches in the next 60 days and last month's royalties. Personal:
+  # titled "(personal)", never [work], no "Text:" line. No model call.
+  if { [ -f "$KIT/author/books.json" ] || [ -f "$KIT/author/royalties/ledger.json" ]; } \
+     && [ -f "$KIT/.install/shared/bin/kit-author" ]; then
+    perl -e 'alarm shift; exec @ARGV' 60 python3 "$KIT/.install/shared/bin/kit-author" brief "$MODE" \
+      > briefs/extra-author.txt 2>> "$LOG" || rm -f briefs/extra-author.txt
+    [ -s briefs/extra-author.txt ] || rm -f briefs/extra-author.txt
+  fi
   for f in briefs/dates.txt briefs/renewals.txt briefs/renewals-missing.txt; do [ -s "$f" ] || rm -f "$f"; done
 fi
 PROMPT_TEXT=$(sed "s/{{OWNER}}/${OWNER_NAME:-the owner}/g" "$PROMPT")

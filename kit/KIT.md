@@ -205,6 +205,15 @@ to the review board or a vendor, `kit-signoff check PROJECT FILE` says whether i
 {{OWNER}}'s 0DTE trading makes and loses money and which of his rules he breaks most. Personal; never [work].
 Report what it says; don't advise trades.
 
+**Author's desk (`author/`).** If {{OWNER}} publishes books, `kit-author` keeps each launch on a dated checklist
+(90 days before to 30 after: `kit-author launch "TITLE"`, with `done N` as he finishes items; his own checklist, if
+he keeps one, is `author/launch-checklist.json`), a bible for each series (characters, places, and their facts;
+`kit-author bible SERIES check FILE...` finds names spelled close to one in it and facts a manuscript contradicts),
+and the royalties from KDP and IngramSpark reports (`kit-author royalties import FILE`, totals by month, book, and
+format; `--html` charts them). The brief lists launch tasks due; the weekly review adds launches in the next 60 days
+and last month's royalties. Kit never publishes or changes anything at KDP or IngramSpark, and royalties never go in
+a text. Personal; never [work].
+
 **Consistency checks (`kit-diagtext`, `kit-dedupe`, `kit-facts`).** Before a draft goes to review, `kit-diagtext PROJECT`
 finds where the diagrams and the text disagree (versions, ports, counts, missing components), and `kit-dedupe FILE`
 finds repeated statements and figures that disagree, with the cuts to make. Agreed numbers live in each project's

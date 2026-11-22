@@ -121,6 +121,8 @@ jobs:
           bash tests/test_stakeholders.sh
           python3 tests/test_recognition.py
           python3 tests/test_gifts.py
+      - name: Author's desk tests (launch checklist, series bible check, royalty reports)
+        run: python3 tests/test_author.py
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -188,6 +190,8 @@ jobs:
         run: python tests/test_gifts.py
       - name: Recognition tests on Windows
         run: python tests/test_recognition.py
+      - name: Author's desk tests on Windows
+        run: python tests/test_author.py
       - name: Review rehearsal tests on Windows
         run: python tests/test_rehearse.py
       # python-docx is pinned; check it for advisories before changing the version.

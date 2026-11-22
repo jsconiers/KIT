@@ -613,6 +613,17 @@ if ($Mode -eq "morning" -or $Mode -eq "weekly") {
         $frc = Invoke-KitPy $kitFeedback @("brief", $Mode) 60 $fbTxt
         if ($frc -ne 0 -or -not (Test-NonEmpty $fbTxt)) { Remove-Item -LiteralPath $fbTxt -Force -ErrorAction SilentlyContinue }
     }
+    # The author's desk (kit-author brief), when there are books or royalties on file: launch tasks due in the next
+    # three days or overdue; the weekly review adds launches in the next 60 days and last month's royalties. Personal:
+    # titled "(personal)", never [work], no "Text:" line. No model call.
+    $kitAuthor = Join-Path $binDir "kit-author"
+    $hasBooks = (Test-Path -LiteralPath (Join-Path $KitHome "author\books.json")) -or
+                (Test-Path -LiteralPath (Join-Path $KitHome "author\royalties\ledger.json"))
+    if ($hasBooks -and (Test-Path -LiteralPath $kitAuthor)) {
+        $authorTxt = Join-Path $briefsDir "extra-author.txt"
+        $arc = Invoke-KitPy $kitAuthor @("brief", $Mode) 60 $authorTxt
+        if ($arc -ne 0 -or -not (Test-NonEmpty $authorTxt)) { Remove-Item -LiteralPath $authorTxt -Force -ErrorAction SilentlyContinue }
+    }
     foreach ($f in @($datesTxt, $renewTxt, $missingTxt)) {
         if (-not (Test-NonEmpty $f)) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
     }

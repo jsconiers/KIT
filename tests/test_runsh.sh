@@ -316,6 +316,20 @@ fresh; run weekly
 grep -q "args: brief weekly" "$KIT/briefs/extra-feedback.txt" 2>/dev/null \
   && ok "feedback: the weekly review gets kit-feedback brief weekly" || bad "feedback in the weekly review"
 rm -rf "$KIT/feedback" "$KIT/.install/shared/bin/kit-feedback"
+
+# ---- the author's desk, when there are books on file -------------------------------------------------------
+cat > "$KIT/.install/shared/bin/kit-author" <<'KA'
+import sys
+print("Author (personal)")
+print("args: " + " ".join(sys.argv[1:]))
+KA
+fresh; run morning
+[ ! -f "$KIT/briefs/extra-author.txt" ] && ok "author: nothing without books" || bad "author without books"
+mkdir -p "$KIT/author"; echo '{"books": []}' > "$KIT/author/books.json"
+fresh; run weekly
+grep -q "args: brief weekly" "$KIT/briefs/extra-author.txt" 2>/dev/null \
+  && ok "author: the weekly review gets kit-author brief weekly" || bad "author in the weekly review"
+rm -rf "$KIT/author" "$KIT/.install/shared/bin/kit-author"
 rm -f "$KIT/.install/shared/bin/kit-ppmx"
 
 # ---- Monthly architecture digest on the first weekly review of the month ---------------------------------------------

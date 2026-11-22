@@ -341,6 +341,14 @@ starts the register (`tech-debt.md` in the radar folder, from the register templ
 and accepted debt due a review (`TECH_DEBT_BRIEF="off"` turns that off), and the digest's Technical debt
 section counts what moved in the month.
 
+**Author's desk.** `kit-author book add "TITLE" --series S --launch DATE` puts a book on the list with its dated
+launch checklist (`kit-author launch "TITLE"`); to use your own checklist, save it as `author/launch-checklist.json`
+in Kit's folder (a list of `[days from launch, "item"]`). `kit-author bible SERIES add NAME --fact "eyes=brown"`
+builds a series bible, and `kit-author bible SERIES check FILE...` reads the manuscripts against it; list words your
+books use often in `AUTHOR_COMMON_WORDS` so the check doesn't take them for names. `kit-author royalties import FILE`
+reads a KDP or IngramSpark report. Once there's a book or a report, the brief and the weekly review carry its lines,
+as personal ones.
+
 The red team and threat modeler need no setup beyond `standards.md` and `compliance.md`; name a
 team copy of their templates under "Design review templates" in `standards.md`. They and the standards
 checker save each note in their own project folder (`red-team/`, `threat-model/`, `standards/`) and a

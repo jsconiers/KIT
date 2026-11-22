@@ -6,7 +6,7 @@ how to start. For depth, see the [design guide](DESIGN-GUIDE.md); for installing
 
 | | |
 |---|---|
-| Describes | Kit 1.8.2 |
+| Describes | Kit 1.8.3 |
 | Date | 22-Nov-2026 |
 | Audience | Architects, team leads, and reviewers deciding whether to adopt Kit |
 | Licence | All rights reserved; see [LICENSE](../LICENSE) |
@@ -65,7 +65,7 @@ them.)
 | Estate watch | End-of-support warnings from a configuration-management export, a technology radar, a technical debt register ranked by risk, end of support, waivers, and target dates, and a draft roadmap |
 | Portfolio | PPM Express reads, a weekly portfolio pulse, and meeting actions proposed as tasks, each change made only on the owner's yes |
 | The day | Meeting prep packs, inbox triage suggestions, mail awaiting a reply, 1:1 prep, accomplishments, self-evaluation and 360 feedback drafts, a time-off pack (what will slip, out-of-office drafts, the handoff), calendar holds as files to open, meeting-load audits, important dates with a gift planner (order-by dates, ideas, and budgets), keep-in-touch reminders, and a private feedback log with recognition nudges |
-| Personal admin | Formal letters from draft to reply (the letters desk), an expiry list for logins, certificates, and renewals, and a document library with full-text search |
+| Personal admin | Formal letters from draft to reply (the letters desk), an expiry list for logins, certificates, and renewals, a document library with full-text search, and an author's desk for book launches, series bibles, and royalties |
 | Team | Sharing selected records between Kits, a team workload view, an expertise finder, a team coverage map, and agents and templates packaged as Claude Code plugins |
 
 ## 4. The staff

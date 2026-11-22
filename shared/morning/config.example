@@ -277,6 +277,11 @@ TEAMMAP_COVERAGE=""
 RECOGNIZE_AFTER_DAYS="7"
 RECOGNIZE_EVERY_DAYS="30"
 
+# The author's desk (kit-author): AUTHOR_COMMON_WORDS lists capitalized words your books use often that the series
+# consistency check should never count as a name it doesn't know (separated by spaces or commas). Your own launch
+# checklist, if you want one, is author/launch-checklist.json in Kit's folder. The brief's author lines are personal.
+AUTHOR_COMMON_WORDS=""
+
 # Phone and remote access, phase 1 (shared/kit_inbox.py). PHONE_APPROVALS adds a single-use code to
 # each delivered work list and brief for approving it from Kit Inbox (low-tier actions only).
 # ONEDRIVE_PUBLISH_DIR publishes the brief and a work summary page to a folder inside your
